@@ -1,0 +1,11 @@
+# dsh-draw2code bundle layer — applied when a profile lists this bundle
+# (package.json declares `dsh.bundle.patch` pointing at this file).
+#
+# The row is a bare plugin by package name: the node half (exports ".") runs
+# in the host process (workspace-gated scene file store + /api/draw2code/*
+# routes + agent tools), and the `dsh.client` declaration in package.json makes
+# the browser half (exports "./client", served at /plugins/ui-draw2code/client.js)
+# load in the web GUI and mount the right-sidebar Excalidraw canvas.
+- insert:
+    - id: ui-draw2code
+      name: dsh-draw2code
