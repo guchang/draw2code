@@ -49,12 +49,21 @@ Vibe Coding 很容易从一句模糊需求直接跳到代码，结果往往是�
 # 1. 安装右侧栏基础插件
 dsh plugin --profile web add dsh-better-sidebar
 
-# 2. 安装 Draw2Code
-dsh plugin --profile web add github:guchang/draw2code
+# 2. 安装 Draw2Code 稳定版
+dsh plugin --profile web add github:guchang/draw2code#v0.1.0
 
 # 3. 重启 dsh web；如果已经在运行，请先停止旧进程再启动
 dsh web
 ```
+
+如果是第一次初始化 DSH web profile，pnpm 可能会先暂停 `node-pty` 的原生构建，并在 `$DSH_HOME/profiles/web/pnpm-workspace.yaml`（默认 `~/.dsh/profiles/web/pnpm-workspace.yaml`）写入待确认项。按提示把它设为允许后重跑安装命令：
+
+```yaml
+allowBuilds:
+  node-pty: true
+```
+
+这是 DSH 基础运行时的首次构建授权，不是 Draw2Code 额外执行的安装脚本。
 
 刷新 DSH 页面后，在右侧栏的 `+` 菜单中选择“画码”。随后可以直接在对话中说：
 

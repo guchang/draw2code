@@ -33,9 +33,18 @@ Tested host and browser bundles are committed, so end users do not need to build
 
 ```bash
 dsh plugin --profile web add dsh-better-sidebar
-dsh plugin --profile web add github:guchang/draw2code
+dsh plugin --profile web add github:guchang/draw2code#v0.1.0
 dsh web
 ```
+
+On a brand-new DSH web profile, pnpm may pause the native `node-pty` build and add a pending entry to `$DSH_HOME/profiles/web/pnpm-workspace.yaml` (normally `~/.dsh/profiles/web/pnpm-workspace.yaml`). Allow that DSH runtime dependency, then rerun the install command:
+
+```yaml
+allowBuilds:
+  node-pty: true
+```
+
+This authorizes a first-party DSH runtime build; Draw2Code itself does not run an install script.
 
 Restart an existing `dsh web` process before the last command. Refresh the page, open the right-sidebar `+` menu, and choose **画码**.
 
