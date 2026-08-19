@@ -250,6 +250,35 @@ test('concurrent writes from the same revision allow only one winner', async () 
   assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'conflict').length, 11)
 })
 
+test('element byte limits include multibyte product copy', async () => {
+  const { root, store } = await makeStore()
+  const result = await store.write(root, 'element-byte-cap', {
+    elements: [{
+      id: 'oversized-copy',
+      type: 'rectangle',
+      customData: { mockData: '用户任务'.repeat(2300) },
+    }],
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bad-scene')
+  assert.match(result.error.message, /exceeds 16384 bytes/)
+})
+
+test('scene byte limits include multibyte product copy', async () => {
+  const { root, store } = await makeStore()
+  const result = await store.write(root, 'scene-byte-cap', {
+    elements: Array.from({ length: 45 }, (_, index) => ({
+      id: `mock-card-${index}`,
+      type: 'rectangle',
+      customData: { mockData: '待办事项'.repeat(1000) },
+    })),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'too-large')
+})
+
 test('draw2code_update still asks for confirmation on a manual edit conflict', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)

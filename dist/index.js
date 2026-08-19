@@ -216,7 +216,7 @@ function normalizeElement(input) {
   for (const [key, value] of Object.entries(el)) {
     if (!(key in out)) out[key] = value;
   }
-  if (JSON.stringify(out).length > MAX_ELEMENT_BYTES) {
+  if (Buffer.byteLength(JSON.stringify(out), "utf8") > MAX_ELEMENT_BYTES) {
     throw new Error(`element ${id} exceeds ${MAX_ELEMENT_BYTES} bytes`);
   }
   return out;
@@ -763,7 +763,7 @@ var SceneStore = class {
       return err("bad-scene", error2 instanceof Error ? error2.message : String(error2));
     }
     const json = JSON.stringify(scene, null, 2);
-    if (json.length > MAX_SCENE_BYTES) {
+    if (Buffer.byteLength(json, "utf8") > MAX_SCENE_BYTES) {
       return err("too-large", `scene exceeds ${MAX_SCENE_BYTES} bytes`);
     }
     const path = await this.scenePath(gated.value, named.value);
