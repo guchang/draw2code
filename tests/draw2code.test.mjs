@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
-import { ProjectStore, SceneStore, draw2codeCreateTool, draw2codeGenerateTool, draw2codeUpdateTool } from '../dist/index.js'
+import { ProjectStore, SceneStore, draw2codeCreateTool, draw2codeGenerateTool, draw2codeReadTool, draw2codeUpdateTool } from '../dist/index.js'
 
 const roots = []
 let sync
@@ -979,6 +979,25 @@ test('draw2code_update applies restrained semantic colors without overriding exp
     [byId.get('custom-list').strokeColor, byId.get('custom-list').backgroundColor],
     ['#123456', '#abcdef'],
   )
+})
+
+test('draw2code_read caps multibyte element payloads by UTF-8 bytes', async () => {
+  const { root, store } = await makeStore()
+  const written = await store.write(root, 'read-payload-cap', {
+    elements: Array.from({ length: 14 }, (_, index) => ({
+      id: `card-${index}`,
+      type: 'rectangle',
+      customData: { mockData: '用户任务'.repeat(750) },
+    })),
+  })
+  assert.equal(written.ok, true)
+
+  const result = await draw2codeReadTool(store).execute({ root, name: 'read-payload-cap' }, {})
+
+  assert.equal(result.elementCount, 14)
+  assert.equal(result.elements.length, 1)
+  assert.equal(result.elements[0].id, '__too_large__')
+  assert.match(result.elements[0].text, /UTF-8 bytes/)
 })
 
 test('draw2code_generate carries existing prototype quality warnings forward', async () => {

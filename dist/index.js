@@ -2954,7 +2954,8 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
       const { rev, scene } = result.value;
       const summary = scene.elements.map(describeElement).join("\n");
       const elementsJson = JSON.stringify(scene.elements);
-      const payload = elementsJson.length <= MAX_ELEMENTS_JSON ? scene.elements : [{ id: "__too_large__", type: "text", text: `elements JSON is ${elementsJson.length} bytes (> ${MAX_ELEMENTS_JSON}); read the file directly instead` }];
+      const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
+      const payload = elementsBytes <= MAX_ELEMENTS_JSON ? scene.elements : [{ id: "__too_large__", type: "text", text: `elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); read the file directly instead` }];
       return {
         rev,
         board: target.name,
@@ -3448,7 +3449,8 @@ async function generationPayload(store, root, draft) {
   if (!existing.ok) return generateError(existing.error.code, existing.error.message, draft);
   const summary = scope.elements.map(describeElement).join("\n");
   const elementsJson = JSON.stringify(scope.elements);
-  const payload = elementsJson.length <= MAX_ELEMENTS_JSON ? scope.elements : [{ id: "__too_large__", type: "text", text: `scoped elements JSON is ${elementsJson.length} bytes (> ${MAX_ELEMENTS_JSON}); draw2code_read the board instead` }];
+  const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
+  const payload = elementsBytes <= MAX_ELEMENTS_JSON ? scope.elements : [{ id: "__too_large__", type: "text", text: `scoped elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); draw2code_read the board instead` }];
   const quality = inspectPrototypeLayout(scope.elements);
   const layoutIssues = [...quality.errors, ...quality.warnings];
   const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, draft.visualDirection ?? "\u7B80\u6D01\u73B0\u4EE3") + (layoutIssues.length > 0 ? `
