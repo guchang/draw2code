@@ -35,7 +35,7 @@ Tested host and browser bundles are committed, so end users do not need to build
 
 ```bash
 dsh plugin --profile web add dsh-better-sidebar
-dsh plugin --profile web add github:guchang/draw2code#v0.1.1
+dsh plugin --profile web add github:guchang/draw2code#v0.1.2
 dsh web
 ```
 

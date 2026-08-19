@@ -1,6 +1,6 @@
 {
   "name": "dsh-draw2code",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Human-AI collaborative prototyping for DeepSeek Harness, from product clarification to editable Excalidraw wireframes and verified frontend generation.",
   "type": "module",
   "main": "dist/index.js",
