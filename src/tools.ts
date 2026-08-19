@@ -225,6 +225,7 @@ function layoutFocusIds(ops: ParsedOp[]): Set<string> | undefined {
   const ids = new Set<string>()
   for (const op of ops) {
     if (op.op === 'upsert' && op.elementId !== undefined) ids.add(op.elementId)
+    if (op.op === 'delete' && op.elementId !== undefined) ids.add(op.elementId)
   }
   return ids.size > 0 ? ids : undefined
 }

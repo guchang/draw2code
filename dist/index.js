@@ -2603,6 +2603,7 @@ function layoutFocusIds(ops) {
   const ids = /* @__PURE__ */ new Set();
   for (const op of ops) {
     if (op.op === "upsert" && op.elementId !== void 0) ids.add(op.elementId);
+    if (op.op === "delete" && op.elementId !== void 0) ids.add(op.elementId);
   }
   return ids.size > 0 ? ids : void 0;
 }

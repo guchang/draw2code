@@ -628,6 +628,28 @@ test('draw2code_update rejects invisible labels placed on a shape', async () => 
   )
 })
 
+test('draw2code_update delete checks only the changed scope', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'delete-scope', {
+    elements: [
+      { id: 'legacy-invalid', type: 'rectangle', text: '旧画板里的不可见文字', x: 20, y: 20, width: 180, height: 60 },
+      { id: 'remove-me', type: 'rectangle', x: 20, y: 120, width: 180, height: 60 },
+    ],
+  })
+
+  const result = await draw2codeUpdateTool(store).execute({
+    root,
+    name: 'delete-scope',
+    safeMode: false,
+    ops: [{ op: 'delete', id: 'remove-me' }],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'delete-scope')
+  assert.equal(read.ok, true)
+  assert.deepEqual(read.value.scene.elements.map((element) => element.id), ['legacy-invalid'])
+})
+
 test('draw2code_update anchors a semantic bottom navigation to the frame safe area', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
