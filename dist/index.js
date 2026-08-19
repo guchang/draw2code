@@ -3341,7 +3341,7 @@ function briefFor(draft, existingPages) {
   return {
     board: draft.board,
     selectedPages: draft.selectedFrames,
-    relatedPageRecommendations: [],
+    relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name2) => !draft.selectedFrames.includes(name2)),
     pageChanges: existingPages.includes("index.html") ? "\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\uFF0C\u672A\u9009\u62E9\u9875\u9762\u4FDD\u6301\u4E0D\u53D8" : "\u9996\u6B21\u751F\u6210\u6240\u9009\u9875\u9762",
     visualDirection: draft.visualDirection,
     device: draft.device,
@@ -3586,6 +3586,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
           updatedAt: now2,
           currentQuestion: pageScopeQuestion(frames, recommended, recommendationReasons),
           selectedFrames: [],
+          recommendedFrames: [...new Set(recommended)],
           visualDirection: args.styleNote?.trim() || deferredStyle || null,
           inheritedVisualDirection: inherited,
           device: null,

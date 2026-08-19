@@ -853,6 +853,7 @@ interface GenerateDraft {
   updatedAt: number
   currentQuestion: GenerateQuestion | null
   selectedFrames: string[]
+  recommendedFrames?: string[]
   visualDirection: string | null
   inheritedVisualDirection: string | null
   device: string | null
@@ -1160,7 +1161,7 @@ function briefFor(draft: GenerateDraft, existingPages: string[]): Record<string,
   return {
     board: draft.board,
     selectedPages: draft.selectedFrames,
-    relatedPageRecommendations: [],
+    relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name) => !draft.selectedFrames.includes(name)),
     pageChanges: existingPages.includes('index.html') ? '只更新所选页面，未选择页面保持不变' : '首次生成所选页面',
     visualDirection: draft.visualDirection,
     device: draft.device,
@@ -1422,6 +1423,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           updatedAt: now,
           currentQuestion: pageScopeQuestion(frames, recommended, recommendationReasons),
           selectedFrames: [],
+          recommendedFrames: [...new Set(recommended)],
           visualDirection: args.styleNote?.trim() || deferredStyle || null,
           inheritedVisualDirection: inherited,
           device: null,

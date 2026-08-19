@@ -1102,6 +1102,39 @@ test('draw2code_generate starts with an explicit page-scope choice instead of ge
   assert.equal(result.instructions, undefined)
 })
 
+test('draw2code_generate keeps unselected connected pages in the final brief', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'generate-related-pages', {
+    elements: [
+      { id: 'login', type: 'frame', name: '登录页', x: 0, y: 0, width: 420, height: 860 },
+      { id: 'login-title', type: 'text', text: '手机号登录', frameId: 'login', x: 24, y: 80, width: 200, height: 32 },
+      { id: 'register', type: 'frame', name: '注册页', x: 460, y: 0, width: 420, height: 860 },
+      { id: 'register-title', type: 'text', text: '创建账号', frameId: 'register', x: 484, y: 80, width: 200, height: 32 },
+      { id: 'login-to-register', type: 'arrow', x: 420, y: 400, width: 40, height: 0, points: [[0, 0], [40, 0]] },
+    ],
+  })
+
+  const tool = draw2codeGenerateTool(store)
+  const started = await tool.execute({
+    root,
+    action: 'start',
+    name: 'generate-related-pages',
+    frames: ['登录页'],
+    styleNote: '简洁现代',
+  }, {})
+  const ready = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    questionId: 'page-scope',
+    values: ['登录页'],
+  }, {})
+
+  assert.equal(ready.status, 'ready')
+  assert.deepEqual(ready.brief.relatedPageRecommendations, ['注册页'])
+})
+
 test('draw2code_generate resumes choices, confirms once, and refuses completion without real preview evidence', async () => {
   const { root, store } = await makeStore()
   await store.write(root, 'generate-flow', {
