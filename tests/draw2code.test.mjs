@@ -250,6 +250,29 @@ test('concurrent writes from the same revision allow only one winner', async () 
   assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'conflict').length, 11)
 })
 
+test('concurrent creates of the same board allow only one winner', async () => {
+  const { root, store } = await makeStore()
+  const attempts = await Promise.all(Array.from({ length: 12 }, () => store.create(root, 'create-race')))
+
+  assert.equal(attempts.filter((result) => result.ok).length, 1)
+  assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'exists').length, 11)
+})
+
+test('concurrent first updates do not overwrite each other silently', async () => {
+  const { root, store } = await makeStore()
+  const attempts = await Promise.all(Array.from({ length: 12 }, (_, index) => store.applyOps(
+    root,
+    'first-update-race',
+    [{ op: 'upsert', element: { id: `candidate-${index}`, type: 'rectangle' } }],
+  )))
+
+  assert.equal(attempts.filter((result) => result.ok).length, 1)
+  assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'conflict').length, 11)
+  const read = await store.read(root, 'first-update-race')
+  assert.equal(read.ok, true)
+  assert.equal(read.value.scene.elements.length, 1)
+})
+
 test('element byte limits include multibyte product copy', async () => {
   const { root, store } = await makeStore()
   const result = await store.write(root, 'element-byte-cap', {

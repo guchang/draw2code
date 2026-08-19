@@ -996,7 +996,10 @@ export class SceneStore {
     const read = await this.read(root, name)
     if (read.ok) return err('exists', `scene "${name}" already exists`)
     if (read.error.code !== 'not-found') return read
-    return this.write(root, name, emptyScene())
+    const written = await this.write(root, name, emptyScene(), 0)
+    return !written.ok && written.error.code === 'conflict'
+      ? err('exists', `scene "${name}" already exists`)
+      : written
   }
 
   /** Delete one scene. */
@@ -1041,6 +1044,9 @@ export class SceneStore {
     } else {
       return current
     }
+    const expectedBaseRev = typeof baseRev === 'number'
+      ? baseRev
+      : current.ok ? current.value.rev : 0
 
     let applied = 0
     const alignmentFocusIds = new Set<string>()
@@ -1107,7 +1113,7 @@ export class SceneStore {
         alignWholeScene ? undefined : alignmentFocusIds,
       ),
     }
-    const written = await this.write(root, name, scene, baseRev, 'agent')
+    const written = await this.write(root, name, scene, expectedBaseRev, 'agent')
     if (!written.ok) return written
     return { ok: true, value: { ...written.value, applied } }
   }

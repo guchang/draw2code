@@ -794,7 +794,8 @@ var SceneStore = class {
     const read = await this.read(root, name2);
     if (read.ok) return err("exists", `scene "${name2}" already exists`);
     if (read.error.code !== "not-found") return read;
-    return this.write(root, name2, emptyScene());
+    const written = await this.write(root, name2, emptyScene(), 0);
+    return !written.ok && written.error.code === "conflict" ? err("exists", `scene "${name2}" already exists`) : written;
   }
   /** Delete one scene. */
   async remove(root, name2) {
@@ -836,6 +837,7 @@ var SceneStore = class {
     } else {
       return current;
     }
+    const expectedBaseRev = typeof baseRev === "number" ? baseRev : current.ok ? current.value.rev : 0;
     let applied = 0;
     const alignmentFocusIds = /* @__PURE__ */ new Set();
     let alignWholeScene = false;
@@ -892,7 +894,7 @@ var SceneStore = class {
         alignWholeScene ? void 0 : alignmentFocusIds
       )
     };
-    const written = await this.write(root, name2, scene, baseRev, "agent");
+    const written = await this.write(root, name2, scene, expectedBaseRev, "agent");
     if (!written.ok) return written;
     return { ok: true, value: { ...written.value, applied } };
   }
