@@ -15,7 +15,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { formatLayoutIssues, inspectPrototypeLayout } from './layout.ts'
 import { type ProjectStore } from './project-store.ts'
-import { type SceneStore } from './scene-store.ts'
+import { normalizeElement, reconcileBoundTextBindings, semanticTextAlignment, type SceneStore } from './scene-store.ts'
 
 function text(value: string): ContentBlock[] {
   return [{ type: 'text', text: value }]
@@ -104,7 +104,21 @@ function parseUpdateOps(input: unknown): ParsedOp[] {
     if (typeof raw !== 'object' || raw === null) throw new Error(`${where} must be an object, got ${typeName(raw)}`)
     const op = raw as Record<string, unknown>
     const kind = str(op.op)
+    if (kind === '' && typeof op.element === 'object' && op.element !== null) {
+      const element = op.element as Record<string, unknown>
+      const elementId = str(element.id)
+      if (elementId === '') throw new Error(`${where}.element.id missing or not a string: every element needs a unique non-empty id`)
+      return { op: 'upsert', elementId, element }
+    }
+    if (kind === '' && str(op.id) !== '' && str(op.type) !== '') {
+      return { op: 'upsert', elementId: str(op.id), element: op }
+    }
     if (kind === 'upsert') {
+      if ((op.element === undefined || op.element === null) && str(op.id) !== '' && str(op.type) !== '') {
+        const element = { ...op }
+        delete element.op
+        return { op: 'upsert', elementId: str(element.id), element }
+      }
       if (typeof op.element !== 'object' || op.element === null) {
         throw new Error(`${where} is "upsert" but missing its element: use {"op":"upsert","element":{"id":"x","type":"rectangle",...}}`)
       }
@@ -114,7 +128,10 @@ function parseUpdateOps(input: unknown): ParsedOp[] {
       return { op: 'upsert', elementId, element }
     }
     if (kind === 'delete') {
-      const elementId = str(op.id)
+      const nestedElement = typeof op.element === 'object' && op.element !== null
+        ? op.element as Record<string, unknown>
+        : undefined
+      const elementId = str(op.id) || str(op.elementId) || str(nestedElement?.id)
       if (elementId === '') throw new Error(`${where} is "delete" but missing its id: use {"op":"delete","id":"<element id>"}`)
       return { op: 'delete', elementId }
     }
@@ -155,6 +172,54 @@ function previewElements(currentElements: Array<Record<string, unknown>>, ops: P
   return elements
 }
 
+function fitsInsideFrame(element: Record<string, unknown>, frame: Record<string, unknown>): boolean {
+  const tolerance = 2
+  const left = num(element.x)
+  const top = num(element.y)
+  const right = left + num(element.width)
+  const bottom = top + num(element.height)
+  const frameLeft = num(frame.x)
+  const frameTop = num(frame.y)
+  const frameRight = frameLeft + num(frame.width)
+  const frameBottom = frameTop + num(frame.height)
+  return left >= frameLeft - tolerance
+    && top >= frameTop - tolerance
+    && right <= frameRight + tolerance
+    && bottom <= frameBottom + tolerance
+}
+
+/**
+ * Agents often describe page children with coordinates relative to the frame.
+ * Excalidraw stores canvas-absolute coordinates, so shift only when the authored
+ * box cannot fit as absolute coordinates and the shifted box fits completely.
+ */
+function normalizeFrameLocalCoordinates(
+  currentElements: Array<Record<string, unknown>>,
+  ops: ParsedOp[],
+): ParsedOp[] {
+  const prospectiveElements = previewElements(currentElements, ops)
+  const frames = new Map<string, Record<string, unknown>>()
+  for (const candidate of prospectiveElements) {
+    if (str(candidate.type) !== 'frame' || str(candidate.id) === '') continue
+    frames.set(str(candidate.id), normalizeElement(candidate))
+  }
+
+  return ops.map((op) => {
+    if (op.op !== 'upsert' || op.element === undefined || str(op.element.type) === 'frame') return op
+    const frame = frames.get(str(op.element.frameId))
+    if (frame === undefined) return op
+    const element = normalizeElement(op.element)
+    if (fitsInsideFrame(element, frame)) return op
+    const shifted = normalizeElement({
+      ...op.element,
+      x: num(element.x) + num(frame.x),
+      y: num(element.y) + num(frame.y),
+    })
+    if (!fitsInsideFrame(shifted, frame)) return op
+    return { ...op, element: shifted }
+  })
+}
+
 function layoutFocusIds(ops: ParsedOp[]): Set<string> | undefined {
   if (ops.some((op) => op.op === 'replace')) return undefined
   const ids = new Set<string>()
@@ -162,6 +227,22 @@ function layoutFocusIds(ops: ParsedOp[]): Set<string> | undefined {
     if (op.op === 'upsert' && op.elementId !== undefined) ids.add(op.elementId)
   }
   return ids.size > 0 ? ids : undefined
+}
+
+function normalizeSemanticUpserts(
+  currentElements: Array<Record<string, unknown>>,
+  ops: ParsedOp[],
+): ParsedOp[] {
+  const reconciled = reconcileBoundTextBindings(
+    previewElements(currentElements, ops),
+    layoutFocusIds(ops),
+  )
+  const byId = new Map(reconciled.map((element) => [str(element.id), element]))
+  return ops.map((op) => {
+    if (op.op !== 'upsert' || op.elementId === undefined) return op
+    const element = byId.get(op.elementId)
+    return element === undefined ? op : { ...op, element }
+  })
 }
 
 function layoutWarnings(elements: Array<Record<string, unknown>>): JsonValue[] {
@@ -316,12 +397,29 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value)
 }
 
-function authoredElementMatches(expected: Record<string, unknown>, actual: Record<string, unknown>): boolean {
+function elementRole(element: Record<string, unknown>): string {
+  if (typeof element.customData !== 'object' || element.customData === null) return ''
+  return str((element.customData as Record<string, unknown>).role).toLowerCase()
+}
+
+function authoredElementMatches(
+  expected: Record<string, unknown>,
+  actual: Record<string, unknown>,
+  elementsById: ReadonlyMap<string, Record<string, unknown>>,
+): boolean {
   // These fields are generated by the store and must not be compared against
   // the model's input. All authored fields, including customData, are checked.
   const volatile = new Set(['updated', 'seed', 'versionNonce'])
   for (const [key, value] of Object.entries(expected)) {
     if (volatile.has(key)) continue
+    if (expected.type === 'text' && (key === 'textAlign' || key === 'verticalAlign')) {
+      const container = elementsById.get(str(actual.containerId))
+      const role = container === undefined || elementRole(container) === '' ? elementRole(actual) : elementRole(container)
+      const alignment = semanticTextAlignment(role)
+      if (alignment !== null
+        && actual.textAlign === alignment.textAlign
+        && actual.verticalAlign === alignment.verticalAlign) continue
+    }
     if (expected.type === 'text' && key === 'containerId' && typeof value === 'string'
       && actual.containerId === null && actual.frameId === value) {
       // A model sometimes uses containerId to mean "inside this page". The
@@ -349,11 +447,19 @@ function authoredElementMatches(expected: Record<string, unknown>, actual: Recor
 
 function verifyAppliedOps(ops: ParsedOp[], elements: Array<Record<string, unknown>>): string | null {
   const byId = new Map(elements.map((element) => [str(element.id), element]))
+  const finalOpById = new Map<string, ParsedOp>()
   for (const op of ops) {
+    if (op.op === 'clear' || op.op === 'replace') {
+      finalOpById.clear()
+      continue
+    }
+    if (op.elementId !== undefined) finalOpById.set(op.elementId, op)
+  }
+  for (const op of finalOpById.values()) {
     if (op.op === 'upsert' && op.elementId !== undefined) {
       const actual = byId.get(op.elementId)
       if (actual === undefined) return `upsert target ${op.elementId} is missing after write`
-      if (!authoredElementMatches(op.element as Record<string, unknown>, actual)) {
+      if (!authoredElementMatches(op.element as Record<string, unknown>, actual, byId)) {
         return `upsert target ${op.elementId} does not match the requested element after write`
       }
     }
@@ -549,15 +655,15 @@ export function draw2codeUpdateTool(store: SceneStore) {
   return defineTool({
     name: 'draw2code_update',
     description: 'Draw on / edit one 画码 prototype board with ops — this is how you turn the user\'s idea into a visible '
-      + 'prototype in the right sidebar. Ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, '
+      + 'prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, '
       + '{op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|'
-      + 'diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. The board is auto-created when '
+      + 'diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. When an element has frameId and its box only fits after adding the frame x/y, frame-local coordinates are safely converted; ambiguous coordinates remain layout-invalid. The board is auto-created when '
       + 'absent. Triggers: 画原型 / 画一下 / 在画板上… / '
-      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the frame bottom safe area. A completed page from draw2code_create must set frame customData.role=prototype-page plus customData.mockDataMin (normally 3), and mark each visible realistic example text with customData.role=mock-data; empty boxes and placeholder labels do not satisfy the content gate. Put page children in a frame with frameId; never use containerId for page membership. If a text containerId mistakenly points to a frame, the store repairs it to frameId so the text stays visible. For a one-label shape, set the text containerId to the rectangle/diamond/ellipse id; the tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
+      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the frame bottom safe area. A completed page from draw2code_create must set frame customData.role=prototype-page plus customData.mockDataMin (normally 3), and mark each visible realistic example text with customData.role=mock-data; empty boxes and placeholder labels do not satisfy the content gate. Put page children in a frame with frameId; never use containerId for page membership. If a text containerId mistakenly points to a frame, the store repairs it to frameId so the text stays visible. For a one-label shape, set the text containerId to the rectangle/diamond/ellipse id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       name: { type: 'string', description: 'Board name. Omit to target the board currently selected in the 画码 UI.' },
-      ops: { type: 'json', required: true, description: 'Ops array (or a JSON string encoding it); batch many ops in one call, idempotent by element id. Some transports deliver json-typed args as text, so both forms are accepted.' },
+      ops: { type: 'json', required: true, description: 'Ops array (or a JSON string encoding it). Prefer [{"op":"upsert","element":{"id":"title","type":"text","frameId":"page","x":20,"y":80,"text":"标题"}}]. Direct elements, {element:{...}} without op, and flat upserts are also accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Canvas-absolute x/y are canonical; unambiguous frame-local child coordinates are converted automatically.' },
       force: { type: 'boolean', description: '已读到冲突并且用户确认后可设置为 true，强制执行。默认 false。' },
       safeMode: { type: 'boolean', description: '是否在有风险改动时要求确认（默认 true）。设为 false 会直接执行，可能覆盖用户手工改动。' },
     },
@@ -600,12 +706,14 @@ export function draw2codeUpdateTool(store: SceneStore) {
     async execute(args: { root: string; name?: string; ops: unknown; force?: boolean; safeMode?: boolean }) {
       const safeMode = args.safeMode !== false
       const force = args.force === true
-      const ops = parseUpdateOps(args.ops)
+      const parsedOps = parseUpdateOps(args.ops)
       const target = await resolveBoard(store, args.root, args.name)
       const board = await store.read(args.root, target.name)
       const key = makeKey(args.root, target.name)
       const cache = boardCache.get(key)
       const currentElements = board.ok ? board.value.scene.elements : []
+      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps)
+      const ops = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
       const prospectiveElements = previewElements(currentElements, ops)
       const layoutReport = inspectPrototypeLayout(prospectiveElements, { focusIds: layoutFocusIds(ops) })
       if (layoutReport.errors.length > 0) {

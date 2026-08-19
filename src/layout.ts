@@ -27,6 +27,7 @@ interface LayoutOptions {
 const SHAPE_TYPES = new Set(['rectangle', 'diamond', 'ellipse'])
 const BOTTOM_NAV_MAX_GAP = 96
 const DEFAULT_MOCK_DATA_MIN = 3
+const BOTTOM_NAVIGATION_ITEM_ROLES = new Set(['bottom-navigation-item', 'bottom-nav-item'])
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : ''
@@ -122,6 +123,8 @@ export function inspectPrototypeLayout(
   options: LayoutOptions = {},
 ): LayoutReport {
   const frames = elements.filter((element) => str(element.type) === 'frame')
+  const elementById = new Map(elements.map((element) => [str(element.id), element]))
+  const bottomNavigationShells = elements.filter((element) => SHAPE_TYPES.has(str(element.type)) && isBottomNavigation(element))
   const errors: LayoutIssue[] = []
   const warnings: LayoutIssue[] = []
 
@@ -139,6 +142,47 @@ export function inspectPrototypeLayout(
     }
 
     if (type === 'text' && text !== '') {
+      const containerId = str(element.containerId)
+      const container = containerId === '' ? undefined : elementById.get(containerId)
+      const boundToShape = container !== undefined && SHAPE_TYPES.has(str(container.type))
+      const directlyFocused = options.focusIds === undefined
+        || options.focusIds.has(str(element.id))
+        || (container !== undefined && options.focusIds.has(str(container.id)))
+      const elementRole = str(customData(element).role).toLowerCase()
+      const containerRole = str(customData(container ?? {}).role).toLowerCase()
+      const componentRole = elementRole || containerRole
+      if (containerId !== '' && container === undefined && directlyFocused) {
+        errors.push(issue(
+          'container-target-missing',
+          element,
+          `${str(element.id)} points to missing container ${containerId}; add the target shape or clear containerId so the label remains visible`,
+        ))
+      }
+      if (boundToShape && directlyFocused && componentRole === '') {
+        errors.push(issue(
+          'component-role-missing',
+          element,
+          `${str(element.id)} is bound to ${containerId} without a semantic customData.role; mark the component as button, primary-action, select, input, chip, card, or another explicit product role so draw2code_update can apply the correct text alignment`,
+        ))
+      }
+
+      const bottomNavigationShell = bottomNavigationShells.find((shell) => {
+        return num(element.x) >= num(shell.x) - 2
+          && num(element.y) >= num(shell.y) - 2
+          && num(element.x) + num(element.width) <= num(shell.x) + num(shell.width) + 2
+          && num(element.y) + num(element.height) <= num(shell.y) + num(shell.height) + 2
+      })
+      const navigationItemFocused = options.focusIds === undefined
+        || options.focusIds.has(str(element.id))
+        || (bottomNavigationShell !== undefined && options.focusIds.has(str(bottomNavigationShell.id)))
+      if (bottomNavigationShell !== undefined && navigationItemFocused && !BOTTOM_NAVIGATION_ITEM_ROLES.has(elementRole)) {
+        errors.push(issue(
+          'bottom-navigation-item-role-missing',
+          element,
+          `${str(element.id)} is inside bottom navigation ${str(bottomNavigationShell.id)} without customData.role=bottom-navigation-item; add the item role so its label is centered within its navigation slot`,
+        ))
+      }
+
       const lines = estimatedLineCount(element)
       const fontSize = Math.max(8, num(element.fontSize, 20))
       const lineHeight = Math.max(1, num(element.lineHeight, 1.25))
@@ -198,6 +242,43 @@ export function inspectPrototypeLayout(
           'bottom-navigation-needs-shell',
           element,
           `${str(element.id)} is a text-only bottom navigation; add a rectangle shell plus separate text labels so the component has a visible boundary and stable geometry`,
+        ))
+      }
+    }
+  }
+
+  for (const shell of bottomNavigationShells) {
+    const items = elements.filter((element) => {
+      if (str(element.type) !== 'text' || !BOTTOM_NAVIGATION_ITEM_ROLES.has(str(customData(element).role).toLowerCase())) return false
+      return num(element.x) >= num(shell.x) - 2
+        && num(element.y) >= num(shell.y) - 2
+        && num(element.x) + num(element.width) <= num(shell.x) + num(shell.width) + 2
+        && num(element.y) + num(element.height) <= num(shell.y) + num(shell.height) + 2
+    })
+    const shellFocused = isFocused(shell, options.focusIds)
+      || items.some((item) => isFocused(item, options.focusIds))
+    if (!shellFocused) continue
+    if (items.length === 0) {
+      errors.push(issue(
+        'bottom-navigation-items-missing',
+        shell,
+        `${str(shell.id)} has no visible bottom-navigation-item labels; add separate text items inside the navigation shell`,
+      ))
+      continue
+    }
+    for (let leftIndex = 0; leftIndex < items.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
+        const left = items[leftIndex]
+        const right = items[rightIndex]
+        const overlaps = num(left.x) < num(right.x) + num(right.width)
+          && num(left.x) + num(left.width) > num(right.x)
+          && num(left.y) < num(right.y) + num(right.height)
+          && num(left.y) + num(left.height) > num(right.y)
+        if (!overlaps) continue
+        errors.push(issue(
+          'bottom-navigation-item-overlap',
+          shell,
+          `${str(left.id)} overlaps ${str(right.id)} inside ${str(shell.id)}; give each navigation item its own non-overlapping slot`,
         ))
       }
     }

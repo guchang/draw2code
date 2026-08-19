@@ -67,13 +67,20 @@
 
 ### 本轮新增 — 低保真原型可读性与语义修复
 
+- `draw2code_update` 除规范的 `{op:"upsert",element:{...}}` 外，也接受直接元素、省略 `op` 的 `element` 包装和字段平铺的 `upsert`；只对同时具有非空 `id + type` 的无歧义输入做兼容，不猜测 bare id 是删除还是修改。`op=delete` 时也兼容 `elementId` 和 `element.id`，避免 Agent 只因移动 id 字段重发整批修改。
+- 同一批对相同元素 id 的多次操作按最终净结果读回验证：`upsert→delete` 期望元素不存在，`delete→upsert` 期望最终元素存在；不会因临时中间态已经被后续操作覆盖而误报失败。
+- 带 `frameId` 的子元素若原坐标无法落入 frame、而加上 frame 左上角后能完整落入，会被安全识别为 frame 局部坐标并换算为画布绝对坐标；已经正确的绝对坐标保持不变，含义不明确的坐标仍由 `layout-invalid` 阻止写盘。
+- 读回校验认可工具自身执行的组件语义对齐修复；例如 Chip 标签从 `left/top` 规范为 `center/middle` 后仍返回 `verified=true`，不会在数据已经落盘后误报失败并诱发重复覆盖。
 - `draw2code_update` 写盘前会检查多行或预计换行的 `text` 是否有足够高度；失败返回 `layout-invalid`，不写入半截组件。
 - `rectangle`、`diamond`、`ellipse` 不再允许携带依赖 Excalidraw 形状文字的 `text`；按钮、卡片和输入框文案必须使用独立的 `text` 元素。
-- `bottom-navigation` 必须使用 `customData.role=bottom-navigation` 的矩形 shell 加独立标签，并位于 page frame 底部安全区；普通一行“底部导航：...”文字会被拒绝。
+- `bottom-navigation` 必须使用 `customData.role=bottom-navigation` 的矩形 shell 加独立标签，并位于 page frame 底部安全区；空 shell、互相重叠的栏目和普通一行“底部导航：...”文字都会被拒绝。
 - frame 内组件不得越过页面边界；成功写入后工具仍会返回 `layoutWarnings`，让模型能发现旧画板中已有的视觉问题。
 - 预检只阻塞本次 Agent 更新涉及的元素；用户已有的旧问题会作为提醒返回，不会阻塞用户继续手工编辑。
-- `draw2code_create` 从长需求中提取不超过 16 个字符的核心产品名，识别“类似 X 的 Y”“X 风格 Y”和“通过……”等描述结构，并完整保留 APP/Web/小程序/平台/系统等产品类型；画板仍保留“原型”后缀，完整需求只进入项目草稿和简报。
+- `draw2code_create action=start` 要求 Agent 基于完整需求先概括并显式传入语义化 `projectName`；工具不再用正则、关键词或前 N 字裁剪从原话造名称，只做合法性校验。确认后的画板名直接使用 `projectName`，不追加“原型”后缀；完整 `idea` 仍保存在项目草稿和简报中。
 - `draw2code_update` 会把 text 的 `containerId` 补成 Excalidraw 完整双向绑定；普通读取、打开画板和客户端写回不会借机改写既有故障样本。
+- Agent 新增绑定文字的组件时必须用 `customData.role` 声明按钮、选择框、输入框、Chip、卡片等产品语义；缺失时返回 `component-role-missing`，不再把未知控件静默写成左上对齐。
+- `button`、`primary-action`、`chip`、`tab`、`bottom-navigation-item` 等操作型文案不只规范为 `center/middle`，还会把文字盒缩至真实行高，并按外框几何重新计算垂直中心；`input`、`select`、`dropdown`、`search-field` 等表单值保持 `left/middle`，不会为了修按钮而误改输入内容。
+- 底部导航 shell 内的每个独立标签必须设置 `customData.role=bottom-navigation-item`；缺失时返回 `bottom-navigation-item-role-missing`。即使 Agent 错把多个栏目文字都绑定到 shell，update 也会将其修复为独立文字、保留各自槽位并按 shell 垂直居中；空 shell 返回 `bottom-navigation-items-missing`，栏目重叠返回 `bottom-navigation-item-overlap`。
 - 页面归属必须使用 `frameId`，`containerId` 只用于形状的唯一绑定标签。若 Agent 错把 text 的 `containerId` 指向 frame，update 会原子修复为 `containerId=null` 与对应 `frameId`，避免 mock 数据已经写进 JSON 但画布不显示。
 - 原型不询问品牌视觉，但允许形状用 `customData.tone` 表达 primary、success、warning、danger、info、neutral 六种语义；使用浅底色和对应描边，且不覆盖显式颜色。
 - 完整页面 frame 使用 `customData.role=prototype-page` 和 `customData.mockDataMin` 声明最低 mock 数据数量；承载示例记录的可见 text 使用 `customData.role=mock-data`。数量不足或只写无意义占位符时返回 `mock-data-insufficient`，整批更新不落盘。
@@ -124,11 +131,12 @@ bad-ops: ops[0] is "replace" but missing its scene
 
 - `npm run typecheck` 通过。
 - `npm run build` 通过，并生成 `dist/index.js` 与 `lib/client.js`。
-- `npm test` 通过：38 个 Node 内置回归测试全部通过，覆盖同步协调、连续冲突合并、删除不复活、新画板 revision=0 竞态、当前画板目标解析、自动 reveal、create grilling、原型质量门禁和 generate 恢复/验收流程。
+- `npm test` 通过：57 个 Node 内置回归测试全部通过，覆盖 update 参数容错、同批净结果校验、frame 局部坐标安全换算、按钮文字真实几何居中、底部导航独立栏目/空壳/重叠门禁、语义修复后的读回校验、同步协调、连续冲突合并、删除不复活、新画板 revision=0 竞态、当前画板目标解析、自动 reveal、组件语义对齐、用户手工对齐保护、Agent 语义命名、create grilling、原型质量门禁和 generate 恢复/验收流程。
 - 项目包含 Node 内置回归入口和 `features/draw2code.feature` BDD 契约。
 - DeepSeek Harness 的真实界面已加载 `画码` 标签页，当前能看到 `prototype` 画板、`新画板` 菜单入口、Excalidraw 工具栏和原型文字元素；这证明插件注册与非空画板挂载路径至少可达。
 - 重新启动 `dsh web` 后，`GET /api/draw2code/active-board?root=<workspace>` 与 `GET /api/draw2code/reveal-request?root=<workspace>` 均能从真实 host 返回成功 envelope；仅刷新网页不足以重装 host bundle。
 - Harness 真实删除回归确认：用户删除与 Agent 新增发生并发冲突时，旧内容不会复活，Agent 新增内容仍会保留并显示。
+- Harness 最终 update 回归确认：新画板“更新容错回归三”只调用一次 `draw2code_update`，14 个 ops 一次应用并返回 `verified=true`；frame 局部坐标、Chip `left/top` 到 `center/middle` 的语义修复、嵌套 delete，以及同批 `upsert→delete` 均未触发重试。活动画板 API 返回该画板，磁盘读回为 12 个元素且 `temp-note` 不存在，真实画布可见“任务详情页”和三条检查项。
 
 ## 验收边界
 

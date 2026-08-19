@@ -69,6 +69,53 @@ const SEMANTIC_PALETTE: Record<string, { stroke: string; background: string }> =
 
 const SEMANTIC_COLOR_TYPES = new Set(['rectangle', 'diamond', 'ellipse'])
 
+const CENTERED_TEXT_ROLES = new Set([
+  'button', 'primary-button', 'secondary-button', 'danger-button', 'destructive-button',
+  'primary-action', 'secondary-action', 'chip', 'filter-chip', 'choice-chip',
+  'tab', 'tab-item', 'navigation-item', 'bottom-navigation-item', 'bottom-nav-item',
+  'segmented-control-item',
+])
+
+const LEFT_MIDDLE_TEXT_ROLES = new Set([
+  'input', 'text-input', 'select', 'dropdown', 'search-input', 'search-field',
+])
+
+const BOTTOM_NAVIGATION_ROLES = new Set(['bottom-navigation', 'bottom-nav', 'tabbar'])
+const BOTTOM_NAVIGATION_ITEM_ROLES = new Set(['bottom-navigation-item', 'bottom-nav-item'])
+
+export function semanticTextAlignment(role: string): { textAlign: string; verticalAlign: string } | null {
+  if (CENTERED_TEXT_ROLES.has(role)) return { textAlign: 'center', verticalAlign: 'middle' }
+  if (LEFT_MIDDLE_TEXT_ROLES.has(role)) return { textAlign: 'left', verticalAlign: 'middle' }
+  return null
+}
+
+function semanticRole(element: Record<string, unknown> | undefined): string {
+  if (typeof element?.customData !== 'object' || element.customData === null) return ''
+  const role = (element.customData as Record<string, unknown>).role
+  return typeof role === 'string' ? role.toLowerCase() : ''
+}
+
+function semanticTextGeometry(
+  element: Record<string, unknown>,
+  container: Record<string, unknown> | undefined,
+  alignment: { textAlign: string; verticalAlign: string },
+): Record<string, unknown> {
+  if (container === undefined || alignment.verticalAlign !== 'middle') return { ...element, ...alignment }
+  const fontSize = typeof element.fontSize === 'number' && Number.isFinite(element.fontSize) ? element.fontSize : 20
+  const lineHeight = typeof element.lineHeight === 'number' && Number.isFinite(element.lineHeight) ? element.lineHeight : 1.25
+  const text = typeof element.text === 'string' ? element.text : ''
+  const lines = text === '' ? 1 : text.split('\n').length
+  const containerY = typeof container.y === 'number' && Number.isFinite(container.y) ? container.y : 0
+  const containerHeight = typeof container.height === 'number' && Number.isFinite(container.height) ? container.height : 0
+  const height = Math.min(containerHeight, lines * fontSize * lineHeight)
+  return {
+    ...element,
+    ...alignment,
+    y: containerY + (containerHeight - height) / 2,
+    height,
+  }
+}
+
 /** The store's error shape (mirrors the route envelope error). */
 export type SceneError = { code: string; message: string }
 export type SceneResult<T> = { ok: true; value: T } | { ok: false; error: SceneError }
@@ -296,13 +343,29 @@ export function normalizeElement(input: unknown): Record<string, unknown> {
  */
 export function reconcileBoundTextBindings(
   elements: Array<Record<string, unknown>>,
+  alignmentFocusIds?: ReadonlySet<string>,
 ): Array<Record<string, unknown>> {
   const byId = new Map(elements.map((element) => [String(element.id ?? ''), element]))
   const textsByContainer = new Map<string, Array<Record<string, unknown>>>()
   const frameMembershipByText = new Map<string, string>()
+  const detachedNavigationTextIds = new Set<string>()
 
   for (const element of elements) {
     if (element.type !== 'text' || typeof element.containerId !== 'string' || element.containerId === '') continue
+    const container = byId.get(element.containerId)
+    const focused = alignmentFocusIds === undefined
+      || alignmentFocusIds.has(String(element.id ?? ''))
+      || (container !== undefined && alignmentFocusIds.has(String(container.id ?? '')))
+    if (focused
+      && BOTTOM_NAVIGATION_ITEM_ROLES.has(semanticRole(element))
+      && BOTTOM_NAVIGATION_ROLES.has(semanticRole(container))) {
+      detachedNavigationTextIds.add(String(element.id ?? ''))
+    }
+  }
+
+  for (const element of elements) {
+    if (element.type !== 'text' || typeof element.containerId !== 'string' || element.containerId === '') continue
+    if (detachedNavigationTextIds.has(String(element.id ?? ''))) continue
     const container = byId.get(element.containerId)
     if (container === undefined) continue
     if (container.type === 'frame') {
@@ -323,6 +386,43 @@ export function reconcileBoundTextBindings(
         containerId: null,
         frameId: typeof element.frameId === 'string' && element.frameId !== '' ? element.frameId : frameMembership,
       }
+    }
+    if (element.type === 'text') {
+      const container = typeof element.containerId === 'string' ? byId.get(element.containerId) : undefined
+      const elementRole = semanticRole(element)
+      const containerRole = semanticRole(container)
+      const role = elementRole !== '' ? elementRole : containerRole
+      const isFocused = alignmentFocusIds === undefined
+        || alignmentFocusIds.has(String(element.id ?? ''))
+        || (container !== undefined && alignmentFocusIds.has(String(container.id ?? '')))
+      const alignment = semanticTextAlignment(role)
+      if (isFocused && alignment !== null) {
+        if (detachedNavigationTextIds.has(String(element.id ?? ''))) {
+          return {
+            ...semanticTextGeometry(element, container, alignment),
+            containerId: null,
+          }
+        }
+        if (container !== undefined) return semanticTextGeometry(element, container, alignment)
+        if (BOTTOM_NAVIGATION_ITEM_ROLES.has(role)) {
+          const navigationShell = elements.find((candidate) => {
+            if (!SEMANTIC_COLOR_TYPES.has(String(candidate.type ?? ''))
+              || !BOTTOM_NAVIGATION_ROLES.has(semanticRole(candidate))) return false
+            const x = Number(element.x ?? 0)
+            const y = Number(element.y ?? 0)
+            const width = Number(element.width ?? 0)
+            const height = Number(element.height ?? 0)
+            const shellX = Number(candidate.x ?? 0)
+            const shellY = Number(candidate.y ?? 0)
+            return x >= shellX - 2 && y >= shellY - 2
+              && x + width <= shellX + Number(candidate.width ?? 0) + 2
+              && y + height <= shellY + Number(candidate.height ?? 0) + 2
+          })
+          if (navigationShell !== undefined) return semanticTextGeometry(element, navigationShell, alignment)
+        }
+        return { ...element, ...alignment }
+      }
+      return element
     }
     if (!SEMANTIC_COLOR_TYPES.has(String(element.type ?? ''))) return element
     const containerId = String(element.id ?? '')
@@ -925,6 +1025,8 @@ export class SceneStore {
     }
 
     let applied = 0
+    const alignmentFocusIds = new Set<string>()
+    let alignWholeScene = false
     for (const op of ops) {
       if (op.op === 'replace') {
         try {
@@ -932,6 +1034,7 @@ export class SceneStore {
         } catch (error) {
           return err('bad-scene', error instanceof Error ? error.message : String(error))
         }
+        alignWholeScene = true
         applied += 1
         continue
       }
@@ -947,6 +1050,7 @@ export class SceneStore {
         continue
       }
       // upsert
+      alignmentFocusIds.add(String(op.element.id ?? ''))
       let normalized: Record<string, unknown>
       try {
         normalized = normalizeElement(op.element)
@@ -978,7 +1082,13 @@ export class SceneStore {
     // Complete Excalidraw's two-way text binding only on the agent mutation
     // path. Reads and ordinary client writes remain non-mutating; existing
     // diagnostic boards are not silently repaired merely by opening them.
-    scene = { ...scene, elements: reconcileBoundTextBindings(scene.elements) }
+    scene = {
+      ...scene,
+      elements: reconcileBoundTextBindings(
+        scene.elements,
+        alignWholeScene ? undefined : alignmentFocusIds,
+      ),
+    }
     const written = await this.write(root, name, scene, baseRev, 'agent')
     if (!written.ok) return written
     return { ok: true, value: { ...written.value, applied } }

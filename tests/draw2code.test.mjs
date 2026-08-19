@@ -365,6 +365,164 @@ test('frame text is accepted as a fallback frame name for agent-authored pages',
   assert.equal(read.value.scene.elements[0].name, '用户登录页')
 })
 
+test('draw2code_update accepts a direct element as unambiguous upsert shorthand', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'direct-element-shorthand',
+    ops: [
+      { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'direct-element-shorthand')
+  assert.equal(read.ok, true)
+  assert.equal(read.value.scene.elements[0].id, 'page')
+})
+
+test('draw2code_update accepts a nested element with an omitted upsert op', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'nested-element-shorthand',
+    ops: [
+      { element: { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'nested-element-shorthand')
+  assert.equal(read.ok, true)
+  assert.equal(read.value.scene.elements[0].id, 'page')
+})
+
+test('draw2code_update accepts a flat upsert as unambiguous shorthand', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'flat-upsert-shorthand',
+    ops: [
+      { op: 'upsert', id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'flat-upsert-shorthand')
+  assert.equal(read.ok, true)
+  assert.equal(read.value.scene.elements[0].id, 'page')
+})
+
+test('draw2code_update accepts a nested delete id as unambiguous shorthand', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'nested-delete-shorthand', {
+    elements: [{ id: 'obsolete-note', type: 'text', text: '待删除' }],
+  })
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'nested-delete-shorthand',
+    safeMode: false,
+    ops: [{ op: 'delete', element: { id: 'obsolete-note' } }],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'nested-delete-shorthand')
+  assert.equal(read.ok, true)
+  assert.equal(read.value.scene.elements.some((element) => element.id === 'obsolete-note'), false)
+})
+
+test('draw2code_update verifies the final net effect of repeated ids in one batch', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'same-batch-net-effect',
+    ops: [
+      { op: 'upsert', element: { id: 'temp-note', type: 'text', text: '临时说明' } },
+      { op: 'delete', element: { id: 'temp-note' } },
+      { op: 'delete', id: 'final-note' },
+      { op: 'upsert', element: { id: 'final-note', type: 'text', text: '最终说明' } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'same-batch-net-effect')
+  assert.equal(read.ok, true)
+  assert.equal(read.value.scene.elements.some((element) => element.id === 'temp-note'), false)
+  assert.equal(read.value.scene.elements.find((element) => element.id === 'final-note')?.text, '最终说明')
+})
+
+test('draw2code_update safely converts unambiguous frame-local coordinates', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'frame-local-coordinates',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'frame', name: '详情页', x: 440, y: 100, width: 420, height: 860 } },
+      { op: 'upsert', element: { id: 'title', type: 'text', text: '详情', frameId: 'page', x: 20, y: 80, width: 200, height: 32 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'frame-local-coordinates')
+  assert.equal(read.ok, true)
+  const title = read.value.scene.elements.find((element) => element.id === 'title')
+  assert.equal(title.x, 460)
+  assert.equal(title.y, 180)
+})
+
+test('draw2code_update preserves already absolute frame child coordinates', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'absolute-frame-coordinates',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'frame', name: '详情页', x: 440, y: 100, width: 420, height: 860 } },
+      { op: 'upsert', element: { id: 'title', type: 'text', text: '详情', frameId: 'page', x: 460, y: 180, width: 200, height: 32 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'absolute-frame-coordinates')
+  assert.equal(read.ok, true)
+  const title = read.value.scene.elements.find((element) => element.id === 'title')
+  assert.equal(title.x, 460)
+  assert.equal(title.y, 180)
+})
+
+test('draw2code_update rejects ambiguous frame child coordinates instead of guessing', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'ambiguous-frame-coordinates',
+      ops: [
+        { op: 'upsert', element: { id: 'page', type: 'frame', name: '详情页', x: 440, y: 100, width: 420, height: 860 } },
+        { op: 'upsert', element: { id: 'title', type: 'text', text: '详情', frameId: 'page', x: 460, y: 20, width: 200, height: 32 } },
+      ],
+    }, {}),
+    /layout-invalid[\s\S]*frame-overflow[\s\S]*title/i,
+  )
+
+  const board = await store.read(root, 'ambiguous-frame-coordinates')
+  assert.equal(board.ok, false)
+})
+
 test('draw2code_update rejects a text box that cannot contain its own lines', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
@@ -427,15 +585,223 @@ test('draw2code_update accepts a complete low-fi mobile page layout', async () =
     ops: [
       { op: 'upsert', element: { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 } },
       { op: 'upsert', element: { id: 'calendar-grid', type: 'text', text: '一 二 三 四 五 六 日\n1 2 3 4 5 6 7\n8 9 10 11 12 13 14\n15 16 17 18 19 20 21\n22 23 24 25 26 27 28', x: 20, y: 120, width: 380, height: 140 } },
-      { op: 'upsert', element: { id: 'submit-button', type: 'rectangle', x: 20, y: 560, width: 380, height: 48 } },
+      { op: 'upsert', element: { id: 'submit-button', type: 'rectangle', customData: { role: 'primary-action' }, x: 20, y: 560, width: 380, height: 48 } },
       { op: 'upsert', element: { id: 'submit-label', type: 'text', text: '查看穿搭建议', x: 140, y: 572, width: 140, height: 24, containerId: 'submit-button' } },
       { op: 'upsert', element: { id: 'bottom-nav', type: 'rectangle', customData: { role: 'bottom-navigation' }, x: 20, y: 780, width: 380, height: 64 } },
-      { op: 'upsert', element: { id: 'bottom-nav-label', type: 'text', text: '万年历   穿搭推荐   我的', x: 40, y: 800, width: 340, height: 24 } },
+      { op: 'upsert', element: { id: 'bottom-nav-label', type: 'text', text: '万年历   穿搭推荐   我的', customData: { role: 'bottom-navigation-item' }, x: 40, y: 800, width: 340, height: 24 } },
     ],
   }, {})
 
   assert.equal(result.verified, true)
   assert.equal(result.layoutWarnings.length, 0)
+})
+
+test('draw2code_update aligns semantic controls without centering form values', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'semantic-control-alignment',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'frame', name: '查询页', x: 0, y: 0, width: 420, height: 860 } },
+      { op: 'upsert', element: { id: 'city-select', type: 'rectangle', customData: { role: 'select' }, x: 20, y: 80, width: 380, height: 44 } },
+      { op: 'upsert', element: { id: 'city-select-label', type: 'text', text: '上海 ▾ 定位城市', x: 32, y: 90, width: 356, height: 24, containerId: 'city-select' } },
+      { op: 'upsert', element: { id: 'generate-button', type: 'rectangle', customData: { role: 'primary-action', tone: 'primary' }, x: 20, y: 650, width: 380, height: 48 } },
+      { op: 'upsert', element: { id: 'generate-button-label', type: 'text', text: '生成本日穿搭建议', x: 20, y: 662, width: 380, height: 24, containerId: 'generate-button' } },
+      { op: 'upsert', element: { id: 'bottom-nav', type: 'rectangle', customData: { role: 'bottom-navigation' }, x: 20, y: 790, width: 380, height: 60 } },
+      { op: 'upsert', element: { id: 'calendar-tab', type: 'text', text: '日历', customData: { role: 'bottom-navigation-item' }, x: 20, y: 808, width: 126, height: 24 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'semantic-control-alignment')
+  assert.equal(read.ok, true)
+  const byId = new Map(read.value.scene.elements.map((element) => [element.id, element]))
+  assert.deepEqual(
+    [byId.get('generate-button-label').textAlign, byId.get('generate-button-label').verticalAlign],
+    ['center', 'middle'],
+  )
+  assert.deepEqual(
+    [byId.get('calendar-tab').textAlign, byId.get('calendar-tab').verticalAlign],
+    ['center', 'middle'],
+  )
+  assert.deepEqual(
+    [byId.get('city-select-label').textAlign, byId.get('city-select-label').verticalAlign],
+    ['left', 'middle'],
+  )
+})
+
+test('draw2code_update centers a button label by geometry, not alignment metadata alone', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'button-label-geometry',
+    ops: [
+      { op: 'upsert', element: { id: 'save-button', type: 'rectangle', customData: { role: 'primary-action' }, x: 20, y: 640, width: 180, height: 52 } },
+      { op: 'upsert', element: { id: 'save-label', type: 'text', text: '保存搭配', fontSize: 16, lineHeight: 1.25, textAlign: 'left', verticalAlign: 'top', x: 20, y: 640, width: 180, height: 52, containerId: 'save-button' } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'button-label-geometry')
+  assert.equal(read.ok, true)
+  const label = read.value.scene.elements.find((element) => element.id === 'save-label')
+  assert.deepEqual(
+    [label.textAlign, label.verticalAlign, label.y, label.height],
+    ['center', 'middle', 656, 20],
+  )
+})
+
+test('draw2code_update turns bottom navigation labels into independent centered items', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'bottom-nav-independent-items',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 } },
+      { op: 'upsert', element: { id: 'bottom-nav', type: 'rectangle', customData: { role: 'bottom-navigation' }, x: 15, y: 790, width: 390, height: 60 } },
+      { op: 'upsert', element: { id: 'nav-calendar', type: 'text', text: '日历', fontSize: 16, customData: { role: 'bottom-navigation-item' }, frameId: 'page', containerId: 'bottom-nav', textAlign: 'left', verticalAlign: 'top', x: 15, y: 790, width: 130, height: 60 } },
+      { op: 'upsert', element: { id: 'nav-outfit', type: 'text', text: '衣橱', fontSize: 16, customData: { role: 'bottom-navigation-item' }, frameId: 'page', containerId: 'bottom-nav', textAlign: 'left', verticalAlign: 'top', x: 145, y: 790, width: 130, height: 60 } },
+      { op: 'upsert', element: { id: 'nav-profile', type: 'text', text: '我的', fontSize: 16, customData: { role: 'bottom-navigation-item' }, frameId: 'page', containerId: 'bottom-nav', textAlign: 'left', verticalAlign: 'top', x: 275, y: 790, width: 130, height: 60 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'bottom-nav-independent-items')
+  assert.equal(read.ok, true)
+  const byId = new Map(read.value.scene.elements.map((element) => [element.id, element]))
+  for (const id of ['nav-calendar', 'nav-outfit', 'nav-profile']) {
+    const item = byId.get(id)
+    assert.deepEqual(
+      [item.containerId, item.textAlign, item.verticalAlign, item.y, item.height],
+      [null, 'center', 'middle', 810, 20],
+    )
+  }
+  assert.equal(byId.get('bottom-nav').boundElements, null)
+})
+
+test('draw2code_update rejects an empty bottom navigation shell', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'empty-bottom-nav',
+      ops: [
+        { op: 'upsert', element: { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 } },
+        { op: 'upsert', element: { id: 'bottom-nav', type: 'rectangle', customData: { role: 'bottom-navigation' }, x: 20, y: 790, width: 380, height: 60 } },
+      ],
+    }, {}),
+    /layout-invalid[\s\S]*bottom-navigation-items-missing[\s\S]*bottom-nav/i,
+  )
+})
+
+test('draw2code_update rejects overlapping bottom navigation items', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'overlapping-bottom-nav-items',
+      ops: [
+        { op: 'upsert', element: { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 } },
+        { op: 'upsert', element: { id: 'bottom-nav', type: 'rectangle', customData: { role: 'bottom-navigation' }, x: 15, y: 790, width: 390, height: 60 } },
+        { op: 'upsert', element: { id: 'nav-a', type: 'text', text: '日历', customData: { role: 'bottom-navigation-item' }, frameId: 'page', x: 15, y: 808, width: 130, height: 24 } },
+        { op: 'upsert', element: { id: 'nav-b', type: 'text', text: '衣橱', customData: { role: 'bottom-navigation-item' }, frameId: 'page', x: 25, y: 808, width: 130, height: 24 } },
+      ],
+    }, {}),
+    /layout-invalid[\s\S]*bottom-navigation-item-overlap[\s\S]*nav-a[\s\S]*nav-b/i,
+  )
+})
+
+test('draw2code_update verifies semantic alignment repairs instead of retrying a successful write', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'semantic-alignment-verification',
+    ops: [
+      { op: 'upsert', element: { id: 'status-chip', type: 'rectangle', customData: { role: 'chip', tone: 'info' }, x: 20, y: 80, width: 100, height: 36 } },
+      { op: 'upsert', element: { id: 'status-chip-label', type: 'text', text: '进行中', textAlign: 'left', verticalAlign: 'top', x: 20, y: 86, width: 100, height: 24, containerId: 'status-chip' } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'semantic-alignment-verification')
+  assert.equal(read.ok, true)
+  const label = read.value.scene.elements.find((element) => element.id === 'status-chip-label')
+  assert.deepEqual([label.textAlign, label.verticalAlign], ['center', 'middle'])
+})
+
+test('draw2code_update does not realign an untouched component edited by the user', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'manual-alignment-preserved', {
+    elements: [
+      { id: 'manual-button', type: 'rectangle', customData: { role: 'primary-action' }, x: 20, y: 80, width: 220, height: 48, boundElements: [{ type: 'text', id: 'manual-label' }] },
+      { id: 'manual-label', type: 'text', text: '用户手工左对齐', textAlign: 'left', verticalAlign: 'top', x: 20, y: 92, width: 220, height: 24, containerId: 'manual-button' },
+    ],
+  })
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'manual-alignment-preserved',
+    ops: [
+      { op: 'upsert', element: { id: 'unrelated-note', type: 'text', text: '只更新这一条说明', x: 20, y: 160, width: 220, height: 24 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'manual-alignment-preserved')
+  assert.equal(read.ok, true)
+  const manualLabel = read.value.scene.elements.find((element) => element.id === 'manual-label')
+  assert.deepEqual([manualLabel.textAlign, manualLabel.verticalAlign], ['left', 'top'])
+})
+
+test('draw2code_update rejects a newly bound component without a semantic role', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'missing-component-role',
+      ops: [
+        { op: 'upsert', element: { id: 'generate-button', type: 'rectangle', customData: { tone: 'primary' }, x: 20, y: 120, width: 380, height: 48 } },
+        { op: 'upsert', element: { id: 'generate-button-label', type: 'text', text: '生成本日穿搭建议', x: 20, y: 132, width: 380, height: 24, containerId: 'generate-button' } },
+      ],
+    }, {}),
+    /layout-invalid[\s\S]*component-role-missing[\s\S]*generate-button-label/i,
+  )
+
+  const board = await store.read(root, 'missing-component-role')
+  assert.equal(board.ok, false)
+})
+
+test('draw2code_update rejects bottom navigation labels without item semantics', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'missing-bottom-nav-item-role',
+      ops: [
+        { op: 'upsert', element: { id: 'page', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 } },
+        { op: 'upsert', element: { id: 'bottom-nav', type: 'rectangle', customData: { role: 'bottom-navigation' }, x: 20, y: 790, width: 380, height: 60 } },
+        { op: 'upsert', element: { id: 'calendar-tab', type: 'text', text: '日历', x: 20, y: 808, width: 126, height: 24 } },
+      ],
+    }, {}),
+    /layout-invalid[\s\S]*bottom-navigation-item-role-missing[\s\S]*calendar-tab/i,
+  )
 })
 
 test('draw2code_update rejects a completed prototype page without enough visible mock data', async () => {
@@ -487,7 +853,7 @@ test('draw2code_update persists reciprocal bindings for visible component labels
     root,
     name: 'bound-label-visible',
     ops: [
-      { op: 'upsert', element: { id: 'category-chip', type: 'rectangle', x: 20, y: 80, width: 96, height: 36, boundElements: [] } },
+      { op: 'upsert', element: { id: 'category-chip', type: 'rectangle', customData: { role: 'chip' }, x: 20, y: 80, width: 96, height: 36, boundElements: [] } },
       { op: 'upsert', element: { id: 'category-chip-label', type: 'text', text: '搬家', x: 42, y: 88, width: 52, height: 24, containerId: 'category-chip' } },
     ],
   }, {})
@@ -903,6 +1269,7 @@ test('draw2code_create starts a choice-first draft without touching the board', 
     root,
     action: 'start',
     idea: '万年历穿搭工具',
+    projectName: '万年历穿搭',
   }, {})
 
   assert.equal(result.status, 'question')
@@ -910,7 +1277,7 @@ test('draw2code_create starts a choice-first draft without touching the board', 
   assert.equal(result.question.selectionMode, 'single')
   assert.ok(result.question.options.some((option) => option.id === 'web'))
   assert.equal(result.question.allowOther, true)
-  assert.equal(result.nameProposal.suggestedName, '万年历穿搭工具')
+  assert.equal(result.nameProposal.suggestedName, '万年历穿搭')
   assert.match(result.projectFile, /^draw2code\/\.projects\/project-[^/]+\.json$/)
   const rendered = tool.output.render({ root, action: 'start', idea: '万年历穿搭工具' }, result)
   assert.match(rendered[0].text, /sessionId=project-/)
@@ -927,19 +1294,53 @@ test('draw2code_create starts a choice-first draft without touching the board', 
   assert.equal(draft.originalIdea, '万年历穿搭工具')
 })
 
-test('draw2code_create proposes a short project name from a long product description', async () => {
+test('draw2code_create requires the agent to infer a project name instead of clipping the idea', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
 
   const result = await tool.execute({
     root,
     action: 'start',
-    idea: '万年历工具 可查看公历 农历 节假日 宜忌等传统历法信息的日历应用工具',
+    idea: '根据万年历和我衣柜里衣服的APP',
+  }, {})
+
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'project_name_required')
+  assert.match(result.error.message, /完整需求.*概括.*projectName/)
+  const boards = await store.list(root)
+  assert.equal(boards.ok, true)
+  assert.deepEqual(boards.value, [])
+})
+
+test('draw2code_create rejects a copied raw idea instead of treating it as an inferred name', async () => {
+  const { root, projects, store } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+
+  const result = await tool.execute({
+    root,
+    action: 'start',
+    idea: '根据万年历和我衣柜里衣服的APP',
+    projectName: '根据万年历和我衣柜里衣服的APP',
+  }, {})
+
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'project_name_invalid')
+  assert.match(result.error.message, /不能直接复制完整 idea.*重新概括/)
+})
+
+test('draw2code_create uses the agent-inferred name without an 原型 suffix', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+
+  const result = await tool.execute({
+    root,
+    action: 'start',
+    idea: '根据万年历和我衣柜里衣服的APP',
+    projectName: '衣历穿搭',
   }, {})
 
   assert.equal(result.status, 'question')
-  assert.equal(result.nameProposal.suggestedName, '万年历工具')
-  assert.ok(result.nameProposal.suggestedName.length <= 16)
+  assert.equal(result.nameProposal.suggestedName, '衣历穿搭')
 
   let state = result
   const answers = [
@@ -967,13 +1368,13 @@ test('draw2code_create proposes a short project name from a long product descrip
     sessionId: state.sessionId,
     revision: state.revision,
   }, {})
-  assert.equal(confirmed.boardName, '万年历工具 - 原型')
+  assert.equal(confirmed.boardName, '衣历穿搭')
 })
 
 test('draw2code_create persists answers, returns one next question, and is idempotent', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
-  const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭工具' }, {})
+  const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭工具', projectName: '万年历穿搭' }, {})
 
   const answerArgs = {
     root,
@@ -997,7 +1398,7 @@ test('draw2code_create persists answers, returns one next question, and is idemp
 test('draw2code_create stores free text directly and uses the final brief as the single confirmation', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
-  const started = await tool.execute({ root, action: 'start', idea: '一个生活工具' }, {})
+  const started = await tool.execute({ root, action: 'start', idea: '一个生活工具', projectName: '生活助手' }, {})
 
   const answered = await tool.execute({
     root,
@@ -1022,9 +1423,10 @@ test('draw2code_create finishes a radar social app brief in five useful question
     root,
     action: 'start',
     idea: '我想做一个类似龙珠雷达的陌生人社交APP。',
+    projectName: '龙珠雷达社交',
   }, {})
 
-  assert.equal(state.nameProposal.suggestedName, '龙珠雷达社交APP')
+  assert.equal(state.nameProposal.suggestedName, '龙珠雷达社交')
   const questionIds = [state.question.id]
   assert.equal(state.question.id, 'core-user')
 
@@ -1111,13 +1513,13 @@ test('draw2code_create finishes a radar social app brief in five useful question
   }, {})
   assert.equal(confirmed.status, 'confirmed')
   assert.equal(confirmed.revision, 7)
-  assert.equal(confirmed.boardName, '龙珠雷达社交APP - 原型')
+  assert.equal(confirmed.boardName, '龙珠雷达社交')
 })
 
 test('draw2code_create rejects stale answers without overwriting the draft', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
-  const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭工具' }, {})
+  const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭工具', projectName: '万年历穿搭' }, {})
 
   const stale = await tool.execute({
     root,
@@ -1137,7 +1539,7 @@ test('draw2code_create rejects stale answers without overwriting the draft', asy
 test('draw2code_create lists and resumes drafts without guessing from silence', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
-  const started = await tool.execute({ root, action: 'start', idea: '一个未完成的新工具' }, {})
+  const started = await tool.execute({ root, action: 'start', idea: '一个未完成的新工具', projectName: '新工具' }, {})
 
   const listed = await tool.execute({ root, action: 'list' }, {})
   assert.equal(listed.status, 'drafts')
@@ -1169,7 +1571,7 @@ test('draw2code_create confirms an isolated board and hands off to update', asyn
     elements: [{ id: 'old-user-content', type: 'text', text: '用户保留内容' }],
   })
 
-  let state = await create.execute({ root, action: 'start', idea: '万年历穿搭工具' }, {})
+  let state = await create.execute({ root, action: 'start', idea: '万年历穿搭工具', projectName: '万年历穿搭' }, {})
   const answers = [
     ['target-platform', ['web']],
     ['core-user', ['consumer']],
@@ -1202,7 +1604,7 @@ test('draw2code_create confirms an isolated board and hands off to update', asyn
 
   assert.equal(confirmed.status, 'confirmed')
   assert.equal(confirmed.nextAction, 'draw2code_update')
-  assert.match(confirmed.boardName, /万年历穿搭工具/)
+  assert.equal(confirmed.boardName, '万年历穿搭')
   assert.equal(confirmed.activeBoard, confirmed.boardName)
 
   const oldBoard = await store.read(root, 'prototype')

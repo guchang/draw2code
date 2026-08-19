@@ -21,11 +21,78 @@ Feature: 画码原型板的人机协作
     And text 元素应自动绑定到“login-frame”
     And 工具结果的 verified 应为 true
 
+  Scenario: 常见的无歧义 upsert 简写不应触发反复重试
+    When agent 直接提交带 id 和 type 的元素
+    And agent 提交省略 op 的 element 包装
+    And agent 把 id、type 和几何字段平铺在 op 为 upsert 的对象上
+    Then draw2code_update 应统一按 upsert 处理
+    And agent 不应因为缺少 op 或 element 包装重新提交整批原型
+
+  Scenario: delete 的目标 id 放在 element 内时不应反复重试
+    Given 画板中存在 id 为“旧日期”的元素
+    When agent 提交 op 为 delete 且 element.id 为“旧日期”的操作
+    Then draw2code_update 应删除该元素并读回验证
+    And agent 不应为了移动 id 字段而重复提交整批修改
+
+  Scenario: 同一批对相同 id 的操作应按最终净结果校验
+    When agent 在同一批先 upsert 再 delete 临时元素“temp-note”
+    Then 读回校验应确认“temp-note”最终不存在
+    And 不应因为早先的 upsert 目标不存在而误报 write verification failed
+    When agent 在同一批先 delete 再 upsert 元素“final-note”
+    Then 读回校验应确认“final-note”最终存在且内容匹配
+
+  Scenario: 明确的 frame 局部坐标应安全换算为画布坐标
+    Given 页面 frame 位于画布坐标 x=440 和 y=100
+    When agent 新增 frameId 指向该页面且 x=20、y=80 的标题
+    And 标题原坐标无法位于 frame 内但平移后能完整位于 frame 内
+    Then draw2code_update 应把标题保存到 x=460 和 y=180
+    But 已经位于 frame 内的绝对坐标不应再次平移
+    And 两种坐标解释都无法完整位于 frame 内时应返回 layout-invalid
+
   Scenario: 绑定到组件的文字首次渲染就应可见
     When agent 新增一个事项类型外框
     And agent 新增一个 containerId 指向该外框的文字“搬家”
     Then draw2code_update 应在外框的 boundElements 中补入该文字
     And 用户不需要双击外框才能看到“搬家”
+
+  Scenario: 按钮与表单值应按组件语义对齐
+    When agent 新增 customData.role 为 primary-action 的按钮及其绑定文案
+    And agent 新增 customData.role 为 select 的城市选择框及其绑定文案
+    Then 按钮文案应写为 center 和 middle
+    And 按钮文案的文字盒应缩至真实行高并在按钮内垂直居中
+    And 城市选择框文案应写为 left 和 middle
+
+  Scenario: 工具自动修正语义对齐后仍应通过写入校验
+    When agent 把 customData.role 为 chip 的标签写成 left 和 top
+    Then draw2code_update 应把标签规范为 center 和 middle
+    And 读回校验应以规范后的语义对齐为准
+    And 工具不应在已经成功写盘后误报 write verification failed
+
+  Scenario: 绑定文字缺少组件语义时不应猜测对齐方式
+    When agent 新增一个有绑定文字但没有 customData.role 的外框
+    Then draw2code_update 应返回 component-role-missing
+    And 画板文件不应写入这次更新
+
+  Scenario: 底部导航标签必须声明导航项语义
+    Given 页面底部已有 customData.role 为 bottom-navigation 的 shell
+    When agent 在 shell 内新增没有 customData.role 的独立文字“日历”
+    Then draw2code_update 应返回 bottom-navigation-item-role-missing
+    When agent 把该文字设置为 customData.role=bottom-navigation-item
+    Then 该文字应写为 center 和 middle
+
+  Scenario: 底部导航的多个栏目不能共绑一个 shell
+    Given 页面底部已有 customData.role 为 bottom-navigation 的 shell
+    When agent 把“日历”“衣橱”“我的”三个 bottom-navigation-item 都绑定到该 shell
+    Then draw2code_update 应清除三个文字的 containerId
+    And 三个文字应保留各自互不重叠的栏目槽位
+    And 三个文字的文字盒应在 shell 内垂直居中
+    And shell 不应生成歧义的 boundElements
+
+  Scenario: 空白或重叠的底部导航不应写入
+    When agent 只新增 bottom-navigation shell 而没有可见栏目文字
+    Then draw2code_update 应返回 bottom-navigation-items-missing
+    When agent 新增两个互相重叠的 bottom-navigation-item
+    Then draw2code_update 应返回 bottom-navigation-item-overlap
 
   Scenario: 页面内文字误用 containerId 指向 frame 时仍应可见
     Given agent 新增一个 id 为“radar-page”的 frame
@@ -302,15 +369,18 @@ Feature: 画码原型板的人机协作
 
   Scenario: 长需求描述不应直接成为画板名称
     When 用户说“万年历工具 可查看公历 农历 节假日 宜忌等传统历法信息的日历应用工具”
-    Then draw2code_create 建议的核心项目名应为“万年历工具”
-    And 用户确认后创建的画板名应保持简短
+    Then Agent 应理解完整需求并概括出简短的语义化项目名
+    And Agent 应把项目名作为 projectName 显式传给 draw2code_create
+    But Agent 不应从原话截取前 N 个字符作为项目名
+    And 用户确认后创建的画板名应直接使用 projectName
+    And 画板名不应追加“原型”后缀
     And 完整需求描述仍应保存在项目简报中
 
   Scenario: 类比式产品描述应提炼为完整的核心产品名
     When 用户说“我想做一个类似龙珠雷达的陌生人社交APP”
-    Then draw2code_create 建议的核心项目名应为“龙珠雷达社交APP”
-    And 用户确认后创建的画板名应为“龙珠雷达社交APP - 原型”
-    And 名称不应出现“APP工”这类被截断的产品类型
+    Then Agent 应根据产品语义概括项目名“龙珠雷达社交”
+    And draw2code_create 不应自行从用户原话生成或裁剪名称
+    And 用户确认后创建的画板名应为“龙珠雷达社交”
 
   Scenario: 项目简报必须提供逐页 mock 数据蓝图
     Given 用户创建一个陌生人社交 App

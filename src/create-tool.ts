@@ -65,56 +65,27 @@ function clone<T>(value: T): T {
 }
 
 const PROJECT_NAME_MAX_LENGTH = 16
-const PRODUCT_TYPE_RE = /(APP|WEB|Web|小程序|应用|工具|助手|平台|系统|网站)$/u
+const PROJECT_NAME_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5 -]*$/u
 
-function safeName(value: string): string {
-  const cleaned = value
-    .replace(/^\s*(?:我(?:想|想要|要)?(?:做|创建|开发|设计)|帮我(?:做|创建|开发|设计)|从零(?:做|创建|开发|设计)|(?:请)?(?:做|创建|开发|设计))\s*(?:一个|一款|个|款)?\s*/u, '')
-    .replace(/^\s*(?:一个|一款)\s*/u, '')
-    .replace(/[^\w\u4e00-\u9fa5 -]/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .slice(0, 48)
-  return cleaned === '' ? '新项目' : cleaned
+function normalizeProjectName(value: string): string {
+  return value.trim().replace(/\s+/gu, ' ')
 }
 
-function semanticProjectName(value: string): string {
-  const cleaned = safeName(value)
-  const purposeBoundary = cleaned.search(/\s+(?=可(?:以)?|能(?:够)?|支持|结合|用于|用来|帮助|包含|包括|提供|面向|主要|通过|为了|从而)/u)
-  let core = (purposeBoundary > 0 ? cleaned.slice(0, purposeBoundary) : cleaned).trim()
-
-  const comparison = /^(?:类似|仿照|参考|像)\s*(.+?)(?:风格)?的(.+)$/u.exec(core)
-  if (comparison !== null) core = `${comparison[1]}${comparison[2]}`
-
-  core = core
-    .replace(/风格/gu, '')
-    .replace(/陌生人社交/gu, '社交')
-    .trim()
-
-  const completeProduct = /^(.+?(?:APP|WEB|Web|小程序|应用|工具|助手|平台|系统|网站))(?:\s*(?:开发|设计|项目|产品).*)?$/u.exec(core)
-  if (completeProduct !== null) core = completeProduct[1]
-  return core === '' ? '新项目' : core
-}
-
-function fitProjectName(value: string): string {
-  if (value.length <= PROJECT_NAME_MAX_LENGTH) return value
-  const suffix = PRODUCT_TYPE_RE.exec(value)?.[1] ?? ''
-  if (suffix === '') return value.slice(0, PROJECT_NAME_MAX_LENGTH).trim()
-  const prefixLength = Math.max(1, PROJECT_NAME_MAX_LENGTH - suffix.length)
-  return `${value.slice(0, prefixLength).trim()}${suffix}`
-}
-
-function compactProjectName(value: string): string {
-  return fitProjectName(semanticProjectName(value))
-}
-
-function projectNameFromIdea(idea: string): string {
-  const value = semanticProjectName(idea)
-  return fitProjectName(PRODUCT_TYPE_RE.test(value) ? value : `${value}工具`)
+function projectNameValidationError(value: string, rawIdea?: string): string | null {
+  if (value === '') return 'projectName 不能为空'
+  if (rawIdea !== undefined && value === normalizeProjectName(rawIdea)) {
+    return 'projectName 不能直接复制完整 idea；请理解完整需求后重新概括产品名称'
+  }
+  if (value.length > PROJECT_NAME_MAX_LENGTH) {
+    return `projectName 最多 ${PROJECT_NAME_MAX_LENGTH} 个字符；请基于完整需求重新概括，不要截取原话前 ${PROJECT_NAME_MAX_LENGTH} 个字符`
+  }
+  if (/(?:\s*-\s*)?原型$/u.test(value)) return 'projectName 只写产品名称，不要添加“原型”后缀'
+  if (!PROJECT_NAME_RE.test(value)) return 'projectName 只能包含中英文、数字、空格、连字符和下划线'
+  return null
 }
 
 function boardNameFromProject(projectName: string, existing: Set<string>): string {
-  const base = `${compactProjectName(projectName)} - 原型`
+  const base = projectName
   if (!existing.has(base)) return base
   for (let index = 2; index < 1000; index += 1) {
     const candidate = `${base} ${index}`
@@ -267,13 +238,13 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
     name: 'draw2code_create',
     description: 'Create a new 画码 project through a stateful, choice-first grilling flow. '
       + 'This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. '
-      + 'Call action=start as soon as a new-project intent is clear, even when the idea is incomplete; pass the user\'s idea faithfully without speculative expansion, and do not call draw2code_update first. Explicit App/Web/mini-program wording is prefilled and must not be asked again. '
+      + 'Call action=start as soon as a new-project intent is clear, even when the idea is incomplete; pass the user\'s idea faithfully without speculative expansion, infer a concise semantic projectName from the entire idea, and do not call draw2code_update first. Never obtain projectName by copying or clipping the beginning of idea. Explicit App/Web/mini-program wording is prefilled and must not be asked again. '
       + 'After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including “还没想好” and “其他”; never truncate or silently replace options, so the user can select instead of typing. '
       + 'Map the selected label back to its option id, then call this tool again; only use the numbered text fallback when ask_user_question is unavailable. '
       + 'Use action=answer for a choice, action=revise to change an earlier answer, action=rename to accept a project-name edit, '
       + 'action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. '
       + 'The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; '
-      + 'the model must then call draw2code_update with the returned boardName. Keep the project and board name concise (the tool proposes a <=16-character core name). The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. '
+      + 'the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4–12 Chinese characters, and becomes the board name directly; never append “原型” or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. '
       + 'If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. '
       + 'Options are structured for native choice cards when available; otherwise render them as numbered choices. “Other” requires text and is stored directly; the ready brief is the single confirmation checkpoint, so never add a redundant per-answer paraphrase confirmation.',
     parameters: {
@@ -285,7 +256,7 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
         description: 'State-machine action for draw2code_create.',
       },
       idea: { type: 'string', description: 'The user’s new-project idea. Required for action=start.' },
-      projectName: { type: 'string', description: 'Human-readable project name, or the replacement name for action=rename.' },
+      projectName: { type: 'string', description: 'Agent-inferred semantic product name. Required for action=start; usually 4–12 Chinese characters, never copied or clipped from the raw idea, and without an “原型” suffix. Also used as the replacement name for action=rename.' },
       styleNote: { type: 'string', description: 'A style preference volunteered by the user; record for generate, never apply to the prototype.' },
       sessionId: { type: 'string', description: 'Project session ID returned by a prior call.' },
       revision: { type: 'integer', description: 'Expected draft revision for mutation actions.' },
@@ -341,10 +312,13 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
       if (args.action === 'start') {
         const idea = typeof args.idea === 'string' ? args.idea.trim() : ''
         if (idea === '') return errorResponse('invalid_action', 'action=start requires a non-empty idea')
+        if (typeof args.projectName !== 'string' || args.projectName.trim() === '') {
+          return errorResponse('project_name_required', '请先基于完整需求语义概括一个简短产品名，再用 projectName 重新调用 action=start；不要复制或截取原话')
+        }
+        const projectName = normalizeProjectName(args.projectName)
+        const nameError = projectNameValidationError(projectName, idea)
+        if (nameError !== null) return errorResponse('project_name_invalid', nameError)
         const projectId = newProjectId()
-        const projectName = typeof args.projectName === 'string' && args.projectName.trim() !== ''
-          ? safeName(args.projectName)
-          : projectNameFromIdea(idea)
         const draft = initialDraft(idea, projectName, args.styleNote?.trim() || null, projectId)
         const created = await projects.create(args.root, draft)
         if (!created.ok) return errorResponse(created.error.code, created.error.message)
@@ -405,7 +379,10 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
           return errorResponse('invalid_action', 'action=rename requires projectName and revision', draft)
         }
         if (draft.revision !== args.revision) return errorResponse('stale_revision', `project changed since revision ${args.revision}`, draft)
-        draft.projectName = safeName(args.projectName)
+        const projectName = normalizeProjectName(args.projectName)
+        const nameError = projectNameValidationError(projectName)
+        if (nameError !== null) return errorResponse('project_name_invalid', nameError, draft)
+        draft.projectName = projectName
         addHistory(draft, 'rename')
         const response = responseFor(projects, draft, {
           nameProposal: { suggestedName: draft.projectName, choices: [{ id: 'use', label: '使用这个名称' }] },
