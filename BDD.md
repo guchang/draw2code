@@ -131,7 +131,7 @@ bad-ops: ops[0] is "replace" but missing its scene
 
 - `npm run typecheck` 通过。
 - `npm run build` 通过，并生成 `dist/index.js` 与 `lib/client.js`。
-- `npm test` 通过：57 个 Node 内置回归测试全部通过，覆盖 update 参数容错、同批净结果校验、frame 局部坐标安全换算、按钮文字真实几何居中、底部导航独立栏目/空壳/重叠门禁、语义修复后的读回校验、同步协调、连续冲突合并、删除不复活、新画板 revision=0 竞态、当前画板目标解析、自动 reveal、组件语义对齐、用户手工对齐保护、Agent 语义命名、create grilling、原型质量门禁和 generate 恢复/验收流程。
+- `npm test` 通过：当前 68 个 Node 内置回归测试全部通过，覆盖 update 参数容错、同批净结果校验、frame 局部坐标安全换算、按钮文字真实几何居中、底部导航独立栏目/空壳/重叠门禁、语义修复后的读回校验、同步协调、已有画板和首次写入的并发竞争、删除不复活、delete-only 增量布局门禁、UTF-8 容量限制、当前画板目标解析、自动 reveal、项目草稿 revision 竞争、组件语义对齐、用户手工对齐保护、Agent 语义命名、create grilling、原型质量门禁和 generate 关联页推荐/恢复/验收流程。
 - 项目包含 Node 内置回归入口和 `features/draw2code.feature` BDD 契约。
 - DeepSeek Harness 的真实界面已加载 `画码` 标签页，当前能看到 `prototype` 画板、`新画板` 菜单入口、Excalidraw 工具栏和原型文字元素；这证明插件注册与非空画板挂载路径至少可达。
 - 重新启动 `dsh web` 后，`GET /api/draw2code/active-board?root=<workspace>` 与 `GET /api/draw2code/reveal-request?root=<workspace>` 均能从真实 host 返回成功 envelope；仅刷新网页不足以重装 host bundle。
