@@ -232,6 +232,24 @@ test('scene writes preserve Excalidraw connector and link metadata', async () =>
   assert.equal(saved.link, arrow.link)
 })
 
+test('concurrent writes from the same revision allow only one winner', async () => {
+  const { root, store } = await makeStore()
+  const initial = await store.write(root, 'concurrent-case', {
+    elements: [{ id: 'base', type: 'rectangle' }],
+  })
+  assert.equal(initial.ok, true)
+
+  const attempts = await Promise.all(Array.from({ length: 12 }, (_, index) => store.write(
+    root,
+    'concurrent-case',
+    { elements: [{ id: `candidate-${index}`, type: 'rectangle' }] },
+    initial.value.rev,
+  )))
+
+  assert.equal(attempts.filter((result) => result.ok).length, 1)
+  assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'conflict').length, 11)
+})
+
 test('draw2code_update still asks for confirmation on a manual edit conflict', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)

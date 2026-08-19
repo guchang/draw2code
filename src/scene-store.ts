@@ -559,6 +559,7 @@ function parseOps(input: unknown): SceneOp[] {
  */
 export class SceneStore {
   private readonly boardReveals = new Map<string, BoardRevealRequest>()
+  private readonly writeQueues = new Map<string, Promise<void>>()
   private revealCounter = 0
 
   constructor(private readonly ctx: Context) {}
@@ -599,6 +600,21 @@ export class SceneStore {
 
   private async scenePath(canonicalRoot: string, name: string): Promise<string> {
     return join(this.dir(canonicalRoot), `${name}.excalidraw.json`)
+  }
+
+  private async withWriteLock<T>(path: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.writeQueues.get(path) ?? Promise.resolve()
+    let release = (): void => undefined
+    const current = new Promise<void>((resolve) => { release = resolve })
+    const tail = previous.catch(() => undefined).then(() => current)
+    this.writeQueues.set(path, tail)
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+      if (this.writeQueues.get(path) === tail) this.writeQueues.delete(path)
+    }
   }
 
   /** Read the board selected by the browser, without making it a scene. */
@@ -944,33 +960,35 @@ export class SceneStore {
       return err('too-large', `scene exceeds ${MAX_SCENE_BYTES} bytes`)
     }
     const path = await this.scenePath(gated.value, named.value)
-    if (typeof baseRev === 'number') {
-      try {
-        const info = await stat(path)
-        if (Math.abs(info.mtimeMs - baseRev) > 0.5) {
-          return err('conflict', `scene changed on disk since rev ${baseRev}`)
+    return this.withWriteLock(path, async () => {
+      if (typeof baseRev === 'number') {
+        try {
+          const info = await stat(path)
+          if (Math.abs(info.mtimeMs - baseRev) > 0.5) {
+            return err('conflict', `scene changed on disk since rev ${baseRev}`)
+          }
+        } catch {
+          // Absent file: creating, no conflict.
         }
-      } catch {
-        // Absent file: creating, no conflict.
       }
-    }
-    await mkdir(this.dir(gated.value), { recursive: true })
-    // Snapshot the state being replaced (throttled for client saves, always
-    // for agent updates) so every meaningful change is rollback-able.
-    await this.archiveCurrent(gated.value, named.value, json, archive === 'agent')
-    // Atomic write (tmp + rename): concurrent writers — the agent's applyOps
-    // and the browser's debounced save both reach this — must never interleave
-    // inside the scene file. Plain writeFile truncates then streams, so two
-    // overlapping writes splice their tails into one corrupt JSON file.
-    // rename() over the destination is atomic within one filesystem.
-    const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    await writeFile(tmp, json + '\n', 'utf8')
-    await rename(tmp, path)
-    const info = await stat(path)
-    return {
-      ok: true,
-      value: { name: named.value, rev: info.mtimeMs, updatedAt: info.mtimeMs, elementCount: scene.elements.length },
-    }
+      await mkdir(this.dir(gated.value), { recursive: true })
+      // Snapshot the state being replaced (throttled for client saves, always
+      // for agent updates) so every meaningful change is rollback-able.
+      await this.archiveCurrent(gated.value, named.value, json, archive === 'agent')
+      // Atomic write (tmp + rename): concurrent writers — the agent's applyOps
+      // and the browser's debounced save both reach this — must never interleave
+      // inside the scene file. Plain writeFile truncates then streams, so two
+      // overlapping writes splice their tails into one corrupt JSON file.
+      // rename() over the destination is atomic within one filesystem.
+      const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      await writeFile(tmp, json + '\n', 'utf8')
+      await rename(tmp, path)
+      const info = await stat(path)
+      return {
+        ok: true,
+        value: { name: named.value, rev: info.mtimeMs, updatedAt: info.mtimeMs, elementCount: scene.elements.length },
+      }
+    })
   }
 
   /** Create an empty scene (fails when it already exists). */

@@ -394,6 +394,7 @@ var SceneStore = class {
     this.ctx = ctx;
   }
   boardReveals = /* @__PURE__ */ new Map();
+  writeQueues = /* @__PURE__ */ new Map();
   revealCounter = 0;
   /** Gate a requested root: must resolve on disk and sit inside a registered workspace. */
   async gate(root) {
@@ -427,6 +428,22 @@ var SceneStore = class {
   }
   async scenePath(canonicalRoot, name2) {
     return join(this.dir(canonicalRoot), `${name2}.excalidraw.json`);
+  }
+  async withWriteLock(path, task) {
+    const previous = this.writeQueues.get(path) ?? Promise.resolve();
+    let release = () => void 0;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => void 0).then(() => current);
+    this.writeQueues.set(path, tail);
+    await previous.catch(() => void 0);
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.writeQueues.get(path) === tail) this.writeQueues.delete(path);
+    }
   }
   /** Read the board selected by the browser, without making it a scene. */
   async getActiveBoard(root) {
@@ -750,25 +767,27 @@ var SceneStore = class {
       return err("too-large", `scene exceeds ${MAX_SCENE_BYTES} bytes`);
     }
     const path = await this.scenePath(gated.value, named.value);
-    if (typeof baseRev === "number") {
-      try {
-        const info2 = await stat(path);
-        if (Math.abs(info2.mtimeMs - baseRev) > 0.5) {
-          return err("conflict", `scene changed on disk since rev ${baseRev}`);
+    return this.withWriteLock(path, async () => {
+      if (typeof baseRev === "number") {
+        try {
+          const info2 = await stat(path);
+          if (Math.abs(info2.mtimeMs - baseRev) > 0.5) {
+            return err("conflict", `scene changed on disk since rev ${baseRev}`);
+          }
+        } catch {
         }
-      } catch {
       }
-    }
-    await mkdir(this.dir(gated.value), { recursive: true });
-    await this.archiveCurrent(gated.value, named.value, json, archive === "agent");
-    const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await writeFile(tmp, json + "\n", "utf8");
-    await rename(tmp, path);
-    const info = await stat(path);
-    return {
-      ok: true,
-      value: { name: named.value, rev: info.mtimeMs, updatedAt: info.mtimeMs, elementCount: scene.elements.length }
-    };
+      await mkdir(this.dir(gated.value), { recursive: true });
+      await this.archiveCurrent(gated.value, named.value, json, archive === "agent");
+      const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await writeFile(tmp, json + "\n", "utf8");
+      await rename(tmp, path);
+      const info = await stat(path);
+      return {
+        ok: true,
+        value: { name: named.value, rev: info.mtimeMs, updatedAt: info.mtimeMs, elementCount: scene.elements.length }
+      };
+    });
   }
   /** Create an empty scene (fails when it already exists). */
   async create(root, name2) {
