@@ -928,6 +928,23 @@ var ProjectStore = class {
   constructor(ctx) {
     this.ctx = ctx;
   }
+  mutationQueues = /* @__PURE__ */ new Map();
+  async withMutationLock(path, task) {
+    const previous = this.mutationQueues.get(path) ?? Promise.resolve();
+    let release = () => void 0;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => void 0).then(() => current);
+    this.mutationQueues.set(path, tail);
+    await previous.catch(() => void 0);
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.mutationQueues.get(path) === tail) this.mutationQueues.delete(path);
+    }
+  }
   async gate(root) {
     if (typeof root !== "string" || root === "") return error("workspace-unknown", "empty project root");
     let canonical;
@@ -991,13 +1008,16 @@ var ProjectStore = class {
     if (!gated.ok) return gated;
     const validId = validateProjectId(draft.projectId);
     if (!validId.ok) return validId;
-    const current = await this.read(root, draft.projectId);
-    if (!current.ok) return current;
-    if (current.value.revision !== expectedRevision) {
-      return error("stale_revision", `project changed since revision ${expectedRevision}`, current.value);
-    }
-    await this.archiveCurrent(gated.value, draft.projectId);
-    return this.writeAtomic(gated.value, draft);
+    const path = this.projectPath(gated.value, validId.value);
+    return this.withMutationLock(path, async () => {
+      const current = await this.read(root, draft.projectId);
+      if (!current.ok) return current;
+      if (current.value.revision !== expectedRevision) {
+        return error("stale_revision", `project changed since revision ${expectedRevision}`, current.value);
+      }
+      await this.archiveCurrent(gated.value, draft.projectId);
+      return this.writeAtomic(gated.value, draft);
+    });
   }
   async list(root) {
     const gated = await this.gate(root);

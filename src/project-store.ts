@@ -91,7 +91,24 @@ export function newProjectId(): string {
 }
 
 export class ProjectStore {
+  private readonly mutationQueues = new Map<string, Promise<void>>()
+
   constructor(private readonly ctx: Context) {}
+
+  private async withMutationLock<T>(path: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.mutationQueues.get(path) ?? Promise.resolve()
+    let release = (): void => undefined
+    const current = new Promise<void>((resolve) => { release = resolve })
+    const tail = previous.catch(() => undefined).then(() => current)
+    this.mutationQueues.set(path, tail)
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+      if (this.mutationQueues.get(path) === tail) this.mutationQueues.delete(path)
+    }
+  }
 
   private async gate(root: string): Promise<ProjectResult<string>> {
     if (typeof root !== 'string' || root === '') return error('workspace-unknown', 'empty project root')
@@ -164,13 +181,16 @@ export class ProjectStore {
     if (!gated.ok) return gated
     const validId = validateProjectId(draft.projectId)
     if (!validId.ok) return validId
-    const current = await this.read(root, draft.projectId)
-    if (!current.ok) return current
-    if (current.value.revision !== expectedRevision) {
-      return error('stale_revision', `project changed since revision ${expectedRevision}`, current.value)
-    }
-    await this.archiveCurrent(gated.value, draft.projectId)
-    return this.writeAtomic(gated.value, draft)
+    const path = this.projectPath(gated.value, validId.value)
+    return this.withMutationLock(path, async () => {
+      const current = await this.read(root, draft.projectId)
+      if (!current.ok) return current
+      if (current.value.revision !== expectedRevision) {
+        return error('stale_revision', `project changed since revision ${expectedRevision}`, current.value)
+      }
+      await this.archiveCurrent(gated.value, draft.projectId)
+      return this.writeAtomic(gated.value, draft)
+    })
   }
 
   async list(root: string): Promise<ProjectResult<ProjectDraft[]>> {

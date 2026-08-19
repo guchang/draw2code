@@ -1405,6 +1405,36 @@ test('draw2code_generate inherits create brief page recommendations and deferred
   assert.equal(ready.brief.visualDirection, '未来科技')
 })
 
+test('concurrent project saves from one revision allow only one answer', async () => {
+  const { root, projects } = await makeStore()
+  const created = await projects.create(root, {
+    projectId: 'project-00000000-0000-4000-8000-000000000002',
+    projectName: '并发需求',
+    originalIdea: '验证并发回答不会互相覆盖',
+    status: 'draft',
+    revision: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    boardName: null,
+    deferredStyleNote: null,
+    answers: {},
+    currentQuestion: null,
+    pendingInterpretation: null,
+    brief: null,
+    history: [],
+  })
+  assert.equal(created.ok, true)
+
+  const attempts = await Promise.all(Array.from({ length: 12 }, (_, index) => projects.save(root, {
+    ...created.value,
+    projectName: `并发需求 ${index}`,
+    revision: 2,
+  }, 1)))
+
+  assert.equal(attempts.filter((result) => result.ok).length, 1)
+  assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'stale_revision').length, 11)
+})
+
 test('draw2code_create starts a choice-first draft without touching the board', async () => {
   const { root, canonicalRoot, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
