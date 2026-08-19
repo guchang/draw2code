@@ -27,13 +27,15 @@ Draw2Code is a human-AI collaborative prototyping plugin for [DeepSeek Harness (
 - Node.js 22 or newer;
 - `dsh-better-sidebar` 0.12.3 or newer.
 
+Draw2Code registers its board inside the right sidebar provided by `dsh-better-sidebar`. DSH currently activates only bundles installed as direct profile dependencies, not another plugin's transitive dependencies, so both install commands below are required.
+
 ## Install from GitHub
 
 Tested host and browser bundles are committed, so end users do not need to build locally:
 
 ```bash
 dsh plugin --profile web add dsh-better-sidebar
-dsh plugin --profile web add github:guchang/draw2code#v0.1.0
+dsh plugin --profile web add github:guchang/draw2code#v0.1.1
 dsh web
 ```
 

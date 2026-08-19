@@ -41,6 +41,8 @@ Vibe Coding 很容易从一句模糊需求直接跳到代码，结果往往是�
 - Node.js 22 或更高版本；
 - `dsh-better-sidebar` 0.12.3 或更高版本。
 
+Draw2Code 把画板注册到 `dsh-better-sidebar` 提供的右侧栏中。DSH 当前只会自动启用用户直接安装的 bundle，不会自动启用另一个插件的传递依赖，因此下面两条安装命令都必须执行。
+
 ## 从 GitHub 安装
 
 仓库提交了经过测试的 `dist/` 和 `lib/` 运行产物，因此普通用户不需要在本地构建：
@@ -50,7 +52,7 @@ Vibe Coding 很容易从一句模糊需求直接跳到代码，结果往往是�
 dsh plugin --profile web add dsh-better-sidebar
 
 # 2. 安装 Draw2Code 稳定版
-dsh plugin --profile web add github:guchang/draw2code#v0.1.0
+dsh plugin --profile web add github:guchang/draw2code#v0.1.1
 
 # 3. 重启 dsh web；如果已经在运行，请先停止旧进程再启动
 dsh web
