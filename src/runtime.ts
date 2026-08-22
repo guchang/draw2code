@@ -22,7 +22,7 @@ export type Draw2CodeCommand =
   | { type: 'list'; root: string }
   | { type: 'read'; root: string; board?: string }
   | { type: 'create'; root: string; input: Record<string, unknown> }
-  | { type: 'update'; root: string; board?: string; ops: unknown[]; force?: boolean; safeMode?: boolean }
+  | { type: 'update'; root: string; board?: string; ops: unknown[]; force?: boolean; safeMode?: boolean; visualReview?: Record<string, unknown> }
   | { type: 'generate'; root: string; input: Record<string, unknown> }
   | { type: 'open'; root: string; board?: string; presentation?: 'auto' | 'inline' | 'browser' }
 
@@ -138,6 +138,7 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
         ops: command.ops,
         ...(command.force === undefined ? {} : { force: command.force }),
         ...(command.safeMode === undefined ? {} : { safeMode: command.safeMode }),
+        ...(command.visualReview === undefined ? {} : { visualReview: command.visualReview }),
       } as never, {} as never) as Record<string, unknown>
     } else if (command.type === 'generate') {
       data = await draw2codeGenerateTool(scenes, projects).execute({ ...command.input, root: command.root } as never, {} as never) as Record<string, unknown>

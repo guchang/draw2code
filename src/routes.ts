@@ -187,13 +187,28 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
       kind: 'exact',
       path: '/api/draw2code/reveal-request',
       handler: async (req, res) => {
-        if (!guard(req, res, 'GET')) return
-        const root = query(req, 'root')
-        if (root === undefined) {
-          writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: 'missing root' } })
+        const method = req.method ?? ''
+        if (method === 'GET') {
+          if (!guard(req, res, 'GET')) return
+          const root = query(req, 'root')
+          if (root === undefined) {
+            writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: 'missing root' } })
+            return
+          }
+          respond(res, await store.getBoardReveal(root))
           return
         }
-        respond(res, await store.getBoardReveal(root))
+        if (method === 'PUT') {
+          if (!guard(req, res, 'PUT')) return
+          try {
+            const body = await readJsonBody(req)
+            respond(res, await store.ackBoardReveal(String(body.root ?? ''), String(body.id ?? ''), String(body.board ?? '')))
+          } catch (error) {
+            writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
+          }
+          return
+        }
+        writeJson(res, 405, { ok: false, error: { code: 'method', message: `method not allowed: ${method}` } })
       },
     },
     // -------------------------------------------------- scene (read / create / delete)

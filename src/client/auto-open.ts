@@ -14,7 +14,9 @@ const POLL_MS = 800
 export interface BoardRevealRequest {
   id: string
   board: string
+  revision: number
   createdAt: number
+  consumedAt?: number
 }
 
 interface StorageLike {

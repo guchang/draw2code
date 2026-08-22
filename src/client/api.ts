@@ -31,7 +31,9 @@ export interface VersionRow {
 export interface BoardRevealRequest {
   id: string
   board: string
+  revision: number
   createdAt: number
+  consumedAt?: number
 }
 
 interface ExportPayload {
@@ -211,6 +213,10 @@ export class D2cApi {
 
   getBoardReveal(root: string): Promise<D2cResult<{ request: BoardRevealRequest | null }>> {
     return get(this.path(`/api/draw2code/reveal-request?root=${encodeURIComponent(root)}`), this.options.token)
+  }
+
+  ackBoardReveal(root: string, id: string, board: string): Promise<D2cResult<BoardRevealRequest>> {
+    return send(this.path('/api/draw2code/reveal-request'), 'PUT', { root, id, board }, this.options.token)
   }
 
   read(root: string, name: string): Promise<D2cResult<{ rev: number; scene: ScenePayload }>> {

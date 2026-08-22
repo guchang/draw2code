@@ -21,6 +21,26 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 
 // src/tools.ts
 import { defineTool as defineTool2 } from "@deepseek-ai/dsh-tools";
+
+// src/layout.ts
+var PRIMARY_ACTION_ROLES = /* @__PURE__ */ new Set(["primary-action", "primary-button"]);
+var INTERACTIVE_ROLES = /* @__PURE__ */ new Set([
+  ...PRIMARY_ACTION_ROLES,
+  "button",
+  "secondary-action",
+  "secondary-button",
+  "danger-button",
+  "destructive-button",
+  "chip",
+  "filter-chip",
+  "choice-chip",
+  "tab",
+  "tab-item",
+  "bottom-navigation-item",
+  "bottom-nav-item"
+]);
+
+// src/tools.ts
 var MAX_ELEMENTS_JSON = 120 * 1024;
 
 // src/runtime.ts

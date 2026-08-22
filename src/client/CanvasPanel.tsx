@@ -21,7 +21,7 @@ import excalidrawCss from '@excalidraw/excalidraw/index.css'
 import { Excalidraw, MainMenu } from '@excalidraw/excalidraw'
 import type { LibraryItems_anyVersion } from '@excalidraw/excalidraw/types'
 import { D2cApi, type SceneMetaRow, type VersionRow } from './api.ts'
-import { capturePendingSave, saveWithConflictRetry, type PendingSave } from './sync.ts'
+import { capturePendingSave, isNormalizationOnlyEcho, saveWithConflictRetry, type PendingSave } from './sync.ts'
 import basicUxLibrary from './library-assets/basic-ux-wireframing-elements.json'
 import loFiWireframingLibrary from './library-assets/lo-fi-wireframing-kit.json'
 import dataVizLibrary from './library-assets/data-viz.json'
@@ -384,6 +384,17 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     let cancelled = false
     readyRef.current = false
 
+    const acknowledgeRenderedReveal = async (revision: number): Promise<void> => {
+      const reveal = await apiRef.current.getBoardReveal(cwd)
+      if (cancelled || !reveal.ok || reveal.request === null || reveal.request.consumedAt !== undefined) return
+      if (reveal.request.board !== boardName || reveal.request.revision !== revision) return
+      // Let Excalidraw commit the pulled scene before reporting it visible.
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())))
+      if (cancelled || boardRef.current !== boardName || revRef.current !== revision || !readyRef.current) return
+      const acknowledged = await apiRef.current.ackBoardReveal(cwd, reveal.request.id, boardName)
+      if (!acknowledged.ok) console.warn('[dsh-draw2code] reveal acknowledgement failed:', acknowledged.error.message)
+    }
+
     const pull = async (): Promise<void> => {
       if (!visible) return
       const result = await apiRef.current.read(cwd, boardName)
@@ -412,12 +423,14 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
         // Same revision: scene already current. Keep the save gate open so
         // local edits persist while the poll skips the reload.
         readyRef.current = true
+        void acknowledgeRenderedReveal(result.rev)
         return
       }
       revRef.current = result.rev
       readyRef.current = true
       lastPulledJsonRef.current = JSON.stringify(result.scene.elements)
       applyRemoteScene(result.scene.elements)
+      void acknowledgeRenderedReveal(result.rev)
     }
 
     void pull()
@@ -489,6 +502,15 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     const list = (Array.isArray(elements) ? elements : []) as Array<Record<string, unknown>>
     const json = JSON.stringify(list)
     if (lastPulledJsonRef.current !== null && json === lastPulledJsonRef.current) return
+    if (isNormalizationOnlyEcho(serverElementsRef.current, list)) {
+      // Excalidraw assigns index/version metadata on first render. Adopt that
+      // local baseline without rewriting an otherwise identical board and
+      // invalidating the revision tied to the visible-review request.
+      elementsRef.current = list
+      serverElementsRef.current = list
+      lastPulledJsonRef.current = json
+      return
+    }
     if (staleEchoJsonRef.current !== null) {
       if (json === staleEchoJsonRef.current) return
       staleEchoJsonRef.current = null

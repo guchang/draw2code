@@ -17,7 +17,7 @@ import { inflateSync } from 'node:zlib'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { formatLayoutIssues, inspectPrototypeLayout } from './layout.ts'
+import { formatLayoutIssues, inspectPrototypeLayout, inspectPrototypeQuality } from './layout.ts'
 import { type ProjectStore } from './project-store.ts'
 import {
   pageElementIds,
@@ -377,6 +377,90 @@ function validateNewPrototypePageContracts(
   if (errors.length > 0) throw new Error(`layout-invalid:\n${errors.map((error) => `- ${error}`).join('\n')}`)
 }
 
+interface VisualReviewEvidence {
+  phase: 'representative' | 'final'
+  passed: boolean
+  boardRevision: number
+  revealRequestId: string
+  inspectedPageIds: string[]
+  observations: string[]
+}
+
+function parseVisualReview(input: unknown): VisualReviewEvidence | null {
+  if (typeof input !== 'object' || input === null) return null
+  const value = input as Record<string, unknown>
+  const phase = str(value.phase)
+  if (phase !== 'representative' && phase !== 'final') return null
+  const inspectedPageIds = Array.isArray(value.inspectedPageIds)
+    ? value.inspectedPageIds.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : []
+  const observations = Array.isArray(value.observations)
+    ? value.observations.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : []
+  return {
+    phase,
+    passed: value.passed === true,
+    boardRevision: typeof value.boardRevision === 'number' && Number.isFinite(value.boardRevision) ? value.boardRevision : -1,
+    revealRequestId: str(value.revealRequestId),
+    inspectedPageIds,
+    observations,
+  }
+}
+
+async function validateVisualReviewEvidence(
+  store: SceneStore,
+  root: string,
+  boardName: string,
+  boardRevision: number | null,
+  evidence: VisualReviewEvidence | null,
+): Promise<void> {
+  if (evidence === null) return
+  if (boardRevision === null || Math.abs(evidence.boardRevision - boardRevision) > 0.5) {
+    throw new Error(`visual-review-stale: evidence revision ${evidence.boardRevision} does not match current board revision ${boardRevision ?? 'missing'}; inspect the latest visible board before reviewing`)
+  }
+  const reveal = await store.getBoardReveal(root)
+  if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`)
+  const request = reveal.value.request
+  if (request === null || request.id !== evidence.revealRequestId || request.board !== boardName) {
+    throw new Error('visual-review-stale: revealRequestId is missing, belongs to another board, or is no longer the latest visible-board reveal; use the rev and revealRequestId from the most recent successful update')
+  }
+  if (request.revision !== boardRevision) {
+    throw new Error(`visual-review-stale: reveal request revision ${request.revision} does not match current board revision ${boardRevision ?? 'missing'}`)
+  }
+  if (typeof request.consumedAt !== 'number') {
+    throw new Error('visual-review-not-visible: the browser has not acknowledged opening this reveal request; wait for 画码 to open before submitting visualReview')
+  }
+}
+
+function validatePhasedDrawing(
+  currentElements: Array<Record<string, unknown>>,
+  prospectiveElements: Array<Record<string, unknown>>,
+  visualReview: VisualReviewEvidence | null,
+): void {
+  const currentPages = prototypePages(currentElements)
+  const currentPageIds = new Set(currentPages.map((page) => page.id))
+  const newPages = prototypePages(prospectiveElements).filter((page) => !currentPageIds.has(page.id))
+  if (currentPages.length === 0 && newPages.length >= 3) {
+    throw new Error('visual-review-required: first draw one representative page, inspect it in the visible 画码 canvas, then add the remaining pages; do not author three or more unseen pages in the first batch')
+  }
+  if (currentPages.length > 0 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
+    const representativeReviewed = visualReview?.phase === 'representative'
+      && visualReview.passed
+      && visualReview.observations.length > 0
+      && visualReview.inspectedPageIds.some((id) => currentPageIds.has(id))
+    if (!representativeReviewed) {
+      throw new Error('visual-review-required: before adding multiple remaining pages, submit visualReview={phase:"representative",passed:true,inspectedPageIds:["<existing page id>"],observations:["what was checked"]}')
+    }
+  }
+}
+
+function reviewedEveryPage(evidence: VisualReviewEvidence | null, pages: PrototypePage[]): boolean {
+  if (pages.length === 0) return false
+  if (evidence?.phase !== 'final' || !evidence.passed || evidence.observations.length === 0) return false
+  const reviewed = new Set(evidence.inspectedPageIds)
+  return pages.every((page) => reviewed.has(page.id))
+}
+
 function layoutWarnings(elements: Array<Record<string, unknown>>): JsonValue[] {
   const report = inspectPrototypeLayout(elements)
   return [...report.errors, ...report.warnings].map((item) => ({
@@ -384,6 +468,13 @@ function layoutWarnings(elements: Array<Record<string, unknown>>): JsonValue[] {
     ...(item.id === undefined ? {} : { id: item.id }),
     message: item.message,
   })) as JsonValue[]
+}
+
+function prototypeQualitySummary(value: JsonValue | undefined): string {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return ''
+  const qualityScore = typeof value.qualityScore === 'number' ? value.qualityScore : 0
+  const warnings = Array.isArray(value.warnings) ? value.warnings.length : 0
+  return `prototype quality: ${qualityScore}/100 · warnings ${warnings}`
 }
 
 function makeKey(root: string, name: string): string {
@@ -744,6 +835,7 @@ export function draw2codeReadTool(store: SceneStore) {
           elementCount: { type: 'integer', required: true },
           summary: { type: 'string', required: true },
           layoutWarnings: { type: 'array', items: { type: 'json' }, required: true },
+          prototypeQuality: { type: 'json', required: true },
           pageNames: { type: 'array', items: { type: 'string' }, required: true },
           pages: { type: 'array', items: { type: 'json' }, required: true },
           pageRelations: { type: 'array', items: { type: 'json' }, required: true },
@@ -752,12 +844,13 @@ export function draw2codeReadTool(store: SceneStore) {
           elements: { type: 'json', required: true },
         },
       },
-      render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; pageNames?: string[]; pageRelations?: JsonValue[]; summary?: string; layoutWarnings?: JsonValue[]; file?: string }) => text(
+      render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; pageNames?: string[]; pageRelations?: JsonValue[]; summary?: string; layoutWarnings?: JsonValue[]; prototypeQuality?: JsonValue; file?: string }) => text(
         [
           `board: ${value.board ?? ''} · ${value.elementCount ?? 0} elements`,
           `pages: ${(value.pageNames ?? []).join('、') || '（未识别）'} · relations: ${value.pageRelations?.length ?? 0}`,
           value.activeBoard !== undefined && value.activeBoard !== value.board ? `当前画板: ${value.activeBoard}（与读取目标不同）` : '',
           (value.layoutWarnings ?? []).length > 0 ? `原型质量提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : '',
+          prototypeQualitySummary(value.prototypeQuality),
           value.summary ?? '',
           value.file !== undefined ? `file: ${value.file}` : '',
         ].filter(Boolean).join('\n'),
@@ -774,6 +867,7 @@ export function draw2codeReadTool(store: SceneStore) {
         ...layoutWarnings(scene.elements),
         ...pageMembershipWarnings(scene.elements, pages),
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index)
+      const prototypeQuality = inspectPrototypeQuality(scene.elements)
       const summary = scene.elements.map(describeElement).join('\n')
       const elementsJson = JSON.stringify(scene.elements)
       const elementsBytes = Buffer.byteLength(elementsJson, 'utf8')
@@ -791,6 +885,7 @@ export function draw2codeReadTool(store: SceneStore) {
         frameNames: pages.map((page) => page.name),
         summary,
         layoutWarnings: qualityWarnings as unknown as JsonValue[],
+        prototypeQuality: prototypeQuality as unknown as JsonValue,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload as never,
       }
@@ -807,13 +902,14 @@ export function draw2codeUpdateTool(store: SceneStore) {
       + '{op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|'
       + 'diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when '
       + 'absent. Triggers: 画原型 / 画一下 / 在画板上… / '
-      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
+      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Use semantic roles as a component API: page-heading/page-header for headers, content-card/task-card/stat-card/category-card for information blocks, input/select/search-field for form fields, chip/filter-chip for choices, bottom-navigation plus bottom-navigation-item for global navigation, and exactly one primary-action for the page\'s main task. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Three or more first-batch pages are rejected: draw one representative page, inspect it visibly, then add the rest with representative visualReview evidence. verified/writeVerified only prove persistence; report completion only when completionReady=true after final visualReview covers every page. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       name: { type: 'string', description: 'Board name. Omit to target the board currently selected in the 画码 UI.' },
       ops: { type: 'json', required: true, description: 'Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"首页",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
       force: { type: 'boolean', description: '已读到冲突并且用户确认后可设置为 true，强制执行。默认 false。' },
       safeMode: { type: 'boolean', description: '是否在有风险改动时要求确认（默认 true）。设为 false 会直接执行，可能覆盖用户手工改动。' },
+      visualReview: { type: 'json', description: 'Visible-canvas review evidence tied to the latest successful update: {phase:"representative"|"final",passed:true,boardRevision:<returned rev>,revealRequestId:"<returned revealRequestId>",inspectedPageIds:[...],observations:[...]}. Final review includes every page id and must be sent with empty ops after inspecting the updated board.' },
     },
     output: {
       schema: {
@@ -826,6 +922,10 @@ export function draw2codeUpdateTool(store: SceneStore) {
           elementCount: { type: 'integer', required: true },
           applied: { type: 'integer', required: true },
           verified: { type: 'boolean', required: true },
+          writeVerified: { type: 'boolean', required: true },
+          completionReady: { type: 'boolean', required: true },
+          nextAction: { type: 'string', required: true },
+          prototypeQuality: { type: 'json', required: true },
           revealRequestId: { type: 'string' },
           layoutWarnings: { type: 'array', items: { type: 'json' }, required: true },
           requiresConfirmation: { type: 'boolean' },
@@ -843,20 +943,23 @@ export function draw2codeUpdateTool(store: SceneStore) {
           },
         },
       },
-      render: (_args, value: { targetBoard?: string; activeBoard?: string; pending?: boolean; elementCount?: number; applied?: number; verified?: boolean; layoutWarnings?: JsonValue[]; conflicts?: unknown[]; planSummary?: string }) => text(
+      render: (_args, value: { targetBoard?: string; activeBoard?: string; pending?: boolean; elementCount?: number; applied?: number; verified?: boolean; writeVerified?: boolean; completionReady?: boolean; nextAction?: string; prototypeQuality?: JsonValue; revealRequestId?: string; layoutWarnings?: JsonValue[]; conflicts?: unknown[]; planSummary?: string }) => text(
         value.pending === true
           ? `【待确认】检测到潜在冲突（${value.conflicts?.length ?? 0} 条）：\n${value.planSummary ?? ''}\n请先确认后再重试：在你确认了之后，请重新调用 draw2code_update 并设置 force=true。`
-          : value.activeBoard !== undefined && value.targetBoard !== value.activeBoard
-            ? `board ${value.targetBoard ?? ''} updated and verified on disk, but the visible board is ${value.activeBoard}; switch the 画码 board or retry without name to update what the user is viewing.`
-            : `board ${value.targetBoard ?? ''} updated and verified: ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. The 画码 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `\n原型质量提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : ''}`,
+          : `board ${value.targetBoard ?? ''} updated and selected. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === 'object' && (value.prototypeQuality as Record<string, JsonValue>).visualReviewRequired === true}; revealRequestId=${value.revealRequestId ?? 'missing'}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. ${value.nextAction ?? ''} The 画码 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `\n结构与布局提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : ''}`,
       ),
     },
-    async execute(args: { root: string; name?: string; ops: unknown; force?: boolean; safeMode?: boolean }) {
+    async execute(args: { root: string; name?: string; ops: unknown; force?: boolean; safeMode?: boolean; visualReview?: unknown }) {
       const safeMode = args.safeMode !== false
       const force = args.force === true
+      const visualReview = parseVisualReview(args.visualReview)
       const parsedOps = parseUpdateOps(args.ops)
+      if (visualReview?.phase === 'final' && parsedOps.length > 0) {
+        throw new Error('visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]')
+      }
       const target = await resolveBoard(store, args.root, args.name)
       const board = await store.read(args.root, target.name)
+      await validateVisualReviewEvidence(store, args.root, target.name, board.ok ? board.value.rev : null, visualReview)
       const key = makeKey(args.root, target.name)
       const cache = boardCache.get(key)
       const currentElements = board.ok ? board.value.scene.elements : []
@@ -865,6 +968,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
       const ops = normalizePageShellUpserts(currentElements, semanticOps)
       const prospectiveElements = previewElements(currentElements, ops)
+      validatePhasedDrawing(currentElements, prospectiveElements, visualReview)
       validateNewPrototypePageContracts(currentElements, prospectiveElements)
       const layoutReport = inspectPrototypeLayout(prospectiveElements, {
         focusIds: layoutFocusIdsWithPages(ops, currentElements, prospectiveElements),
@@ -892,6 +996,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
       if (safeMode && !force && conflicts.length > 0) {
         const elementCount = currentElements.length
         const conflictValues = conflicts as unknown as JsonValue[]
+        const prototypeQuality = inspectPrototypeQuality(currentElements)
         return {
           rev: board.ok ? board.value.rev : 0,
           targetBoard: target.name,
@@ -899,6 +1004,10 @@ export function draw2codeUpdateTool(store: SceneStore) {
           elementCount,
           applied: 0,
           verified: false,
+          writeVerified: false,
+          completionReady: false,
+          nextAction: '先确认冲突；本轮尚未写入，也不能进入视觉完成验收',
+          prototypeQuality: prototypeQuality as unknown as JsonValue,
           layoutWarnings: layoutWarnings(currentElements),
           requiresConfirmation: true,
           pending: true,
@@ -922,14 +1031,29 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements)
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`)
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements })
-      const targetIsVisible = target.activeBoard === undefined || target.activeBoard === target.name || args.name === undefined
-      const selected = targetIsVisible
-        ? await store.setActiveBoard(args.root, target.name)
-        : { ok: true as const, value: { name: target.activeBoard } }
+      const selected = await store.setActiveBoard(args.root, target.name)
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`)
-      const revealed = targetIsVisible ? await store.publishBoardReveal(args.root, target.name) : null
-      if (revealed !== null && !revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`)
+      const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev)
+      if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`)
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements)
+      const pages = prototypePages(refreshed.value.scene.elements)
+      const prototypeQuality = inspectPrototypeQuality(refreshed.value.scene.elements)
+      const completionReady = ops.length === 0
+        && reviewedEveryPage(visualReview, pages)
+        && prototypeQuality.structurePassed
+        && prototypeQuality.contentPassed
+        && prototypeQuality.layoutPassed
+        && prototypeQuality.warnings.length === 0
+      prototypeQuality.visualReviewRequired = !completionReady && pages.length > 0
+      const nextAction = completionReady
+        ? '视觉复核已覆盖全部页面；可以根据 prototypeQuality 的剩余 warnings 决定是否继续打磨'
+        : pages.length === 0
+          ? '当前画板没有可识别页面；先创建 prototype-page'
+          : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0
+            ? '先按 prototypeQuality.warnings 修复结构、首屏内容和布局；全部通过后在真实画板逐页检查，再用空 ops 提交 phase=final visualReview'
+            : ops.length > 0 && visualReview?.phase === 'final'
+              ? '本轮仍写入了元素，不能同时证明写入后的视觉结果；请查看真实画板后，用空 ops 单独提交 phase=final visualReview'
+              : '在真实可见画板逐页检查首屏任务、层级、对齐、mock 数据和导航，再用空 ops 提交覆盖全部 page id 的 phase=final visualReview'
       return {
         rev: result.value.rev,
         targetBoard: target.name,
@@ -937,7 +1061,11 @@ export function draw2codeUpdateTool(store: SceneStore) {
         elementCount: result.value.elementCount,
         applied: result.value.applied,
         verified: true,
-        ...(revealed?.ok === true ? { revealRequestId: revealed.value.id } : {}),
+        writeVerified: true,
+        completionReady,
+        nextAction,
+        prototypeQuality: prototypeQuality as unknown as JsonValue,
+        revealRequestId: revealed.value.id,
         layoutWarnings: qualityWarnings,
         requiresConfirmation: false,
         pending: false,

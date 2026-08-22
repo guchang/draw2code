@@ -340,6 +340,37 @@ interface PageMockData {
   examples: string[]
 }
 
+interface SemanticComponentSpec {
+  kind: string
+  role: string
+  purpose: string
+  requiredParts: string[]
+}
+
+const SEMANTIC_COMPONENT_CATALOG: SemanticComponentSpec[] = [
+  { kind: 'page-header', role: 'page-heading', purpose: '说明页面身份与当前上下文', requiredParts: ['可读页面标题', '必要的返回、日期或状态上下文'] },
+  { kind: 'task-card', role: 'content-card', purpose: '承载一条可操作的真实记录', requiredParts: ['对象标题', '状态或时间', '必要的次级信息'] },
+  { kind: 'form-field', role: 'input', purpose: '低成本录入或修改信息', requiredParts: ['字段标签', '真实值或可理解提示', '输入边界'] },
+  { kind: 'chip-group', role: 'chip', purpose: '表达少量互斥或筛选选择', requiredParts: ['完整选项文字', '清楚的当前选中项'] },
+  { kind: 'stat-card', role: 'stat-card', purpose: '突出一个可比较的关键指标', requiredParts: ['指标名', '数值与单位', '必要的状态说明'] },
+  { kind: 'quadrant-grid', role: 'category-card', purpose: '并列呈现四类优先级或状态', requiredParts: ['四个语义标题', '克制的语义色', '每类真实内容'] },
+  { kind: 'radar-map', role: 'radar-map', purpose: '表达附近对象相对位置与扫描状态', requiredParts: ['扫描中心', '至少 3 个真实对象点', '距离或在线状态'] },
+  { kind: 'conversation-list', role: 'message-list', purpose: '承载联系人与双方对话', requiredParts: ['联系人昵称与时间', '最近消息', '可读的双方消息气泡'] },
+  { kind: 'calendar-grid', role: 'calendar-grid', purpose: '表达完整日期结构与当前选择', requiredParts: ['星期标题', '完整日期网格', '明确的选中日期'] },
+  { kind: 'outfit-card', role: 'recommendation-card', purpose: '表达一套可理解的穿搭方案', requiredParts: ['搭配名称', '至少 3 件具体单品', '推荐理由和适用条件'] },
+  { kind: 'bottom-navigation', role: 'bottom-navigation', purpose: '稳定表达一级页面切换', requiredParts: ['导航 shell', '独立且完整的栏目标签', '明确的当前项'] },
+  { kind: 'primary-action', role: 'primary-action', purpose: '推进当前页面的唯一核心任务', requiredParts: ['明确动词文案', '至少 44×44px 点击区域', '与次要操作有层级差'] },
+]
+
+interface PageBlueprint {
+  pageId: string
+  page: string
+  coreTask: string
+  aboveFold: string[]
+  primaryAction: string
+  semanticComponents: SemanticComponentSpec[]
+}
+
 const SOCIAL_PAGE_MOCK_DATA: Record<string, Omit<PageMockData, 'pageId' | 'page'>> = {
   'radar-home': {
     minimumRecords: 3,
@@ -445,6 +476,70 @@ export function derivePageMockData(idea: string, pageIds: string[]): PageMockDat
   })
 }
 
+function pageIntent(pageId: string, pageName: string, requiredContent: string[]): Pick<PageBlueprint, 'coreTask' | 'primaryAction'> {
+  const intents: Record<string, Pick<PageBlueprint, 'coreTask' | 'primaryAction'>> = {
+    'radar-home': { coreTask: '立即看见附近可发现的人，并决定继续扫描或发起碰一碰', primaryAction: '开始扫描 / 重新扫描' },
+    'nearby-profile': { coreTask: '快速判断是否愿意进一步认识当前用户', primaryAction: '发起见面 / 碰一碰' },
+    'bump-confirm': { coreTask: '确认线下碰一碰对象并建立好友关系', primaryAction: '确认并开始聊天' },
+    'friends-chat': { coreTask: '找到最近联系人并继续一段真实对话', primaryAction: '发送消息' },
+    'profile-history': { coreTask: '查看自己的社交身份、关系数据和最近足迹', primaryAction: '编辑个人资料' },
+    query: { coreTask: '选择日期和城市并获得可理解的日历结果', primaryAction: '查询当天信息' },
+    weather: { coreTask: '看懂目标日期的天气条件与出行影响', primaryAction: '查看穿搭建议' },
+    recommendation: { coreTask: '在几秒内理解当天推荐穿搭并选定一套', primaryAction: '采用这套搭配' },
+    'outfit-detail': { coreTask: '看懂一套搭配的单品组成、理由和适用场景', primaryAction: '收藏搭配' },
+    wardrobe: { coreTask: '浏览自己的衣物状态并选择可用单品', primaryAction: '新增衣物' },
+    home: { coreTask: '从总览中识别当前最重要的信息和下一步', primaryAction: '进入当前最重要的任务' },
+    'core-action': { coreTask: '以最低操作成本完成核心录入或编辑', primaryAction: '保存并继续' },
+    result: { coreTask: '比较关键结果并选择下一步', primaryAction: '采用推荐结果' },
+    detail: { coreTask: '理解当前对象的状态、关键信息和可执行操作', primaryAction: '完成当前主要操作' },
+    profile: { coreTask: '查看个人状态并进入最常用的账户操作', primaryAction: '编辑个人资料' },
+  }
+  return intents[pageId] ?? {
+    coreTask: `在「${pageName}」首屏完成：${requiredContent[0] ?? '理解当前对象和状态'}`,
+    primaryAction: `完成${pageName}的主要操作`,
+  }
+}
+
+const BOTTOM_NAVIGATION_PAGE_IDS = new Set([
+  'home', 'result', 'profile', 'radar-home', 'friends-chat', 'profile-history',
+  'query', 'weather', 'recommendation', 'wardrobe',
+])
+
+function componentKindsFor(pageId: string, requiredContent: string[]): string[] {
+  const kinds = ['page-header']
+  const content = requiredContent.join(' ')
+  if (pageId === 'radar-home') kinds.push('radar-map')
+  if (pageId === 'friends-chat') kinds.push('conversation-list')
+  if (pageId === 'query' || pageId === 'weather') kinds.push('calendar-grid')
+  if (pageId === 'recommendation' || pageId === 'outfit-detail') kinds.push('outfit-card')
+  if (/输入|填写|选择|筛选|搜索|字段|步骤/iu.test(content) || /action|confirm|edit|query/iu.test(pageId)) kinds.push('form-field', 'chip-group')
+  if (/指标|统计|数量|状态|摘要|天气|完成率/iu.test(content) || /home|result|profile|weather|recommendation/iu.test(pageId)) kinds.push('stat-card')
+  if (pageId !== 'friends-chat' && /列表|记录|单品|内容|用户|好友|至少 3/iu.test(content)) kinds.push('task-card')
+  if (BOTTOM_NAVIGATION_PAGE_IDS.has(pageId)) kinds.push('bottom-navigation')
+  kinds.push('primary-action')
+  return kinds
+}
+
+export function derivePageBlueprints(idea: string, pageIds: string[]): PageBlueprint[] {
+  const mockByPage = new Map(derivePageMockData(idea, pageIds).map((item) => [item.pageId, item]))
+  return pageIds.map((pageId) => {
+    const mock = mockByPage.get(pageId)!
+    const intent = pageIntent(pageId, mock.page, mock.requiredContent)
+    const kinds = new Set(componentKindsFor(pageId, mock.requiredContent))
+    return {
+      pageId,
+      page: mock.page,
+      ...intent,
+      aboveFold: [
+        `页面标题与当前上下文：${mock.page}`,
+        ...mock.requiredContent.slice(0, 2),
+        `唯一主要操作：${intent.primaryAction}`,
+      ],
+      semanticComponents: SEMANTIC_COMPONENT_CATALOG.filter((component) => kinds.has(component.kind)),
+    }
+  })
+}
+
 export function buildBrief(
   idea: string,
   answers: Record<string, CreateAnswer>,
@@ -511,6 +606,14 @@ export function buildBrief(
       updateContract: '完整页面使用 rectangle 外框并设置 customData.role=prototype-page、customData.pageName 和 customData.mockDataMin；页面名使用外框上方独立 text，设置 customData.role=prototype-page-label 和 customData.pageId；页面子元素使用画布绝对坐标并保持 frameId=null；每条示例内容的 text 设置 customData.role=mock-data',
     },
     pageMockData: derivePageMockData(idea, pages),
+    pageBlueprints: derivePageBlueprints(idea, pages),
+    semanticComponentCatalog: SEMANTIC_COMPONENT_CATALOG,
+    prototypeQualityPolicy: {
+      firstScreen: '用户应在 5 秒内看懂页面核心任务、当前状态、关键内容和下一步；不能依赖空白方框或 Agent 口头解释',
+      hierarchy: '每页只有一个 primary-action；标题、正文和辅助信息至少形成三级可辨层级；重复控件遵循一致的边距、高度和间距节奏',
+      phasedDrawing: '首批 3 个及以上页面时，先绘制一个代表页并检查真实画板，再铺开其余页面，最后逐页做一致性复核',
+      completionRule: 'writeVerified=true 只代表写入和回读一致；只有提交视觉复核证据并获得 completionReady=true，Agent 才能向用户宣布原型完成',
+    },
     interactions: ['页面之间用 Arrow 表达核心成功路径', '首轮只验证默认成功路径'],
     assumptions: [
       '首轮原型限制为 3–5 个核心页面',

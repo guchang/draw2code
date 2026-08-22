@@ -151,7 +151,9 @@ export type SceneRead = { rev: number; scene: SceneFile }
 export interface BoardRevealRequest {
   id: string
   board: string
+  revision: number
   createdAt: number
+  consumedAt?: number
 }
 
 /** Snapshot file basenames: <ms-timestamp>-<random6>.json (unique within a
@@ -656,7 +658,7 @@ export class SceneStore {
   }
 
   /** Publish the latest verified update for the browser-side auto-open loop. */
-  async publishBoardReveal(root: string, name: string): Promise<SceneResult<BoardRevealRequest>> {
+  async publishBoardReveal(root: string, name: string, revision: number): Promise<SceneResult<BoardRevealRequest>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
     const named = this.checkName(name)
@@ -665,6 +667,7 @@ export class SceneStore {
     const request = {
       id: `reveal-${Date.now().toString(36)}-${revealCounter.toString(36)}`,
       board: named.value,
+      revision,
       createdAt: Date.now(),
     }
     BOARD_REVEALS.set(gated.value, request)
@@ -676,6 +679,19 @@ export class SceneStore {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
     return { ok: true, value: { request: BOARD_REVEALS.get(gated.value) ?? null } }
+  }
+
+  /** Record that the browser consumed the latest reveal and opened its tab. */
+  async ackBoardReveal(root: string, id: string, board: string): Promise<SceneResult<BoardRevealRequest>> {
+    const gated = await this.gate(root)
+    if (!gated.ok) return gated
+    const current = BOARD_REVEALS.get(gated.value)
+    if (current === undefined || current.id !== id || current.board !== board) {
+      return err('stale-reveal', 'reveal acknowledgement does not match the latest request')
+    }
+    const acknowledged = { ...current, consumedAt: current.consumedAt ?? Date.now() }
+    BOARD_REVEALS.set(gated.value, acknowledged)
+    return { ok: true, value: acknowledged }
   }
 
   /** The versions directory of one board (inside draw2code/.versions/<name>). */

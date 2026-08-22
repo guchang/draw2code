@@ -295,7 +295,7 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
           return text(`${continuation(value)} status=question questionId=${question.id}\n${question.text}\n${options}${question.allowOther ? '\n（可选“其他”并补充说明）' : ''}\n下一次调用必须使用 action=answer、上面的 sessionId/revision/questionId，并把用户选择的 option id 放入 values。`)
         }
         if (value.status === 'ready') return text(`${continuation(value)} status=ready\n需求已整理完成。brief.pageMockData 是逐页内容蓝图，必须随 brief 一起展示并在绘制时落实；请等待用户统一确认，确认后调用 action=confirm，传入同一个 sessionId 和 revision。`)
-        if (value.status === 'confirmed') return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ''} activeBoard=${value.activeBoard ?? ''} nextAction=${value.nextAction ?? 'draw2code_update'}\n项目「${value.projectName ?? ''}」已确认，独立画板已创建。下一步必须按 brief.pageMockData 调用 draw2code_update，并明确传入上面的 boardName；每个重复内容组件至少提供 3 条可见 mock 数据，不要回写旧画板。`)
+        if (value.status === 'confirmed') return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ''} activeBoard=${value.activeBoard ?? ''} nextAction=${value.nextAction ?? 'draw2code_update'}\n项目「${value.projectName ?? ''}」已确认，独立画板已创建。下一步必须同时按 brief.pageBlueprints 和 brief.pageMockData 调用 draw2code_update，并明确传入上面的 boardName；首轮有 3 个及以上页面时先画一个代表页并查看真实画板，再提交 representative visualReview 后添加其余页面，最终只有 completionReady=true 才能报告完成。每个重复内容组件至少提供 3 条可见 mock 数据，不要回写旧画板。`)
         if (value.status === 'drafts') {
           const drafts = (value.drafts as Array<{ sessionId?: string; projectName?: string; status?: string }> | undefined) ?? []
           const summary = drafts.map((draft) => `${draft.sessionId ?? ''} ${draft.projectName ?? ''} (${draft.status ?? ''})`).join('\n')

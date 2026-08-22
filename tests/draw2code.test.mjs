@@ -7,7 +7,16 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { deflateSync } from 'node:zlib'
-import { ProjectStore, SceneStore, draw2codeCreateTool, draw2codeGenerateTool, draw2codeReadTool, draw2codeUpdateTool } from '../dist/index.js'
+import {
+  ProjectStore,
+  SceneStore,
+  draw2codeCreateTool,
+  draw2codeGenerateTool,
+  draw2codeReadTool,
+  draw2codeUpdateTool,
+  inspectPrototypeQuality,
+  normalizeOpsArg,
+} from '../dist/index.js'
 
 const roots = []
 let sync
@@ -177,6 +186,19 @@ test('debounced edits keep the revision and merge base from the first edit', () 
   assert.deepEqual(second.elements, [{ id: 'new-local-page', type: 'frame' }])
 })
 
+test('first-render Excalidraw metadata is ignored without hiding later z-order or geometry edits', () => {
+  const base = [{ id: 'card', type: 'rectangle', x: 20, y: 40, width: 200, height: 80, version: 1, versionNonce: 11, updated: 100 }]
+  const normalized = [{ ...base[0], index: 'a0', version: 2, versionNonce: 22, updated: 200 }]
+  assert.equal(sync.isNormalizationOnlyEcho(base, normalized), true)
+  assert.equal(sync.isNormalizationOnlyEcho(normalized, [{ ...normalized[0], index: 'a1', version: 3 }]), false)
+  assert.equal(sync.isNormalizationOnlyEcho(normalized, [{ ...normalized[0], x: 28, version: 3 }]), false)
+  const second = { id: 'second', type: 'text', text: '第二层', version: 1, versionNonce: 33, updated: 100 }
+  assert.equal(sync.isNormalizationOnlyEcho([base[0], second], [
+    { ...second, index: 'a0', version: 2 },
+    { ...base[0], index: 'a1', version: 2 },
+  ]), false)
+})
+
 test('the client reveals each successful board update exactly once', () => {
   const calls = []
   const values = new Map()
@@ -186,7 +208,7 @@ test('the client reveals each successful board update exactly once', () => {
     sessionId: 'session-1',
     result: {
       ok: true,
-      request: { id: 'reveal-abc-1', board: '登录流程', createdAt: 123 },
+      request: { id: 'reveal-abc-1', board: '登录流程', revision: 7, createdAt: 123 },
     },
     handledIds,
     storage: {
@@ -469,7 +491,7 @@ test('draw2code_update without a board name targets the active visible board', a
   assert.equal(prototype.error.code, 'not-found')
 })
 
-test('an explicit non-active update stays disk-only and preserves the visible board', async () => {
+test('an explicit non-active update selects and reveals the target board', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
   assert.equal((await store.setActiveBoard(root, '顾客端')).ok, true)
@@ -482,16 +504,34 @@ test('an explicit non-active update stays disk-only and preserves the visible bo
 
   assert.equal(result.verified, true)
   assert.equal(result.targetBoard, 'prototype')
-  assert.equal(result.activeBoard, '顾客端')
-  assert.equal(result.revealRequestId, undefined)
+  assert.equal(result.activeBoard, 'prototype')
+  assert.equal(typeof result.revealRequestId, 'string')
 
   const active = await store.getActiveBoard(root)
   assert.equal(active.ok, true)
-  assert.equal(active.value.name, '顾客端')
+  assert.equal(active.value.name, 'prototype')
 
   const reveal = await store.getBoardReveal(root)
   assert.equal(reveal.ok, true)
-  assert.equal(reveal.value.request, null)
+  assert.equal(reveal.value.request.board, 'prototype')
+  assert.equal(reveal.value.request.id, result.revealRequestId)
+})
+
+test('draw2code_update render exposes write, completion, quality, and reveal evidence', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const result = await tool.execute({
+    root,
+    name: '可见回归',
+    ops: [{ op: 'upsert', element: { id: 'title', type: 'text', text: '任务列表' } }],
+  }, {})
+
+  const rendered = tool.output.render({}, result)
+  assert.match(rendered[0].text, /verified=true/)
+  assert.match(rendered[0].text, /writeVerified=true/)
+  assert.match(rendered[0].text, /completionReady=false/)
+  assert.match(rendered[0].text, /visualReviewRequired=false/)
+  assert.match(rendered[0].text, new RegExp(`revealRequestId=${result.revealRequestId}`))
 })
 
 test('a pending update does not replace the last successful reveal request', async () => {
@@ -1432,6 +1472,172 @@ test('draw2code_update applies restrained semantic colors without overriding exp
   )
 })
 
+test('host update adapter preserves ops delivered as a JSON string', () => {
+  const ops = [{ op: 'upsert', element: { id: 'title', type: 'text', text: '任务清单' } }]
+
+  assert.deepEqual(normalizeOpsArg(JSON.stringify(ops)), ops)
+  assert.deepEqual(normalizeOpsArg(ops), ops)
+  assert.throws(() => normalizeOpsArg('{broken json'), /ops is not valid JSON/)
+  assert.throws(() => normalizeOpsArg({}), /ops must be an array/)
+})
+
+test('prototype quality explains sparse hierarchy and interaction problems separately from write verification', () => {
+  const elements = [
+    { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务详情', mockDataMin: 3 } },
+    { id: 'page-label', type: 'text', text: '任务详情', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } },
+    { id: 'task-a', type: 'text', text: '修复登录闪退 · 进行中', x: 24, y: 140, width: 320, height: 30, fontSize: 16, customData: { role: 'mock-data' } },
+    { id: 'task-b', type: 'text', text: '补充回归用例 · 待处理', x: 24, y: 190, width: 320, height: 30, fontSize: 16, customData: { role: 'mock-data' } },
+    { id: 'task-c', type: 'text', text: '发布灰度版本 · 已逾期', x: 24, y: 240, width: 320, height: 30, fontSize: 16, customData: { role: 'mock-data' } },
+    { id: 'save', type: 'rectangle', x: 24, y: 300, width: 120, height: 32, customData: { role: 'primary-action' } },
+    { id: 'save-label', type: 'text', text: '保存', x: 24, y: 300, width: 120, height: 32, fontSize: 16, containerId: 'save', customData: { role: 'primary-action' } },
+  ]
+
+  const quality = inspectPrototypeQuality(elements)
+  const codes = quality.warnings.map((warning) => warning.code)
+  assert.equal(quality.layoutPassed, true)
+  assert.equal(quality.contentPassed, false)
+  assert.equal(quality.visualReviewRequired, true)
+  assert.ok(codes.includes('page-content-too-sparse'))
+  assert.ok(codes.includes('text-scale-flat'))
+  assert.ok(codes.includes('tap-target-too-small'))
+  assert.ok(codes.includes('status-emphasis-missing'))
+  assert.ok(quality.qualityScore < 100)
+})
+
+test('draw2code_update separates write verification from prototype completion and accepts final visual review evidence', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const ops = [
+    { id: 'quality-page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表', mockDataMin: 3 } },
+    { id: 'quality-page-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'quality-page' } },
+    { id: 'quality-title', type: 'text', text: '今天要做什么', x: 24, y: 88, width: 320, height: 36, fontSize: 26, customData: { role: 'page-heading' } },
+    { id: 'quality-a', type: 'text', text: '10:30 提交产品周报 · 进行中', x: 24, y: 150, width: 320, height: 30, customData: { role: 'mock-data', tone: 'warning' } },
+    { id: 'quality-b', type: 'text', text: '14:00 修复登录闪退 · 高优先级', x: 24, y: 200, width: 320, height: 30, customData: { role: 'mock-data', tone: 'danger' } },
+    { id: 'quality-c', type: 'text', text: '18:00 取快递 · 待处理', x: 24, y: 250, width: 320, height: 30, customData: { role: 'mock-data', tone: 'info' } },
+    { id: 'quality-add', type: 'rectangle', x: 24, y: 310, width: 342, height: 48, customData: { role: 'primary-action', tone: 'primary' } },
+    { id: 'quality-add-label', type: 'text', text: '新增任务', x: 24, y: 310, width: 342, height: 48, containerId: 'quality-add', customData: { role: 'primary-action' } },
+    { id: 'quality-section', type: 'text', text: '稍后处理', x: 24, y: 410, width: 320, height: 30, fontSize: 20, customData: { role: 'section-heading' } },
+    { id: 'quality-d', type: 'text', text: '周五前 完成阅读计划', x: 24, y: 470, width: 320, height: 30, customData: { role: 'supporting-text' } },
+    { id: 'quality-e', type: 'text', text: '20:00 跑步 30 分钟', x: 24, y: 560, width: 320, height: 30, customData: { role: 'supporting-text' } },
+    { id: 'quality-nav', type: 'rectangle', x: 0, y: 790, width: 390, height: 60, customData: { role: 'bottom-navigation' } },
+    { id: 'quality-nav-today', type: 'text', text: '今天', x: 0, y: 790, width: 130, height: 60, customData: { role: 'bottom-navigation-item' } },
+    { id: 'quality-nav-all', type: 'text', text: '全部', x: 130, y: 790, width: 130, height: 60, customData: { role: 'bottom-navigation-item' } },
+    { id: 'quality-nav-me', type: 'text', text: '我的', x: 260, y: 790, width: 130, height: 60, customData: { role: 'bottom-navigation-item' } },
+  ].map((element) => ({ op: 'upsert', element }))
+
+  const written = await tool.execute({ root, name: 'quality-report', ops }, {})
+  assert.equal(written.verified, true)
+  assert.equal(written.writeVerified, true)
+  assert.equal(written.completionReady, false)
+  assert.equal(written.prototypeQuality.visualReviewRequired, true)
+  assert.match(written.nextAction, /视觉|visual/i)
+
+  const finalReview = {
+    phase: 'final',
+    passed: true,
+    boardRevision: written.rev,
+    revealRequestId: written.revealRequestId,
+    inspectedPageIds: ['quality-page'],
+    observations: ['标题层级清楚', '按钮和正文没有错位', '首屏任务可读'],
+  }
+
+  await assert.rejects(
+    tool.execute({ root, name: 'quality-report', ops: [], visualReview: finalReview }, {}),
+    /visual-review-not-visible/iu,
+  )
+  assert.equal((await store.ackBoardReveal(root, written.revealRequestId, 'quality-report')).ok, true)
+
+  const reviewed = await tool.execute({
+    root,
+    name: 'quality-report',
+    ops: [],
+    visualReview: finalReview,
+  }, {})
+  assert.equal(reviewed.verified, true)
+  assert.equal(reviewed.writeVerified, true)
+  assert.equal(reviewed.completionReady, true)
+  assert.equal(reviewed.prototypeQuality.visualReviewRequired, false)
+  assert.equal(reviewed.prototypeQuality.contentPassed, true)
+
+  await assert.rejects(
+    tool.execute({ root, name: 'quality-report', ops: [], visualReview: finalReview }, {}),
+    /visual-review-stale/iu,
+  )
+})
+
+test('draw2code_update rejects final visual review when the same call still mutates the board', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const written = await tool.execute({
+    root,
+    name: 'final-review-write',
+    ops: [{ op: 'upsert', element: { id: 'title', type: 'text', text: '任务详情' } }],
+  }, {})
+  assert.equal((await store.ackBoardReveal(root, written.revealRequestId, 'final-review-write')).ok, true)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'final-review-write',
+      ops: [{ op: 'upsert', element: { id: 'late-change', type: 'text', text: '复核时新增' } }],
+      visualReview: {
+        phase: 'final',
+        passed: true,
+        boardRevision: written.rev,
+        revealRequestId: written.revealRequestId,
+        inspectedPageIds: [],
+        observations: ['已检查'],
+      },
+    }, {}),
+    /visual-review-final-requires-empty-ops/iu,
+  )
+  const scene = await store.read(root, 'final-review-write')
+  assert.equal(scene.ok, true)
+  assert.equal(scene.value.scene.elements.some((element) => element.id === 'late-change'), false)
+})
+
+test('draw2code_update requires one representative page before a first multi-page batch', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const ops = Array.from({ length: 3 }, (_, index) => ({
+    op: 'upsert',
+    element: {
+      id: `page-${index}`,
+      type: 'rectangle',
+      x: index * 450,
+      y: 40,
+      width: 390,
+      height: 844,
+      customData: { role: 'prototype-page', pageName: `页面 ${index + 1}`, mockDataMin: 3 },
+    },
+  }))
+
+  await assert.rejects(
+    tool.execute({ root, name: 'phased-drawing', ops }, {}),
+    /visual-review-required[\s\S]*representative|代表页/iu,
+  )
+})
+
+test('draw2code_update cannot bypass representative review by drawing two pages and then one', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'phased-bypass', {
+    elements: [
+      { id: 'page-1', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 1', mockDataMin: 3 } },
+      { id: 'page-2', type: 'rectangle', x: 450, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 2', mockDataMin: 3 } },
+    ],
+  })
+  const tool = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'phased-bypass',
+      ops: [{ op: 'upsert', element: { id: 'page-3', type: 'rectangle', x: 900, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 3', mockDataMin: 3 } } }],
+    }, {}),
+    /visual-review-required[\s\S]*representative/iu,
+  )
+})
+
 test('draw2code_read caps multibyte element payloads by UTF-8 bytes', async () => {
   const { root, store } = await makeStore()
   const written = await store.write(root, 'read-payload-cap', {
@@ -2344,6 +2550,17 @@ test('draw2code_create finishes a radar social app brief in five useful question
   assert.equal(friendsChatMock.minimumRecords, 3)
   assert.ok(friendsChatMock.requiredContent.some((item) => /最近消息和时间/.test(item)))
   assert.ok(friendsChatMock.requiredContent.some((item) => /双方对话/.test(item)))
+  const radarBlueprint = state.brief.pageBlueprints.find((page) => page.pageId === 'radar-home')
+  assert.match(radarBlueprint.coreTask, /附近|扫描/)
+  assert.ok(radarBlueprint.aboveFold.some((item) => /附近|雷达|扫描/.test(item)))
+  assert.match(radarBlueprint.primaryAction, /扫描|碰一碰/)
+  assert.ok(radarBlueprint.semanticComponents.some((component) => component.kind === 'page-header'))
+  assert.ok(radarBlueprint.semanticComponents.some((component) => component.kind === 'primary-action'))
+  const chatBlueprint = state.brief.pageBlueprints.find((page) => page.pageId === 'friends-chat')
+  assert.ok(chatBlueprint.semanticComponents.some((component) => component.kind === 'conversation-list'))
+  assert.ok(!chatBlueprint.semanticComponents.some((component) => component.kind === 'task-card'))
+  assert.ok(state.brief.semanticComponentCatalog.some((component) => component.kind === 'bottom-navigation'))
+  assert.match(state.brief.prototypeQualityPolicy.completionRule, /writeVerified|视觉复核/)
 
   const confirmed = await tool.execute({
     root,

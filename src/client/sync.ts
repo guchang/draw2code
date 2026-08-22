@@ -8,6 +8,28 @@
 
 export type Element = Record<string, unknown>
 
+const EXCALIDRAW_RENDER_FIELDS = new Set(['updated', 'version', 'versionNonce'])
+
+function comparableElement(element: Element, ignoreIndex: boolean): Element {
+  return Object.fromEntries(Object.entries(element).filter(([key]) => {
+    if (EXCALIDRAW_RENDER_FIELDS.has(key)) return false
+    return !(ignoreIndex && key === 'index')
+  }))
+}
+
+/** Detect Excalidraw's first-render metadata normalization without hiding edits. */
+export function isNormalizationOnlyEcho(base: Element[], candidate: Element[]): boolean {
+  if (base.length !== candidate.length) return false
+  if (base.some((element, index) => String(element.id ?? '') !== String(candidate[index]?.id ?? ''))) return false
+  const candidateById = new Map(candidate.map((element) => [String(element.id ?? ''), element]))
+  return base.every((element) => {
+    const peer = candidateById.get(String(element.id ?? ''))
+    if (peer === undefined) return false
+    const ignoreIndex = element.index === undefined
+    return JSON.stringify(comparableElement(element, ignoreIndex)) === JSON.stringify(comparableElement(peer, ignoreIndex))
+  })
+}
+
 export interface PendingSave {
   name: string
   elements: Element[]

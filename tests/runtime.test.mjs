@@ -94,7 +94,7 @@ test('runtime emits shared scene and active-board events after mutation', async 
   assert.ok(events.every((event) => event.sourceClientId === 'codex-test'))
 })
 
-test('explicit update of a non-active board preserves the visible active board', async () => {
+test('explicit update of a non-active board selects and reveals the target board', async () => {
   const { root, context, runtime } = await fixture()
   await runtime.execute({
     type: 'update', root,
@@ -109,9 +109,13 @@ test('explicit update of a non-active board preserves the visible active board',
   dispose()
   assert.equal(updated.ok, true)
   assert.equal(updated.data.targetBoard, '后台画板')
-  assert.equal(updated.data.activeBoard, 'prototype')
-  assert.equal(updated.data.revealRequestId, undefined)
-  assert.deepEqual(events.map((event) => event.type), ['scene.updated'])
+  assert.equal(updated.data.activeBoard, '后台画板')
+  assert.equal(typeof updated.data.revealRequestId, 'string')
+  assert.deepEqual(events.map((event) => event.type), [
+    'scene.updated',
+    'active-board.changed',
+    'board.reveal-requested',
+  ])
   const opened = await runtime.execute({ type: 'open', root }, context)
-  assert.equal(opened.data.board, 'prototype')
+  assert.equal(opened.data.board, '后台画板')
 })

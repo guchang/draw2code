@@ -119,12 +119,14 @@ server.registerTool('draw2code_update', {
     ops: z.array(z.record(z.unknown())),
     force: z.boolean().optional(),
     safeMode: z.boolean().optional(),
+    visualReview: z.record(z.unknown()).optional(),
   },
-}, async ({ root, board, ops, force, safeMode }) => execute({
+}, async ({ root, board, ops, force, safeMode, visualReview }) => execute({
   type: 'update', root, ops,
   ...(board === undefined ? {} : { board }),
   ...(force === undefined ? {} : { force }),
   ...(safeMode === undefined ? {} : { safeMode }),
+  ...(visualReview === undefined ? {} : { visualReview }),
 }))
 
 server.registerTool('draw2code_generate', {

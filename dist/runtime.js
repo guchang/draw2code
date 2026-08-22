@@ -267,9 +267,9 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
     }
     if (element.type === "text") {
       const container = typeof element.containerId === "string" ? byId.get(element.containerId) : void 0;
-      const elementRole2 = semanticRole(element);
+      const elementRole3 = semanticRole(element);
       const containerRole = semanticRole(container);
-      const role2 = elementRole2 !== "" ? elementRole2 : containerRole;
+      const role2 = elementRole3 !== "" ? elementRole3 : containerRole;
       const isFocused2 = alignmentFocusIds === void 0 || alignmentFocusIds.has(String(element.id ?? "")) || container !== void 0 && alignmentFocusIds.has(String(container.id ?? ""));
       const alignment = semanticTextAlignment(role2);
       if (isFocused2 && alignment !== null) {
@@ -485,7 +485,7 @@ var SceneStore = class {
     });
   }
   /** Publish the latest verified update for the browser-side auto-open loop. */
-  async publishBoardReveal(root, name) {
+  async publishBoardReveal(root, name, revision) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     const named = this.checkName(name);
@@ -494,6 +494,7 @@ var SceneStore = class {
     const request = {
       id: `reveal-${Date.now().toString(36)}-${revealCounter.toString(36)}`,
       board: named.value,
+      revision,
       createdAt: Date.now()
     };
     BOARD_REVEALS.set(gated.value, request);
@@ -504,6 +505,18 @@ var SceneStore = class {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     return { ok: true, value: { request: BOARD_REVEALS.get(gated.value) ?? null } };
+  }
+  /** Record that the browser consumed the latest reveal and opened its tab. */
+  async ackBoardReveal(root, id, board) {
+    const gated = await this.gate(root);
+    if (!gated.ok) return gated;
+    const current = BOARD_REVEALS.get(gated.value);
+    if (current === void 0 || current.id !== id || current.board !== board) {
+      return err("stale-reveal", "reveal acknowledgement does not match the latest request");
+    }
+    const acknowledged = { ...current, consumedAt: current.consumedAt ?? Date.now() };
+    BOARD_REVEALS.set(gated.value, acknowledged);
+    return { ok: true, value: acknowledged };
   }
   /** The versions directory of one board (inside draw2code/.versions/<name>). */
   versionsDir(canonicalRoot, name) {
@@ -1383,6 +1396,20 @@ function deriveComponents(idea, modules) {
     label: labels.get(id) ?? `${id} \u6A21\u5757`
   })).concat(idea.trim() === "" ? [] : [{ type: "navigation", label: "\u9875\u9762\u5BFC\u822A\u4E0E\u4E3B\u6D41\u7A0B\u7BAD\u5934" }]);
 }
+var SEMANTIC_COMPONENT_CATALOG = [
+  { kind: "page-header", role: "page-heading", purpose: "\u8BF4\u660E\u9875\u9762\u8EAB\u4EFD\u4E0E\u5F53\u524D\u4E0A\u4E0B\u6587", requiredParts: ["\u53EF\u8BFB\u9875\u9762\u6807\u9898", "\u5FC5\u8981\u7684\u8FD4\u56DE\u3001\u65E5\u671F\u6216\u72B6\u6001\u4E0A\u4E0B\u6587"] },
+  { kind: "task-card", role: "content-card", purpose: "\u627F\u8F7D\u4E00\u6761\u53EF\u64CD\u4F5C\u7684\u771F\u5B9E\u8BB0\u5F55", requiredParts: ["\u5BF9\u8C61\u6807\u9898", "\u72B6\u6001\u6216\u65F6\u95F4", "\u5FC5\u8981\u7684\u6B21\u7EA7\u4FE1\u606F"] },
+  { kind: "form-field", role: "input", purpose: "\u4F4E\u6210\u672C\u5F55\u5165\u6216\u4FEE\u6539\u4FE1\u606F", requiredParts: ["\u5B57\u6BB5\u6807\u7B7E", "\u771F\u5B9E\u503C\u6216\u53EF\u7406\u89E3\u63D0\u793A", "\u8F93\u5165\u8FB9\u754C"] },
+  { kind: "chip-group", role: "chip", purpose: "\u8868\u8FBE\u5C11\u91CF\u4E92\u65A5\u6216\u7B5B\u9009\u9009\u62E9", requiredParts: ["\u5B8C\u6574\u9009\u9879\u6587\u5B57", "\u6E05\u695A\u7684\u5F53\u524D\u9009\u4E2D\u9879"] },
+  { kind: "stat-card", role: "stat-card", purpose: "\u7A81\u51FA\u4E00\u4E2A\u53EF\u6BD4\u8F83\u7684\u5173\u952E\u6307\u6807", requiredParts: ["\u6307\u6807\u540D", "\u6570\u503C\u4E0E\u5355\u4F4D", "\u5FC5\u8981\u7684\u72B6\u6001\u8BF4\u660E"] },
+  { kind: "quadrant-grid", role: "category-card", purpose: "\u5E76\u5217\u5448\u73B0\u56DB\u7C7B\u4F18\u5148\u7EA7\u6216\u72B6\u6001", requiredParts: ["\u56DB\u4E2A\u8BED\u4E49\u6807\u9898", "\u514B\u5236\u7684\u8BED\u4E49\u8272", "\u6BCF\u7C7B\u771F\u5B9E\u5185\u5BB9"] },
+  { kind: "radar-map", role: "radar-map", purpose: "\u8868\u8FBE\u9644\u8FD1\u5BF9\u8C61\u76F8\u5BF9\u4F4D\u7F6E\u4E0E\u626B\u63CF\u72B6\u6001", requiredParts: ["\u626B\u63CF\u4E2D\u5FC3", "\u81F3\u5C11 3 \u4E2A\u771F\u5B9E\u5BF9\u8C61\u70B9", "\u8DDD\u79BB\u6216\u5728\u7EBF\u72B6\u6001"] },
+  { kind: "conversation-list", role: "message-list", purpose: "\u627F\u8F7D\u8054\u7CFB\u4EBA\u4E0E\u53CC\u65B9\u5BF9\u8BDD", requiredParts: ["\u8054\u7CFB\u4EBA\u6635\u79F0\u4E0E\u65F6\u95F4", "\u6700\u8FD1\u6D88\u606F", "\u53EF\u8BFB\u7684\u53CC\u65B9\u6D88\u606F\u6C14\u6CE1"] },
+  { kind: "calendar-grid", role: "calendar-grid", purpose: "\u8868\u8FBE\u5B8C\u6574\u65E5\u671F\u7ED3\u6784\u4E0E\u5F53\u524D\u9009\u62E9", requiredParts: ["\u661F\u671F\u6807\u9898", "\u5B8C\u6574\u65E5\u671F\u7F51\u683C", "\u660E\u786E\u7684\u9009\u4E2D\u65E5\u671F"] },
+  { kind: "outfit-card", role: "recommendation-card", purpose: "\u8868\u8FBE\u4E00\u5957\u53EF\u7406\u89E3\u7684\u7A7F\u642D\u65B9\u6848", requiredParts: ["\u642D\u914D\u540D\u79F0", "\u81F3\u5C11 3 \u4EF6\u5177\u4F53\u5355\u54C1", "\u63A8\u8350\u7406\u7531\u548C\u9002\u7528\u6761\u4EF6"] },
+  { kind: "bottom-navigation", role: "bottom-navigation", purpose: "\u7A33\u5B9A\u8868\u8FBE\u4E00\u7EA7\u9875\u9762\u5207\u6362", requiredParts: ["\u5BFC\u822A shell", "\u72EC\u7ACB\u4E14\u5B8C\u6574\u7684\u680F\u76EE\u6807\u7B7E", "\u660E\u786E\u7684\u5F53\u524D\u9879"] },
+  { kind: "primary-action", role: "primary-action", purpose: "\u63A8\u8FDB\u5F53\u524D\u9875\u9762\u7684\u552F\u4E00\u6838\u5FC3\u4EFB\u52A1", requiredParts: ["\u660E\u786E\u52A8\u8BCD\u6587\u6848", "\u81F3\u5C11 44\xD744px \u70B9\u51FB\u533A\u57DF", "\u4E0E\u6B21\u8981\u64CD\u4F5C\u6709\u5C42\u7EA7\u5DEE"] }
+];
 var SOCIAL_PAGE_MOCK_DATA = {
   "radar-home": {
     minimumRecords: 3,
@@ -1480,6 +1507,74 @@ function derivePageMockData(idea, pageIds) {
     };
   });
 }
+function pageIntent(pageId, pageName, requiredContent) {
+  const intents = {
+    "radar-home": { coreTask: "\u7ACB\u5373\u770B\u89C1\u9644\u8FD1\u53EF\u53D1\u73B0\u7684\u4EBA\uFF0C\u5E76\u51B3\u5B9A\u7EE7\u7EED\u626B\u63CF\u6216\u53D1\u8D77\u78B0\u4E00\u78B0", primaryAction: "\u5F00\u59CB\u626B\u63CF / \u91CD\u65B0\u626B\u63CF" },
+    "nearby-profile": { coreTask: "\u5FEB\u901F\u5224\u65AD\u662F\u5426\u613F\u610F\u8FDB\u4E00\u6B65\u8BA4\u8BC6\u5F53\u524D\u7528\u6237", primaryAction: "\u53D1\u8D77\u89C1\u9762 / \u78B0\u4E00\u78B0" },
+    "bump-confirm": { coreTask: "\u786E\u8BA4\u7EBF\u4E0B\u78B0\u4E00\u78B0\u5BF9\u8C61\u5E76\u5EFA\u7ACB\u597D\u53CB\u5173\u7CFB", primaryAction: "\u786E\u8BA4\u5E76\u5F00\u59CB\u804A\u5929" },
+    "friends-chat": { coreTask: "\u627E\u5230\u6700\u8FD1\u8054\u7CFB\u4EBA\u5E76\u7EE7\u7EED\u4E00\u6BB5\u771F\u5B9E\u5BF9\u8BDD", primaryAction: "\u53D1\u9001\u6D88\u606F" },
+    "profile-history": { coreTask: "\u67E5\u770B\u81EA\u5DF1\u7684\u793E\u4EA4\u8EAB\u4EFD\u3001\u5173\u7CFB\u6570\u636E\u548C\u6700\u8FD1\u8DB3\u8FF9", primaryAction: "\u7F16\u8F91\u4E2A\u4EBA\u8D44\u6599" },
+    query: { coreTask: "\u9009\u62E9\u65E5\u671F\u548C\u57CE\u5E02\u5E76\u83B7\u5F97\u53EF\u7406\u89E3\u7684\u65E5\u5386\u7ED3\u679C", primaryAction: "\u67E5\u8BE2\u5F53\u5929\u4FE1\u606F" },
+    weather: { coreTask: "\u770B\u61C2\u76EE\u6807\u65E5\u671F\u7684\u5929\u6C14\u6761\u4EF6\u4E0E\u51FA\u884C\u5F71\u54CD", primaryAction: "\u67E5\u770B\u7A7F\u642D\u5EFA\u8BAE" },
+    recommendation: { coreTask: "\u5728\u51E0\u79D2\u5185\u7406\u89E3\u5F53\u5929\u63A8\u8350\u7A7F\u642D\u5E76\u9009\u5B9A\u4E00\u5957", primaryAction: "\u91C7\u7528\u8FD9\u5957\u642D\u914D" },
+    "outfit-detail": { coreTask: "\u770B\u61C2\u4E00\u5957\u642D\u914D\u7684\u5355\u54C1\u7EC4\u6210\u3001\u7406\u7531\u548C\u9002\u7528\u573A\u666F", primaryAction: "\u6536\u85CF\u642D\u914D" },
+    wardrobe: { coreTask: "\u6D4F\u89C8\u81EA\u5DF1\u7684\u8863\u7269\u72B6\u6001\u5E76\u9009\u62E9\u53EF\u7528\u5355\u54C1", primaryAction: "\u65B0\u589E\u8863\u7269" },
+    home: { coreTask: "\u4ECE\u603B\u89C8\u4E2D\u8BC6\u522B\u5F53\u524D\u6700\u91CD\u8981\u7684\u4FE1\u606F\u548C\u4E0B\u4E00\u6B65", primaryAction: "\u8FDB\u5165\u5F53\u524D\u6700\u91CD\u8981\u7684\u4EFB\u52A1" },
+    "core-action": { coreTask: "\u4EE5\u6700\u4F4E\u64CD\u4F5C\u6210\u672C\u5B8C\u6210\u6838\u5FC3\u5F55\u5165\u6216\u7F16\u8F91", primaryAction: "\u4FDD\u5B58\u5E76\u7EE7\u7EED" },
+    result: { coreTask: "\u6BD4\u8F83\u5173\u952E\u7ED3\u679C\u5E76\u9009\u62E9\u4E0B\u4E00\u6B65", primaryAction: "\u91C7\u7528\u63A8\u8350\u7ED3\u679C" },
+    detail: { coreTask: "\u7406\u89E3\u5F53\u524D\u5BF9\u8C61\u7684\u72B6\u6001\u3001\u5173\u952E\u4FE1\u606F\u548C\u53EF\u6267\u884C\u64CD\u4F5C", primaryAction: "\u5B8C\u6210\u5F53\u524D\u4E3B\u8981\u64CD\u4F5C" },
+    profile: { coreTask: "\u67E5\u770B\u4E2A\u4EBA\u72B6\u6001\u5E76\u8FDB\u5165\u6700\u5E38\u7528\u7684\u8D26\u6237\u64CD\u4F5C", primaryAction: "\u7F16\u8F91\u4E2A\u4EBA\u8D44\u6599" }
+  };
+  return intents[pageId] ?? {
+    coreTask: `\u5728\u300C${pageName}\u300D\u9996\u5C4F\u5B8C\u6210\uFF1A${requiredContent[0] ?? "\u7406\u89E3\u5F53\u524D\u5BF9\u8C61\u548C\u72B6\u6001"}`,
+    primaryAction: `\u5B8C\u6210${pageName}\u7684\u4E3B\u8981\u64CD\u4F5C`
+  };
+}
+var BOTTOM_NAVIGATION_PAGE_IDS = /* @__PURE__ */ new Set([
+  "home",
+  "result",
+  "profile",
+  "radar-home",
+  "friends-chat",
+  "profile-history",
+  "query",
+  "weather",
+  "recommendation",
+  "wardrobe"
+]);
+function componentKindsFor(pageId, requiredContent) {
+  const kinds = ["page-header"];
+  const content = requiredContent.join(" ");
+  if (pageId === "radar-home") kinds.push("radar-map");
+  if (pageId === "friends-chat") kinds.push("conversation-list");
+  if (pageId === "query" || pageId === "weather") kinds.push("calendar-grid");
+  if (pageId === "recommendation" || pageId === "outfit-detail") kinds.push("outfit-card");
+  if (/输入|填写|选择|筛选|搜索|字段|步骤/iu.test(content) || /action|confirm|edit|query/iu.test(pageId)) kinds.push("form-field", "chip-group");
+  if (/指标|统计|数量|状态|摘要|天气|完成率/iu.test(content) || /home|result|profile|weather|recommendation/iu.test(pageId)) kinds.push("stat-card");
+  if (pageId !== "friends-chat" && /列表|记录|单品|内容|用户|好友|至少 3/iu.test(content)) kinds.push("task-card");
+  if (BOTTOM_NAVIGATION_PAGE_IDS.has(pageId)) kinds.push("bottom-navigation");
+  kinds.push("primary-action");
+  return kinds;
+}
+function derivePageBlueprints(idea, pageIds) {
+  const mockByPage = new Map(derivePageMockData(idea, pageIds).map((item) => [item.pageId, item]));
+  return pageIds.map((pageId) => {
+    const mock = mockByPage.get(pageId);
+    const intent = pageIntent(pageId, mock.page, mock.requiredContent);
+    const kinds = new Set(componentKindsFor(pageId, mock.requiredContent));
+    return {
+      pageId,
+      page: mock.page,
+      ...intent,
+      aboveFold: [
+        `\u9875\u9762\u6807\u9898\u4E0E\u5F53\u524D\u4E0A\u4E0B\u6587\uFF1A${mock.page}`,
+        ...mock.requiredContent.slice(0, 2),
+        `\u552F\u4E00\u4E3B\u8981\u64CD\u4F5C\uFF1A${intent.primaryAction}`
+      ],
+      semanticComponents: SEMANTIC_COMPONENT_CATALOG.filter((component) => kinds.has(component.kind))
+    };
+  });
+}
 function buildBrief(idea, answers, deferredStyleNote) {
   const read = (id) => answers[id];
   const targetQuestion = questionFor(idea, {});
@@ -1542,6 +1637,14 @@ function buildBrief(idea, answers, deferredStyleNote) {
       updateContract: "\u5B8C\u6574\u9875\u9762\u4F7F\u7528 rectangle \u5916\u6846\u5E76\u8BBE\u7F6E customData.role=prototype-page\u3001customData.pageName \u548C customData.mockDataMin\uFF1B\u9875\u9762\u540D\u4F7F\u7528\u5916\u6846\u4E0A\u65B9\u72EC\u7ACB text\uFF0C\u8BBE\u7F6E customData.role=prototype-page-label \u548C customData.pageId\uFF1B\u9875\u9762\u5B50\u5143\u7D20\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u5E76\u4FDD\u6301 frameId=null\uFF1B\u6BCF\u6761\u793A\u4F8B\u5185\u5BB9\u7684 text \u8BBE\u7F6E customData.role=mock-data"
     },
     pageMockData: derivePageMockData(idea, pages),
+    pageBlueprints: derivePageBlueprints(idea, pages),
+    semanticComponentCatalog: SEMANTIC_COMPONENT_CATALOG,
+    prototypeQualityPolicy: {
+      firstScreen: "\u7528\u6237\u5E94\u5728 5 \u79D2\u5185\u770B\u61C2\u9875\u9762\u6838\u5FC3\u4EFB\u52A1\u3001\u5F53\u524D\u72B6\u6001\u3001\u5173\u952E\u5185\u5BB9\u548C\u4E0B\u4E00\u6B65\uFF1B\u4E0D\u80FD\u4F9D\u8D56\u7A7A\u767D\u65B9\u6846\u6216 Agent \u53E3\u5934\u89E3\u91CA",
+      hierarchy: "\u6BCF\u9875\u53EA\u6709\u4E00\u4E2A primary-action\uFF1B\u6807\u9898\u3001\u6B63\u6587\u548C\u8F85\u52A9\u4FE1\u606F\u81F3\u5C11\u5F62\u6210\u4E09\u7EA7\u53EF\u8FA8\u5C42\u7EA7\uFF1B\u91CD\u590D\u63A7\u4EF6\u9075\u5FAA\u4E00\u81F4\u7684\u8FB9\u8DDD\u3001\u9AD8\u5EA6\u548C\u95F4\u8DDD\u8282\u594F",
+      phasedDrawing: "\u9996\u6279 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\uFF0C\u5148\u7ED8\u5236\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u68C0\u67E5\u771F\u5B9E\u753B\u677F\uFF0C\u518D\u94FA\u5F00\u5176\u4F59\u9875\u9762\uFF0C\u6700\u540E\u9010\u9875\u505A\u4E00\u81F4\u6027\u590D\u6838",
+      completionRule: "writeVerified=true \u53EA\u4EE3\u8868\u5199\u5165\u548C\u56DE\u8BFB\u4E00\u81F4\uFF1B\u53EA\u6709\u63D0\u4EA4\u89C6\u89C9\u590D\u6838\u8BC1\u636E\u5E76\u83B7\u5F97 completionReady=true\uFF0CAgent \u624D\u80FD\u5411\u7528\u6237\u5BA3\u5E03\u539F\u578B\u5B8C\u6210"
+    },
     interactions: ["\u9875\u9762\u4E4B\u95F4\u7528 Arrow \u8868\u8FBE\u6838\u5FC3\u6210\u529F\u8DEF\u5F84", "\u9996\u8F6E\u53EA\u9A8C\u8BC1\u9ED8\u8BA4\u6210\u529F\u8DEF\u5F84"],
     assumptions: [
       "\u9996\u8F6E\u539F\u578B\u9650\u5236\u4E3A 3\u20135 \u4E2A\u6838\u5FC3\u9875\u9762",
@@ -1784,7 +1887,7 @@ ${options}${question.allowOther ? "\n\uFF08\u53EF\u9009\u201C\u5176\u4ED6\u201D\
         if (value.status === "ready") return text(`${continuation(value)} status=ready
 \u9700\u6C42\u5DF2\u6574\u7406\u5B8C\u6210\u3002brief.pageMockData \u662F\u9010\u9875\u5185\u5BB9\u84DD\u56FE\uFF0C\u5FC5\u987B\u968F brief \u4E00\u8D77\u5C55\u793A\u5E76\u5728\u7ED8\u5236\u65F6\u843D\u5B9E\uFF1B\u8BF7\u7B49\u5F85\u7528\u6237\u7EDF\u4E00\u786E\u8BA4\uFF0C\u786E\u8BA4\u540E\u8C03\u7528 action=confirm\uFF0C\u4F20\u5165\u540C\u4E00\u4E2A sessionId \u548C revision\u3002`);
         if (value.status === "confirmed") return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ""} activeBoard=${value.activeBoard ?? ""} nextAction=${value.nextAction ?? "draw2code_update"}
-\u9879\u76EE\u300C${value.projectName ?? ""}\u300D\u5DF2\u786E\u8BA4\uFF0C\u72EC\u7ACB\u753B\u677F\u5DF2\u521B\u5EFA\u3002\u4E0B\u4E00\u6B65\u5FC5\u987B\u6309 brief.pageMockData \u8C03\u7528 draw2code_update\uFF0C\u5E76\u660E\u786E\u4F20\u5165\u4E0A\u9762\u7684 boardName\uFF1B\u6BCF\u4E2A\u91CD\u590D\u5185\u5BB9\u7EC4\u4EF6\u81F3\u5C11\u63D0\u4F9B 3 \u6761\u53EF\u89C1 mock \u6570\u636E\uFF0C\u4E0D\u8981\u56DE\u5199\u65E7\u753B\u677F\u3002`);
+\u9879\u76EE\u300C${value.projectName ?? ""}\u300D\u5DF2\u786E\u8BA4\uFF0C\u72EC\u7ACB\u753B\u677F\u5DF2\u521B\u5EFA\u3002\u4E0B\u4E00\u6B65\u5FC5\u987B\u540C\u65F6\u6309 brief.pageBlueprints \u548C brief.pageMockData \u8C03\u7528 draw2code_update\uFF0C\u5E76\u660E\u786E\u4F20\u5165\u4E0A\u9762\u7684 boardName\uFF1B\u9996\u8F6E\u6709 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\u5148\u753B\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u67E5\u770B\u771F\u5B9E\u753B\u677F\uFF0C\u518D\u63D0\u4EA4 representative visualReview \u540E\u6DFB\u52A0\u5176\u4F59\u9875\u9762\uFF0C\u6700\u7EC8\u53EA\u6709 completionReady=true \u624D\u80FD\u62A5\u544A\u5B8C\u6210\u3002\u6BCF\u4E2A\u91CD\u590D\u5185\u5BB9\u7EC4\u4EF6\u81F3\u5C11\u63D0\u4F9B 3 \u6761\u53EF\u89C1 mock \u6570\u636E\uFF0C\u4E0D\u8981\u56DE\u5199\u65E7\u753B\u677F\u3002`);
         if (value.status === "drafts") {
           const drafts = value.drafts ?? [];
           const summary = drafts.map((draft) => `${draft.sessionId ?? ""} ${draft.projectName ?? ""} (${draft.status ?? ""})`).join("\n");
@@ -2157,6 +2260,32 @@ var SHAPE_TYPES = /* @__PURE__ */ new Set(["rectangle", "diamond", "ellipse"]);
 var BOTTOM_NAV_MAX_GAP = 96;
 var DEFAULT_MOCK_DATA_MIN = 3;
 var BOTTOM_NAVIGATION_ITEM_ROLES2 = /* @__PURE__ */ new Set(["bottom-navigation-item", "bottom-nav-item"]);
+var PRIMARY_ACTION_ROLES = /* @__PURE__ */ new Set(["primary-action", "primary-button"]);
+var INTERACTIVE_ROLES = /* @__PURE__ */ new Set([
+  ...PRIMARY_ACTION_ROLES,
+  "button",
+  "secondary-action",
+  "secondary-button",
+  "danger-button",
+  "destructive-button",
+  "chip",
+  "filter-chip",
+  "choice-chip",
+  "tab",
+  "tab-item",
+  "bottom-navigation-item",
+  "bottom-nav-item"
+]);
+var CONTENT_WARNING_CODES = /* @__PURE__ */ new Set([
+  "page-content-too-sparse",
+  "page-content-too-dense",
+  "above-fold-content-insufficient",
+  "continuous-empty-space-too-large",
+  "status-emphasis-missing",
+  "primary-action-missing",
+  "primary-action-ambiguous",
+  "visual-hierarchy-flat"
+]);
 function str2(value) {
   return typeof value === "string" ? value : "";
 }
@@ -2198,6 +2327,9 @@ function isBottomNavigation(element) {
   if (role2 === "bottom-navigation" || role2 === "bottom-nav" || role2 === "tabbar") return true;
   return /底部导航|底部选项卡|tabbar|bottom[ -]?navigation/iu.test(str2(element.text));
 }
+function isBottomNavigationMember(element) {
+  return isBottomNavigation(element) || BOTTOM_NAVIGATION_ITEM_ROLES2.has(str2(customData2(element).role).toLowerCase());
+}
 function isVisibleMockData(element) {
   if (str2(element.type) !== "text" || str2(customData2(element).role).toLowerCase() !== "mock-data") return false;
   const value = str2(element.text).trim();
@@ -2234,9 +2366,9 @@ function inspectPrototypeLayout(elements, options = {}) {
       const container = containerId === "" ? void 0 : elementById.get(containerId);
       const boundToShape = container !== void 0 && SHAPE_TYPES.has(str2(container.type));
       const directlyFocused = options.focusIds === void 0 || options.focusIds.has(str2(element.id)) || container !== void 0 && options.focusIds.has(str2(container.id));
-      const elementRole2 = str2(customData2(element).role).toLowerCase();
+      const elementRole3 = str2(customData2(element).role).toLowerCase();
       const containerRole = str2(customData2(container ?? {}).role).toLowerCase();
-      const componentRole = elementRole2 || containerRole;
+      const componentRole = elementRole3 || containerRole;
       if (containerId !== "" && container === void 0 && directlyFocused) {
         errors.push(issue(
           "container-target-missing",
@@ -2255,7 +2387,7 @@ function inspectPrototypeLayout(elements, options = {}) {
         return num2(element.x) >= num2(shell.x) - 2 && num2(element.y) >= num2(shell.y) - 2 && num2(element.x) + num2(element.width) <= num2(shell.x) + num2(shell.width) + 2 && num2(element.y) + num2(element.height) <= num2(shell.y) + num2(shell.height) + 2;
       });
       const navigationItemFocused = options.focusIds === void 0 || options.focusIds.has(str2(element.id)) || bottomNavigationShell !== void 0 && options.focusIds.has(str2(bottomNavigationShell.id));
-      if (bottomNavigationShell !== void 0 && navigationItemFocused && !BOTTOM_NAVIGATION_ITEM_ROLES2.has(elementRole2)) {
+      if (bottomNavigationShell !== void 0 && navigationItemFocused && !BOTTOM_NAVIGATION_ITEM_ROLES2.has(elementRole3)) {
         errors.push(issue(
           "bottom-navigation-item-role-missing",
           element,
@@ -2368,6 +2500,189 @@ function inspectPrototypeLayout(elements, options = {}) {
     }
   }
   return { errors, warnings };
+}
+function elementRole(element) {
+  return str2(customData2(element).role).trim().toLowerCase();
+}
+function isPageContent(element, page) {
+  const type = str2(element.type);
+  if (str2(element.id) === page.id || isPrototypePageLabel(element)) return false;
+  if (type === "arrow" || type === "line" || type === "freedraw") return false;
+  return num2(element.width) > 0 && num2(element.height) > 0;
+}
+function qualityIssue(code, page, message) {
+  return { code, id: page.id, message };
+}
+function pageQualityWarnings(page, members) {
+  const warnings = [];
+  const content = members.filter((element) => isPageContent(element, page));
+  const texts = content.filter((element) => str2(element.type) === "text" && str2(element.text).trim() !== "");
+  const shapes = content.filter((element) => SHAPE_TYPES.has(str2(element.type)));
+  const elementById = new Map(members.map((element) => [str2(element.id), element]));
+  const pageTop = page.bounds.y;
+  const pageBottom = page.bounds.y + page.bounds.height;
+  const aboveFoldBottom = pageTop + page.bounds.height * 0.58;
+  const aboveFold = content.filter((element) => num2(element.y) < aboveFoldBottom);
+  if (content.length < 8) {
+    warnings.push(qualityIssue(
+      "page-content-too-sparse",
+      page,
+      `${page.name} only has ${content.length} visible content elements; add the information needed to understand the page's main task without falling back to empty space`
+    ));
+  }
+  if (content.length > 52) {
+    warnings.push(qualityIssue(
+      "page-content-too-dense",
+      page,
+      `${page.name} has ${content.length} visible content elements; group or defer secondary information so the first screen stays scannable`
+    ));
+  }
+  if (aboveFold.length < 4) {
+    warnings.push(qualityIssue(
+      "above-fold-content-insufficient",
+      page,
+      `${page.name} has only ${aboveFold.length} meaningful elements in the first screen; expose the page heading, current state, key content, and primary action above the fold`
+    ));
+  }
+  const verticalBoxes = content.map((element) => ({ top: Math.max(pageTop, num2(element.y)), bottom: Math.min(pageBottom, num2(element.y) + num2(element.height)) })).sort((left, right) => left.top - right.top);
+  let largestGap = verticalBoxes.length === 0 ? page.bounds.height : Math.max(0, verticalBoxes[0].top - pageTop);
+  let coveredBottom = pageTop;
+  for (const box of verticalBoxes) {
+    largestGap = Math.max(largestGap, box.top - coveredBottom);
+    coveredBottom = Math.max(coveredBottom, box.bottom);
+  }
+  largestGap = Math.max(largestGap, pageBottom - coveredBottom);
+  if (largestGap > page.bounds.height * 0.34) {
+    warnings.push(qualityIssue(
+      "continuous-empty-space-too-large",
+      page,
+      `${page.name} contains an unexplained vertical empty region of about ${Math.round(largestGap)}px; rebalance the content flow or reserve the space with an explicit product purpose`
+    ));
+  }
+  const fontSizes = texts.map((element) => num2(element.fontSize, 20));
+  if (fontSizes.length >= 4 && Math.max(...fontSizes) - Math.min(...fontSizes) < 4) {
+    warnings.push(qualityIssue(
+      "text-scale-flat",
+      page,
+      `${page.name} uses nearly one text size for headings, content, and metadata; create at least a clear heading/body/supporting-text hierarchy`
+    ));
+  }
+  const primaryActions = content.filter((element) => PRIMARY_ACTION_ROLES.has(elementRole(element)));
+  const primaryActionIds = new Set(primaryActions.map((element) => str2(element.containerId) || str2(element.id)));
+  if (primaryActionIds.size === 0) {
+    warnings.push(qualityIssue(
+      "primary-action-missing",
+      page,
+      `${page.name} has no semantic primary action; mark the one action that advances the page's core task with customData.role=primary-action`
+    ));
+  } else if (primaryActionIds.size > 1) {
+    warnings.push(qualityIssue(
+      "primary-action-ambiguous",
+      page,
+      `${page.name} exposes ${primaryActionIds.size} primary actions; keep one dominant action and demote the rest`
+    ));
+  }
+  const statusTexts = texts.filter((element) => /进行中|待处理|已完成|已逾期|失败|成功|警告|异常|高优先级|低优先级/iu.test(str2(element.text)));
+  const hasSemanticTone = (element) => {
+    const ownTone = str2(customData2(element).tone).toLowerCase();
+    if (ownTone !== "" && ownTone !== "neutral") return true;
+    const container = elementById.get(str2(element.containerId));
+    const containerTone = container === void 0 ? "" : str2(customData2(container).tone).toLowerCase();
+    return containerTone !== "" && containerTone !== "neutral";
+  };
+  if (statusTexts.some((element) => !hasSemanticTone(element))) {
+    warnings.push(qualityIssue(
+      "status-emphasis-missing",
+      page,
+      `${page.name} contains status or priority text without emphasis on that status element or its bound container; use restrained success, warning, danger, or info tone to support fast scanning`
+    ));
+  }
+  if (shapes.length >= 4) {
+    const visualSignatures = new Set(shapes.map((element) => {
+      const data = customData2(element);
+      return [str2(data.tone).toLowerCase() || "neutral", str2(element.backgroundColor) || "transparent", str2(element.strokeWidth) || "1"].join("|");
+    }));
+    if (visualSignatures.size <= 1) {
+      warnings.push(qualityIssue(
+        "visual-hierarchy-flat",
+        page,
+        `${page.name} gives all major blocks the same fill, tone, and border weight; soften secondary regions and reserve stronger emphasis for the page's primary task`
+      ));
+    }
+  }
+  const outlinedShapes = shapes.filter((element) => {
+    const background = str2(element.backgroundColor);
+    return background === "" || background === "transparent";
+  });
+  if (shapes.length >= 5 && outlinedShapes.length / shapes.length >= 0.75) {
+    warnings.push(qualityIssue(
+      "border-overuse",
+      page,
+      `${page.name} draws ${outlinedShapes.length} of ${shapes.length} shapes as outline-only boxes; use spacing, grouping, and a few semantic fills instead of giving every item equal border weight`
+    ));
+  }
+  for (const element of content) {
+    if (!INTERACTIVE_ROLES.has(elementRole(element))) continue;
+    if (str2(element.type) === "text") continue;
+    if (num2(element.width) < 44 || num2(element.height) < 44) {
+      warnings.push(issue(
+        "tap-target-too-small",
+        element,
+        `${str2(element.id)} is ${Math.round(num2(element.width))}\xD7${Math.round(num2(element.height))}px; interactive controls should provide at least a 44\xD744px touch target`
+      ));
+    }
+  }
+  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) >= page.bounds.width * 0.35).map((element) => Math.round(num2(element.x) - page.bounds.x));
+  if (leftOffsets.length >= 4 && Math.max(...leftOffsets) - Math.min(...leftOffsets) > 20) {
+    warnings.push(qualityIssue(
+      "page-margin-inconsistent",
+      page,
+      `${page.name} uses inconsistent main-content left margins (${Math.min(...leftOffsets)}\u2013${Math.max(...leftOffsets)}px); align repeated blocks to a stable page grid`
+    ));
+  }
+  const heightsByRole = /* @__PURE__ */ new Map();
+  for (const element of content) {
+    const role2 = elementRole(element);
+    if (role2 === "") continue;
+    const values = heightsByRole.get(role2) ?? [];
+    values.push(num2(element.height));
+    heightsByRole.set(role2, values);
+  }
+  for (const [role2, heights] of heightsByRole.entries()) {
+    if (heights.length < 3 || Math.max(...heights) - Math.min(...heights) <= 8) continue;
+    warnings.push(qualityIssue(
+      "repeated-control-rhythm-inconsistent",
+      page,
+      `${page.name} repeats role=${role2} with heights from ${Math.round(Math.min(...heights))}px to ${Math.round(Math.max(...heights))}px; use a consistent component rhythm`
+    ));
+  }
+  return warnings;
+}
+function inspectPrototypeQuality(elements) {
+  const layout = inspectPrototypeLayout(elements);
+  const pages = prototypePages(elements);
+  const perPage = pages.map((page) => {
+    const members = elements.filter((element) => pageForElement(element, pages)?.id === page.id);
+    const warnings2 = pageQualityWarnings(page, members);
+    return {
+      pageId: page.id,
+      pageName: page.name,
+      qualityScore: Math.max(0, 100 - warnings2.length * 8),
+      warnings: warnings2
+    };
+  });
+  const warnings = [...layout.warnings, ...perPage.flatMap((page) => page.warnings)];
+  const structurePassed = layout.errors.length === 0 && !layout.warnings.some((warning) => warning.code === "page-membership-ambiguous" || warning.code === "page-name-duplicate");
+  const contentPassed = !warnings.some((warning) => CONTENT_WARNING_CODES.has(warning.code));
+  return {
+    structurePassed,
+    contentPassed,
+    layoutPassed: layout.errors.length === 0,
+    visualReviewRequired: pages.length > 0,
+    qualityScore: Math.max(0, 100 - layout.errors.length * 20 - warnings.length * 5),
+    warnings,
+    pages: perPage
+  };
 }
 function formatLayoutIssues(issues) {
   return issues.map((item) => {
@@ -2635,6 +2950,60 @@ function validateNewPrototypePageContracts(currentElements, prospectiveElements)
   if (errors.length > 0) throw new Error(`layout-invalid:
 ${errors.map((error2) => `- ${error2}`).join("\n")}`);
 }
+function parseVisualReview(input) {
+  if (typeof input !== "object" || input === null) return null;
+  const value = input;
+  const phase = str3(value.phase);
+  if (phase !== "representative" && phase !== "final") return null;
+  const inspectedPageIds = Array.isArray(value.inspectedPageIds) ? value.inspectedPageIds.filter((item) => typeof item === "string" && item.trim() !== "") : [];
+  const observations = Array.isArray(value.observations) ? value.observations.filter((item) => typeof item === "string" && item.trim() !== "") : [];
+  return {
+    phase,
+    passed: value.passed === true,
+    boardRevision: typeof value.boardRevision === "number" && Number.isFinite(value.boardRevision) ? value.boardRevision : -1,
+    revealRequestId: str3(value.revealRequestId),
+    inspectedPageIds,
+    observations
+  };
+}
+async function validateVisualReviewEvidence(store, root, boardName, boardRevision, evidence) {
+  if (evidence === null) return;
+  if (boardRevision === null || Math.abs(evidence.boardRevision - boardRevision) > 0.5) {
+    throw new Error(`visual-review-stale: evidence revision ${evidence.boardRevision} does not match current board revision ${boardRevision ?? "missing"}; inspect the latest visible board before reviewing`);
+  }
+  const reveal = await store.getBoardReveal(root);
+  if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
+  const request = reveal.value.request;
+  if (request === null || request.id !== evidence.revealRequestId || request.board !== boardName) {
+    throw new Error("visual-review-stale: revealRequestId is missing, belongs to another board, or is no longer the latest visible-board reveal; use the rev and revealRequestId from the most recent successful update");
+  }
+  if (request.revision !== boardRevision) {
+    throw new Error(`visual-review-stale: reveal request revision ${request.revision} does not match current board revision ${boardRevision ?? "missing"}`);
+  }
+  if (typeof request.consumedAt !== "number") {
+    throw new Error("visual-review-not-visible: the browser has not acknowledged opening this reveal request; wait for \u753B\u7801 to open before submitting visualReview");
+  }
+}
+function validatePhasedDrawing(currentElements, prospectiveElements, visualReview) {
+  const currentPages = prototypePages(currentElements);
+  const currentPageIds = new Set(currentPages.map((page) => page.id));
+  const newPages = prototypePages(prospectiveElements).filter((page) => !currentPageIds.has(page.id));
+  if (currentPages.length === 0 && newPages.length >= 3) {
+    throw new Error("visual-review-required: first draw one representative page, inspect it in the visible \u753B\u7801 canvas, then add the remaining pages; do not author three or more unseen pages in the first batch");
+  }
+  if (currentPages.length > 0 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
+    const representativeReviewed = visualReview?.phase === "representative" && visualReview.passed && visualReview.observations.length > 0 && visualReview.inspectedPageIds.some((id) => currentPageIds.has(id));
+    if (!representativeReviewed) {
+      throw new Error('visual-review-required: before adding multiple remaining pages, submit visualReview={phase:"representative",passed:true,inspectedPageIds:["<existing page id>"],observations:["what was checked"]}');
+    }
+  }
+}
+function reviewedEveryPage(evidence, pages) {
+  if (pages.length === 0) return false;
+  if (evidence?.phase !== "final" || !evidence.passed || evidence.observations.length === 0) return false;
+  const reviewed = new Set(evidence.inspectedPageIds);
+  return pages.every((page) => reviewed.has(page.id));
+}
 function layoutWarnings(elements) {
   const report = inspectPrototypeLayout(elements);
   return [...report.errors, ...report.warnings].map((item) => ({
@@ -2642,6 +3011,12 @@ function layoutWarnings(elements) {
     ...item.id === void 0 ? {} : { id: item.id },
     message: item.message
   }));
+}
+function prototypeQualitySummary(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
+  const qualityScore = typeof value.qualityScore === "number" ? value.qualityScore : 0;
+  const warnings = Array.isArray(value.warnings) ? value.warnings.length : 0;
+  return `prototype quality: ${qualityScore}/100 \xB7 warnings ${warnings}`;
 }
 function makeKey(root, name) {
   return `${root}::${name}`;
@@ -2770,7 +3145,7 @@ function touchedByManualChange(userChanges) {
 function stableJson(value) {
   return JSON.stringify(value);
 }
-function elementRole(element) {
+function elementRole2(element) {
   if (typeof element.customData !== "object" || element.customData === null) return "";
   return str3(element.customData.role).toLowerCase();
 }
@@ -2780,7 +3155,7 @@ function authoredElementMatches(expected, actual, elementsById) {
     if (volatile.has(key)) continue;
     if (expected.type === "text" && (key === "textAlign" || key === "verticalAlign")) {
       const container = elementsById.get(str3(actual.containerId));
-      const role2 = container === void 0 || elementRole(container) === "" ? elementRole(actual) : elementRole(container);
+      const role2 = container === void 0 || elementRole2(container) === "" ? elementRole2(actual) : elementRole2(container);
       const alignment = semanticTextAlignment(role2);
       if (alignment !== null && actual.textAlign === alignment.textAlign && actual.verticalAlign === alignment.verticalAlign) continue;
     }
@@ -2951,6 +3326,7 @@ function draw2codeReadTool(store) {
           elementCount: { type: "integer", required: true },
           summary: { type: "string", required: true },
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
+          prototypeQuality: { type: "json", required: true },
           pageNames: { type: "array", items: { type: "string" }, required: true },
           pages: { type: "array", items: { type: "json" }, required: true },
           pageRelations: { type: "array", items: { type: "json" }, required: true },
@@ -2966,6 +3342,7 @@ function draw2codeReadTool(store) {
           value.activeBoard !== void 0 && value.activeBoard !== value.board ? `\u5F53\u524D\u753B\u677F: ${value.activeBoard}\uFF08\u4E0E\u8BFB\u53D6\u76EE\u6807\u4E0D\u540C\uFF09` : "",
           (value.layoutWarnings ?? []).length > 0 ? `\u539F\u578B\u8D28\u91CF\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
+          prototypeQualitySummary(value.prototypeQuality),
           value.summary ?? "",
           value.file !== void 0 ? `file: ${value.file}` : ""
         ].filter(Boolean).join("\n")
@@ -2982,6 +3359,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         ...layoutWarnings(scene.elements),
         ...pageMembershipWarnings(scene.elements, pages)
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
+      const prototypeQuality = inspectPrototypeQuality(scene.elements);
       const summary = scene.elements.map(describeElement).join("\n");
       const elementsJson = JSON.stringify(scene.elements);
       const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
@@ -2997,6 +3375,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         frameNames: pages.map((page) => page.name),
         summary,
         layoutWarnings: qualityWarnings,
+        prototypeQuality,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload
       };
@@ -3006,13 +3385,14 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
 function draw2codeUpdateTool(store) {
   return defineTool2({
     name: "draw2code_update",
-    description: `Draw on / edit one \u753B\u7801 prototype board with ops \u2014 this is how you turn the user's idea into a visible prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, {op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when absent. Triggers: \u753B\u539F\u578B / \u753B\u4E00\u4E0B / \u5728\u753B\u677F\u4E0A\u2026 / draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw's reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the \u753B\u7801 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.`,
+    description: `Draw on / edit one \u753B\u7801 prototype board with ops \u2014 this is how you turn the user's idea into a visible prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, {op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when absent. Triggers: \u753B\u539F\u578B / \u753B\u4E00\u4E0B / \u5728\u753B\u677F\u4E0A\u2026 / draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Use semantic roles as a component API: page-heading/page-header for headers, content-card/task-card/stat-card/category-card for information blocks, input/select/search-field for form fields, chip/filter-chip for choices, bottom-navigation plus bottom-navigation-item for global navigation, and exactly one primary-action for the page's main task. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw's reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Three or more first-batch pages are rejected: draw one representative page, inspect it visibly, then add the rest with representative visualReview evidence. verified/writeVerified only prove persistence; report completion only when completionReady=true after final visualReview covers every page. Omit name to target the board currently selected in the \u753B\u7801 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.`,
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       name: { type: "string", description: "Board name. Omit to target the board currently selected in the \u753B\u7801 UI." },
       ops: { type: "json", required: true, description: 'Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"\u9996\u9875",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
       force: { type: "boolean", description: "\u5DF2\u8BFB\u5230\u51B2\u7A81\u5E76\u4E14\u7528\u6237\u786E\u8BA4\u540E\u53EF\u8BBE\u7F6E\u4E3A true\uFF0C\u5F3A\u5236\u6267\u884C\u3002\u9ED8\u8BA4 false\u3002" },
-      safeMode: { type: "boolean", description: "\u662F\u5426\u5728\u6709\u98CE\u9669\u6539\u52A8\u65F6\u8981\u6C42\u786E\u8BA4\uFF08\u9ED8\u8BA4 true\uFF09\u3002\u8BBE\u4E3A false \u4F1A\u76F4\u63A5\u6267\u884C\uFF0C\u53EF\u80FD\u8986\u76D6\u7528\u6237\u624B\u5DE5\u6539\u52A8\u3002" }
+      safeMode: { type: "boolean", description: "\u662F\u5426\u5728\u6709\u98CE\u9669\u6539\u52A8\u65F6\u8981\u6C42\u786E\u8BA4\uFF08\u9ED8\u8BA4 true\uFF09\u3002\u8BBE\u4E3A false \u4F1A\u76F4\u63A5\u6267\u884C\uFF0C\u53EF\u80FD\u8986\u76D6\u7528\u6237\u624B\u5DE5\u6539\u52A8\u3002" },
+      visualReview: { type: "json", description: 'Visible-canvas review evidence tied to the latest successful update: {phase:"representative"|"final",passed:true,boardRevision:<returned rev>,revealRequestId:"<returned revealRequestId>",inspectedPageIds:[...],observations:[...]}. Final review includes every page id and must be sent with empty ops after inspecting the updated board.' }
     },
     output: {
       schema: {
@@ -3025,6 +3405,10 @@ function draw2codeUpdateTool(store) {
           elementCount: { type: "integer", required: true },
           applied: { type: "integer", required: true },
           verified: { type: "boolean", required: true },
+          writeVerified: { type: "boolean", required: true },
+          completionReady: { type: "boolean", required: true },
+          nextAction: { type: "string", required: true },
+          prototypeQuality: { type: "json", required: true },
           revealRequestId: { type: "string" },
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
           requiresConfirmation: { type: "boolean" },
@@ -3045,17 +3429,22 @@ function draw2codeUpdateTool(store) {
       render: (_args, value) => text2(
         value.pending === true ? `\u3010\u5F85\u786E\u8BA4\u3011\u68C0\u6D4B\u5230\u6F5C\u5728\u51B2\u7A81\uFF08${value.conflicts?.length ?? 0} \u6761\uFF09\uFF1A
 ${value.planSummary ?? ""}
-\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : value.activeBoard !== void 0 && value.targetBoard !== value.activeBoard ? `board ${value.targetBoard ?? ""} updated and verified on disk, but the visible board is ${value.activeBoard}; switch the \u753B\u7801 board or retry without name to update what the user is viewing.` : `board ${value.targetBoard ?? ""} updated and verified: ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. The \u753B\u7801 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `
-\u539F\u578B\u8D28\u91CF\u63D0\u9192\uFF1A
+\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""} updated and selected. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; revealRequestId=${value.revealRequestId ?? "missing"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. ${value.nextAction ?? ""} The \u753B\u7801 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `
+\u7ED3\u6784\u4E0E\u5E03\u5C40\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       )
     },
     async execute(args) {
       const safeMode = args.safeMode !== false;
       const force = args.force === true;
+      const visualReview = parseVisualReview(args.visualReview);
       const parsedOps = parseUpdateOps(args.ops);
+      if (visualReview?.phase === "final" && parsedOps.length > 0) {
+        throw new Error("visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]");
+      }
       const target = await resolveBoard(store, args.root, args.name);
       const board = await store.read(args.root, target.name);
+      await validateVisualReviewEvidence(store, args.root, target.name, board.ok ? board.value.rev : null, visualReview);
       const key = makeKey(args.root, target.name);
       const cache = boardCache.get(key);
       const currentElements = board.ok ? board.value.scene.elements : [];
@@ -3064,6 +3453,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
       const ops = normalizePageShellUpserts(currentElements, semanticOps);
       const prospectiveElements = previewElements(currentElements, ops);
+      validatePhasedDrawing(currentElements, prospectiveElements, visualReview);
       validateNewPrototypePageContracts(currentElements, prospectiveElements);
       const layoutReport = inspectPrototypeLayout(prospectiveElements, {
         focusIds: layoutFocusIdsWithPages(ops, currentElements, prospectiveElements)
@@ -3089,6 +3479,7 @@ ${formatLayoutIssues(layoutReport.errors)}
       if (safeMode && !force && conflicts.length > 0) {
         const elementCount = currentElements.length;
         const conflictValues = conflicts;
+        const prototypeQuality2 = inspectPrototypeQuality(currentElements);
         return {
           rev: board.ok ? board.value.rev : 0,
           targetBoard: target.name,
@@ -3096,6 +3487,10 @@ ${formatLayoutIssues(layoutReport.errors)}
           elementCount,
           applied: 0,
           verified: false,
+          writeVerified: false,
+          completionReady: false,
+          nextAction: "\u5148\u786E\u8BA4\u51B2\u7A81\uFF1B\u672C\u8F6E\u5C1A\u672A\u5199\u5165\uFF0C\u4E5F\u4E0D\u80FD\u8FDB\u5165\u89C6\u89C9\u5B8C\u6210\u9A8C\u6536",
+          prototypeQuality: prototypeQuality2,
           layoutWarnings: layoutWarnings(currentElements),
           requiresConfirmation: true,
           pending: true,
@@ -3118,12 +3513,16 @@ ${formatLayoutIssues(layoutReport.errors)}
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements);
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`);
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements });
-      const targetIsVisible = target.activeBoard === void 0 || target.activeBoard === target.name || args.name === void 0;
-      const selected = targetIsVisible ? await store.setActiveBoard(args.root, target.name) : { ok: true, value: { name: target.activeBoard } };
+      const selected = await store.setActiveBoard(args.root, target.name);
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`);
-      const revealed = targetIsVisible ? await store.publishBoardReveal(args.root, target.name) : null;
-      if (revealed !== null && !revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`);
+      const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev);
+      if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`);
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements);
+      const pages = prototypePages(refreshed.value.scene.elements);
+      const prototypeQuality = inspectPrototypeQuality(refreshed.value.scene.elements);
+      const completionReady = ops.length === 0 && reviewedEveryPage(visualReview, pages) && prototypeQuality.structurePassed && prototypeQuality.contentPassed && prototypeQuality.layoutPassed && prototypeQuality.warnings.length === 0;
+      prototypeQuality.visualReviewRequired = !completionReady && pages.length > 0;
+      const nextAction = completionReady ? "\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF1B\u53EF\u4EE5\u6839\u636E prototypeQuality \u7684\u5269\u4F59 warnings \u51B3\u5B9A\u662F\u5426\u7EE7\u7EED\u6253\u78E8" : pages.length === 0 ? "\u5F53\u524D\u753B\u677F\u6CA1\u6709\u53EF\u8BC6\u522B\u9875\u9762\uFF1B\u5148\u521B\u5EFA prototype-page" : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0 ? "\u5148\u6309 prototypeQuality.warnings \u4FEE\u590D\u7ED3\u6784\u3001\u9996\u5C4F\u5185\u5BB9\u548C\u5E03\u5C40\uFF1B\u5168\u90E8\u901A\u8FC7\u540E\u5728\u771F\u5B9E\u753B\u677F\u9010\u9875\u68C0\u67E5\uFF0C\u518D\u7528\u7A7A ops \u63D0\u4EA4 phase=final visualReview" : ops.length > 0 && visualReview?.phase === "final" ? "\u672C\u8F6E\u4ECD\u5199\u5165\u4E86\u5143\u7D20\uFF0C\u4E0D\u80FD\u540C\u65F6\u8BC1\u660E\u5199\u5165\u540E\u7684\u89C6\u89C9\u7ED3\u679C\uFF1B\u8BF7\u67E5\u770B\u771F\u5B9E\u753B\u677F\u540E\uFF0C\u7528\u7A7A ops \u5355\u72EC\u63D0\u4EA4 phase=final visualReview" : "\u5728\u771F\u5B9E\u53EF\u89C1\u753B\u677F\u9010\u9875\u68C0\u67E5\u9996\u5C4F\u4EFB\u52A1\u3001\u5C42\u7EA7\u3001\u5BF9\u9F50\u3001mock \u6570\u636E\u548C\u5BFC\u822A\uFF0C\u518D\u7528\u7A7A ops \u63D0\u4EA4\u8986\u76D6\u5168\u90E8 page id \u7684 phase=final visualReview";
       return {
         rev: result.value.rev,
         targetBoard: target.name,
@@ -3131,7 +3530,11 @@ ${formatLayoutIssues(layoutReport.errors)}
         elementCount: result.value.elementCount,
         applied: result.value.applied,
         verified: true,
-        ...revealed?.ok === true ? { revealRequestId: revealed.value.id } : {},
+        writeVerified: true,
+        completionReady,
+        nextAction,
+        prototypeQuality,
+        revealRequestId: revealed.value.id,
         layoutWarnings: qualityWarnings,
         requiresConfirmation: false,
         pending: false,
@@ -4146,7 +4549,8 @@ var Draw2CodeRuntimeImpl = class {
         ...command.board === void 0 ? {} : { name: command.board },
         ops: command.ops,
         ...command.force === void 0 ? {} : { force: command.force },
-        ...command.safeMode === void 0 ? {} : { safeMode: command.safeMode }
+        ...command.safeMode === void 0 ? {} : { safeMode: command.safeMode },
+        ...command.visualReview === void 0 ? {} : { visualReview: command.visualReview }
       }, {});
     } else if (command.type === "generate") {
       data = await draw2codeGenerateTool(scenes, projects).execute({ ...command.input, root: command.root }, {});

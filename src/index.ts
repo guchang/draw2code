@@ -27,7 +27,7 @@ import { daemonTool, makeDaemonProxyRoutes } from './daemon-adapter.ts'
 // name/inject/apply/Config, extra exports are ignored).
 export { ProjectStore } from './project-store.ts'
 export { SceneStore, normalizeElement, emptyScene, isPathInside } from './scene-store.ts'
-export { inspectPrototypeLayout, formatLayoutIssues } from './layout.ts'
+export { inspectPrototypeLayout, inspectPrototypeQuality, formatLayoutIssues } from './layout.ts'
 export { makeRoutes } from './routes.ts'
 export { draw2codeCreateTool } from './create-tool.ts'
 export { draw2codeGenerateTool, draw2codeListTool, draw2codeReadTool, draw2codeUpdateTool } from './tools.ts'
@@ -39,6 +39,24 @@ export const name = 'draw2code'
 
 /** Services required before the 画码 surfaces can mount. */
 export const inject = ['webServer', 'tools', 'systemPrompt', 'workspaceRegistry']
+
+/**
+ * The MCP schema may deliver ops either as a real array or as a JSON string
+ * (hosts that stringify large array parameters). Both forms are valid input
+ * for the update tool, so parse strings instead of dropping them to [].
+ */
+export function normalizeOpsArg(ops: unknown): unknown[] {
+  if (Array.isArray(ops)) return ops
+  if (typeof ops === 'string' && ops.trim() !== '') {
+    try {
+      const parsed: unknown = JSON.parse(ops)
+      if (Array.isArray(parsed)) return parsed
+    } catch (error) {
+      throw new Error(`ops is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  throw new Error('ops must be an array or a JSON string encoding an array')
+}
 
 /**
  * Mount the scene store, routes, tools, and announcement.
@@ -58,10 +76,11 @@ export function apply(ctx: Context): void {
     daemonTool(ctx, client, localTools[1], (args) => ({ type: 'read', root: String(args.root ?? ''), ...(typeof args.name === 'string' ? { board: args.name } : {}) })),
     daemonTool(ctx, client, localTools[2], (args) => { const { root, ...input } = args; return { type: 'create', root: String(root ?? ''), input } }),
     daemonTool(ctx, client, localTools[3], (args) => ({
-      type: 'update', root: String(args.root ?? ''), ops: Array.isArray(args.ops) ? args.ops : [],
+      type: 'update', root: String(args.root ?? ''), ops: normalizeOpsArg(args.ops),
       ...(typeof args.name === 'string' ? { board: args.name } : {}),
       ...(typeof args.force === 'boolean' ? { force: args.force } : {}),
       ...(typeof args.safeMode === 'boolean' ? { safeMode: args.safeMode } : {}),
+      ...(typeof args.visualReview === 'object' && args.visualReview !== null ? { visualReview: args.visualReview as Record<string, unknown> } : {}),
     })),
     daemonTool(ctx, client, localTools[4], (args) => { const { root, ...input } = args; return { type: 'generate', root: String(root ?? ''), input } }),
   ]

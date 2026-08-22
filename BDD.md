@@ -67,9 +67,13 @@
 
 核心信息：目标端、核心用户、核心目标、最重要的用户流程、首版核心模块、首轮核心页面。用户原话明确 App/Web/小程序时目标端自动预填；平台/用户/目标/流程默认单选，模块和页面可多选。选项按用户想法动态生成，万年历穿搭会出现日期、天气、穿搭推荐、衣橱等语义选项，陌生人社交会出现雷达发现、碰一碰、好友聊天、足迹与隐私等选项。视觉风格不在原型阶段应用，主动提供的 `styleNote` 延迟给 `draw2code_generate`。
 
-首轮简报默认约束为 3–5 个核心页面、默认成功路径和语义化低保真组件；`brief.pageMockData` 还会按页面给出 `requiredContent`、`minimumRecords` 和可直接绘制的 `examples`。列表、聊天、图表、详情和状态组件默认至少放入 3 条可见 mock 数据，不能以空白方框、Lorem ipsum、“用户A”“标题”“内容”等占位。具体 Excalidraw 元素仍由 `draw2code_update` 按现有冲突检查、内容门禁、读回验证和可见性协议写入。
+首轮简报默认约束为 3–5 个核心页面、默认成功路径和语义化低保真组件；`brief.pageMockData` 按页面给出 `requiredContent`、`minimumRecords` 和可直接绘制的 `examples`，`brief.pageBlueprints` 进一步明确每页核心任务、首屏必须出现的信息、唯一主操作和建议的语义组件。列表、聊天、图表、详情和状态组件默认至少放入 3 条可见 mock 数据，不能以空白方框、Lorem ipsum、“用户A”“标题”“内容”等占位。具体 Excalidraw 元素仍由 `draw2code_update` 按现有冲突检查、内容门禁、读回验证和可见性协议写入。
 
 ### 本轮新增 — 低保真原型可读性与语义修复
+
+- `draw2code_update` 把落盘正确性与产品原型质量拆开：兼容字段 `verified` 与规范字段 `writeVerified` 只证明写入及回读一致；`prototypeQuality` 单独报告结构、内容、布局、质量分和 warnings；只有最终 `visualReview` 覆盖全部页面后才返回 `completionReady=true`。
+- 空白过多、首屏信息不足、文字层级平、主操作不清、状态无强调、边框滥用、点击区域过小、页面边距或重复控件节奏不一致，会以可执行的质量 warning 返回，不再把“写进去了”误当成“画好了”。
+- 首次批量创建 3 个及以上页面会返回 `visual-review-required`；Agent 必须先画一个代表页、在真实画板检查后再铺开剩余页面，并在最后逐页复核。`visualReview` 与最近一次 update 的 `rev`、`revealRequestId` 绑定，且 Canvas 必须已经实际加载并确认同一 board + revision；旧证据不能重放，最终复核必须在写入完成后的独立空 ops 调用中提交。
 
 - `draw2code_update` 除规范的 `{op:"upsert",element:{...}}` 外，也接受直接元素、省略 `op` 的 `element` 包装和字段平铺的 `upsert`；只对同时具有非空 `id + type` 的无歧义输入做兼容，不猜测 bare id 是删除还是修改。`op=delete` 时也兼容 `elementId` 和 `element.id`，避免 Agent 只因移动 id 字段重发整批修改。
 - 同一批对相同元素 id 的多次操作按最终净结果读回验证：`upsert→delete` 期望元素不存在，`delete→upsert` 期望最终元素存在；不会因临时中间态已经被后续操作覆盖而误报失败。
@@ -126,7 +130,7 @@ bad-ops: ops[0] is "replace" but missing its scene
 
 原实现把当前画板名只存在浏览器 `localStorage`，host 侧工具不知道用户正停在哪一块画板；工具调用如果默认写 `prototype`，可以得到磁盘 `verified=true`，但用户眼前可能正在看“顾客端”。
 
-现在浏览器通过 loopback `/api/draw2code/active-board` 将当前画板同步到 workspace 的 `draw2code/.active-board.json`。`draw2code_update`、`draw2code_read` 和 `draw2code_generate` 省略 `name` 时使用这个共享指针。更新在写入并回读验证成功后会选中目标画板、发布一次性 reveal request，并由常驻客户端监听器自动打开或激活“画码”；冲突、布局失败和重复轮询不会触发抢焦点。
+现在浏览器通过 loopback `/api/draw2code/active-board` 将当前画板同步到 workspace 的 `draw2code/.active-board.json`。`draw2code_update`、`draw2code_read` 和 `draw2code_generate` 省略 `name` 时使用这个共享指针。更新在写入并回读验证成功后会选中目标画板、发布绑定 board + revision 的一次性 reveal request，并由常驻客户端监听器自动打开或激活“画码”；Canvas 实际加载该 revision 后才回执，冲突、布局失败和重复轮询不会触发抢焦点。
 
 ### 已修复 — host 重启后没有快照会放行已有元素覆盖
 
@@ -140,7 +144,7 @@ bad-ops: ops[0] is "replace" but missing its scene
 
 - `npm run typecheck` 通过。
 - `npm run build` 通过，并生成 `dist/index.js` 与 `lib/client.js`。
-- `npm test` 通过：当前 82 个 Node 内置回归测试全部通过，覆盖无 Frame 页面外框与外部标题契约、跨页箭头及绑定文案归类、绑定优先级、同页箭头端点归属、用户手绘箭头保护、mock 数据增量删除门禁、重复页面名拒绝、rectangle/legacy Frame 混合画板、`pages`/`frames` 兼容冲突、update 参数容错、同批净结果校验、legacy Frame 局部坐标安全换算、按钮文字真实几何居中、底部导航门禁、同步协调、删除不复活、UTF-8 容量限制、当前画板目标解析、自动 reveal、create grilling、原型质量门禁和 generate 恢复/验收流程。
+- `npm test` 通过：当前 100 个 Node 内置回归测试全部通过，覆盖无 Frame 页面外框与外部标题契约、跨页箭头及绑定文案归类、绑定优先级、同页箭头端点归属、用户手绘箭头保护、mock 数据增量删除门禁、重复页面名拒绝、rectangle/legacy Frame 混合画板、`pages`/`frames` 兼容冲突、update 参数容错、同批净结果校验、legacy Frame 局部坐标安全换算、按钮文字真实几何居中、底部导航门禁、同步协调、删除不复活、UTF-8 容量限制、当前画板目标解析、自动 reveal、create grilling、原型质量门禁和 generate 恢复/验收流程。
 - 项目包含 Node 内置回归入口和 `features/draw2code.feature` BDD 契约。
 - DeepSeek Harness 的真实界面已加载 `画码` 标签页，当前能看到 `prototype` 画板、`新画板` 菜单入口、Excalidraw 工具栏和原型文字元素；这证明插件注册与非空画板挂载路径至少可达。
 - 重新启动 `dsh web` 后，`GET /api/draw2code/active-board?root=<workspace>` 与 `GET /api/draw2code/reveal-request?root=<workspace>` 均能从真实 host 返回成功 envelope；仅刷新网页不足以重装 host bundle。

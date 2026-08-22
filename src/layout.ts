@@ -28,6 +28,23 @@ export interface LayoutReport {
   warnings: LayoutIssue[]
 }
 
+export interface PrototypeQualityPageResult {
+  pageId: string
+  pageName: string
+  qualityScore: number
+  warnings: LayoutIssue[]
+}
+
+export interface PrototypeQualityReport {
+  structurePassed: boolean
+  contentPassed: boolean
+  layoutPassed: boolean
+  visualReviewRequired: boolean
+  qualityScore: number
+  warnings: LayoutIssue[]
+  pages: PrototypeQualityPageResult[]
+}
+
 interface LayoutOptions {
   /** Only these elements are allowed to block an incremental agent update. */
   focusIds?: Set<string>
@@ -37,6 +54,22 @@ const SHAPE_TYPES = new Set(['rectangle', 'diamond', 'ellipse'])
 const BOTTOM_NAV_MAX_GAP = 96
 const DEFAULT_MOCK_DATA_MIN = 3
 const BOTTOM_NAVIGATION_ITEM_ROLES = new Set(['bottom-navigation-item', 'bottom-nav-item'])
+const PRIMARY_ACTION_ROLES = new Set(['primary-action', 'primary-button'])
+const INTERACTIVE_ROLES = new Set([
+  ...PRIMARY_ACTION_ROLES,
+  'button', 'secondary-action', 'secondary-button', 'danger-button', 'destructive-button',
+  'chip', 'filter-chip', 'choice-chip', 'tab', 'tab-item', 'bottom-navigation-item', 'bottom-nav-item',
+])
+const CONTENT_WARNING_CODES = new Set([
+  'page-content-too-sparse',
+  'page-content-too-dense',
+  'above-fold-content-insufficient',
+  'continuous-empty-space-too-large',
+  'status-emphasis-missing',
+  'primary-action-missing',
+  'primary-action-ambiguous',
+  'visual-hierarchy-flat',
+])
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : ''
@@ -94,6 +127,10 @@ function isBottomNavigation(element: Record<string, unknown>): boolean {
   const role = str(customData(element).role).toLowerCase()
   if (role === 'bottom-navigation' || role === 'bottom-nav' || role === 'tabbar') return true
   return /底部导航|底部选项卡|tabbar|bottom[ -]?navigation/iu.test(str(element.text))
+}
+
+function isBottomNavigationMember(element: Record<string, unknown>): boolean {
+  return isBottomNavigation(element) || BOTTOM_NAVIGATION_ITEM_ROLES.has(str(customData(element).role).toLowerCase())
 }
 
 function isVisibleMockData(element: Record<string, unknown>): boolean {
@@ -304,6 +341,219 @@ export function inspectPrototypeLayout(
   }
 
   return { errors, warnings }
+}
+
+function elementRole(element: Record<string, unknown>): string {
+  return str(customData(element).role).trim().toLowerCase()
+}
+
+function isPageContent(element: Record<string, unknown>, page: PrototypePage): boolean {
+  const type = str(element.type)
+  if (str(element.id) === page.id || isPrototypePageLabel(element)) return false
+  if (type === 'arrow' || type === 'line' || type === 'freedraw') return false
+  return num(element.width) > 0 && num(element.height) > 0
+}
+
+function qualityIssue(code: string, page: PrototypePage, message: string): LayoutIssue {
+  return { code, id: page.id, message }
+}
+
+function pageQualityWarnings(
+  page: PrototypePage,
+  members: Array<Record<string, unknown>>,
+): LayoutIssue[] {
+  const warnings: LayoutIssue[] = []
+  const content = members.filter((element) => isPageContent(element, page))
+  const texts = content.filter((element) => str(element.type) === 'text' && str(element.text).trim() !== '')
+  const shapes = content.filter((element) => SHAPE_TYPES.has(str(element.type)))
+  const elementById = new Map(members.map((element) => [str(element.id), element]))
+  const pageTop = page.bounds.y
+  const pageBottom = page.bounds.y + page.bounds.height
+  const aboveFoldBottom = pageTop + page.bounds.height * 0.58
+  const aboveFold = content.filter((element) => num(element.y) < aboveFoldBottom)
+
+  if (content.length < 8) {
+    warnings.push(qualityIssue(
+      'page-content-too-sparse',
+      page,
+      `${page.name} only has ${content.length} visible content elements; add the information needed to understand the page's main task without falling back to empty space`,
+    ))
+  }
+  if (content.length > 52) {
+    warnings.push(qualityIssue(
+      'page-content-too-dense',
+      page,
+      `${page.name} has ${content.length} visible content elements; group or defer secondary information so the first screen stays scannable`,
+    ))
+  }
+  if (aboveFold.length < 4) {
+    warnings.push(qualityIssue(
+      'above-fold-content-insufficient',
+      page,
+      `${page.name} has only ${aboveFold.length} meaningful elements in the first screen; expose the page heading, current state, key content, and primary action above the fold`,
+    ))
+  }
+
+  const verticalBoxes = content
+    .map((element) => ({ top: Math.max(pageTop, num(element.y)), bottom: Math.min(pageBottom, num(element.y) + num(element.height)) }))
+    .sort((left, right) => left.top - right.top)
+  let largestGap = verticalBoxes.length === 0 ? page.bounds.height : Math.max(0, verticalBoxes[0].top - pageTop)
+  let coveredBottom = pageTop
+  for (const box of verticalBoxes) {
+    largestGap = Math.max(largestGap, box.top - coveredBottom)
+    coveredBottom = Math.max(coveredBottom, box.bottom)
+  }
+  largestGap = Math.max(largestGap, pageBottom - coveredBottom)
+  if (largestGap > page.bounds.height * 0.34) {
+    warnings.push(qualityIssue(
+      'continuous-empty-space-too-large',
+      page,
+      `${page.name} contains an unexplained vertical empty region of about ${Math.round(largestGap)}px; rebalance the content flow or reserve the space with an explicit product purpose`,
+    ))
+  }
+
+  const fontSizes = texts.map((element) => num(element.fontSize, 20))
+  if (fontSizes.length >= 4 && Math.max(...fontSizes) - Math.min(...fontSizes) < 4) {
+    warnings.push(qualityIssue(
+      'text-scale-flat',
+      page,
+      `${page.name} uses nearly one text size for headings, content, and metadata; create at least a clear heading/body/supporting-text hierarchy`,
+    ))
+  }
+
+  const primaryActions = content.filter((element) => PRIMARY_ACTION_ROLES.has(elementRole(element)))
+  const primaryActionIds = new Set(primaryActions.map((element) => str(element.containerId) || str(element.id)))
+  if (primaryActionIds.size === 0) {
+    warnings.push(qualityIssue(
+      'primary-action-missing',
+      page,
+      `${page.name} has no semantic primary action; mark the one action that advances the page's core task with customData.role=primary-action`,
+    ))
+  } else if (primaryActionIds.size > 1) {
+    warnings.push(qualityIssue(
+      'primary-action-ambiguous',
+      page,
+      `${page.name} exposes ${primaryActionIds.size} primary actions; keep one dominant action and demote the rest`,
+    ))
+  }
+
+  const statusTexts = texts.filter((element) => /进行中|待处理|已完成|已逾期|失败|成功|警告|异常|高优先级|低优先级/iu.test(str(element.text)))
+  const hasSemanticTone = (element: Record<string, unknown>): boolean => {
+    const ownTone = str(customData(element).tone).toLowerCase()
+    if (ownTone !== '' && ownTone !== 'neutral') return true
+    const container = elementById.get(str(element.containerId))
+    const containerTone = container === undefined ? '' : str(customData(container).tone).toLowerCase()
+    return containerTone !== '' && containerTone !== 'neutral'
+  }
+  if (statusTexts.some((element) => !hasSemanticTone(element))) {
+    warnings.push(qualityIssue(
+      'status-emphasis-missing',
+      page,
+      `${page.name} contains status or priority text without emphasis on that status element or its bound container; use restrained success, warning, danger, or info tone to support fast scanning`,
+    ))
+  }
+
+  if (shapes.length >= 4) {
+    const visualSignatures = new Set(shapes.map((element) => {
+      const data = customData(element)
+      return [str(data.tone).toLowerCase() || 'neutral', str(element.backgroundColor) || 'transparent', str(element.strokeWidth) || '1'].join('|')
+    }))
+    if (visualSignatures.size <= 1) {
+      warnings.push(qualityIssue(
+        'visual-hierarchy-flat',
+        page,
+        `${page.name} gives all major blocks the same fill, tone, and border weight; soften secondary regions and reserve stronger emphasis for the page's primary task`,
+      ))
+    }
+  }
+
+  const outlinedShapes = shapes.filter((element) => {
+    const background = str(element.backgroundColor)
+    return background === '' || background === 'transparent'
+  })
+  if (shapes.length >= 5 && outlinedShapes.length / shapes.length >= 0.75) {
+    warnings.push(qualityIssue(
+      'border-overuse',
+      page,
+      `${page.name} draws ${outlinedShapes.length} of ${shapes.length} shapes as outline-only boxes; use spacing, grouping, and a few semantic fills instead of giving every item equal border weight`,
+    ))
+  }
+
+  for (const element of content) {
+    if (!INTERACTIVE_ROLES.has(elementRole(element))) continue
+    if (str(element.type) === 'text') continue
+    if (num(element.width) < 44 || num(element.height) < 44) {
+      warnings.push(issue(
+        'tap-target-too-small',
+        element,
+        `${str(element.id)} is ${Math.round(num(element.width))}×${Math.round(num(element.height))}px; interactive controls should provide at least a 44×44px touch target`,
+      ))
+    }
+  }
+
+  const leftOffsets = content
+    .filter((element) => !isBottomNavigationMember(element) && num(element.width) >= page.bounds.width * 0.35)
+    .map((element) => Math.round(num(element.x) - page.bounds.x))
+  if (leftOffsets.length >= 4 && Math.max(...leftOffsets) - Math.min(...leftOffsets) > 20) {
+    warnings.push(qualityIssue(
+      'page-margin-inconsistent',
+      page,
+      `${page.name} uses inconsistent main-content left margins (${Math.min(...leftOffsets)}–${Math.max(...leftOffsets)}px); align repeated blocks to a stable page grid`,
+    ))
+  }
+
+  const heightsByRole = new Map<string, number[]>()
+  for (const element of content) {
+    const role = elementRole(element)
+    if (role === '') continue
+    const values = heightsByRole.get(role) ?? []
+    values.push(num(element.height))
+    heightsByRole.set(role, values)
+  }
+  for (const [role, heights] of heightsByRole.entries()) {
+    if (heights.length < 3 || Math.max(...heights) - Math.min(...heights) <= 8) continue
+    warnings.push(qualityIssue(
+      'repeated-control-rhythm-inconsistent',
+      page,
+      `${page.name} repeats role=${role} with heights from ${Math.round(Math.min(...heights))}px to ${Math.round(Math.max(...heights))}px; use a consistent component rhythm`,
+    ))
+  }
+  return warnings
+}
+
+/**
+ * Report product-prototype quality separately from persistence correctness.
+ * Warnings are intentionally non-destructive: the tool can prove a write while
+ * still requiring the Agent to inspect and improve the visible prototype.
+ */
+export function inspectPrototypeQuality(
+  elements: Array<Record<string, unknown>>,
+): PrototypeQualityReport {
+  const layout = inspectPrototypeLayout(elements)
+  const pages = prototypePages(elements)
+  const perPage = pages.map((page) => {
+    const members = elements.filter((element) => pageForElement(element, pages)?.id === page.id)
+    const warnings = pageQualityWarnings(page, members)
+    return {
+      pageId: page.id,
+      pageName: page.name,
+      qualityScore: Math.max(0, 100 - warnings.length * 8),
+      warnings,
+    }
+  })
+  const warnings = [...layout.warnings, ...perPage.flatMap((page) => page.warnings)]
+  const structurePassed = layout.errors.length === 0
+    && !layout.warnings.some((warning) => warning.code === 'page-membership-ambiguous' || warning.code === 'page-name-duplicate')
+  const contentPassed = !warnings.some((warning) => CONTENT_WARNING_CODES.has(warning.code))
+  return {
+    structurePassed,
+    contentPassed,
+    layoutPassed: layout.errors.length === 0,
+    visualReviewRequired: pages.length > 0,
+    qualityScore: Math.max(0, 100 - layout.errors.length * 20 - warnings.length * 5),
+    warnings,
+    pages: perPage,
+  }
 }
 
 export function formatLayoutIssues(issues: readonly unknown[]): string {
