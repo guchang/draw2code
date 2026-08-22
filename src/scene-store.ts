@@ -15,7 +15,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { realpath } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Draw2CodeStoreContext } from './store-context.ts'
 
 /** Directory inside the workspace root that holds all scenes. */
 export const SCENE_DIR = 'draw2code'
@@ -50,6 +50,13 @@ const MAX_VERSIONS = 30
  * Agent-side applyOps always snapshots (one version per update round).
  */
 const CLIENT_ARCHIVE_INTERVAL_MS = 10 * 60_000
+
+// A daemon may construct separate stores for Runtime commands and Canvas
+// routes. Coordination must therefore live at module scope, not on one store
+// instance, so every mutation of the same physical file shares one queue.
+const WRITE_QUEUES = new Map<string, Promise<void>>()
+const BOARD_REVEALS = new Map<string, BoardRevealRequest>()
+let revealCounter = 0
 
 /** Element types agents may author (render-safe subset). */
 const ALLOWED_TYPES = new Set([
@@ -558,11 +565,7 @@ function parseOps(input: unknown): SceneOp[] {
  * The workspace-gated scene store.
  */
 export class SceneStore {
-  private readonly boardReveals = new Map<string, BoardRevealRequest>()
-  private readonly writeQueues = new Map<string, Promise<void>>()
-  private revealCounter = 0
-
-  constructor(private readonly ctx: Context) {}
+  constructor(private readonly ctx: Draw2CodeStoreContext) {}
 
   /** Gate a requested root: must resolve on disk and sit inside a registered workspace. */
   private async gate(root: string): Promise<SceneResult<string>> {
@@ -603,17 +606,17 @@ export class SceneStore {
   }
 
   private async withWriteLock<T>(path: string, task: () => Promise<T>): Promise<T> {
-    const previous = this.writeQueues.get(path) ?? Promise.resolve()
+    const previous = WRITE_QUEUES.get(path) ?? Promise.resolve()
     let release = (): void => undefined
     const current = new Promise<void>((resolve) => { release = resolve })
     const tail = previous.catch(() => undefined).then(() => current)
-    this.writeQueues.set(path, tail)
+    WRITE_QUEUES.set(path, tail)
     await previous.catch(() => undefined)
     try {
       return await task()
     } finally {
       release()
-      if (this.writeQueues.get(path) === tail) this.writeQueues.delete(path)
+      if (WRITE_QUEUES.get(path) === tail) WRITE_QUEUES.delete(path)
     }
   }
 
@@ -644,10 +647,12 @@ export class SceneStore {
     if (!named.ok) return named
     await mkdir(this.dir(gated.value), { recursive: true })
     const path = this.activeBoardPath(gated.value)
-    const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    await writeFile(tmp, `${JSON.stringify({ name: named.value })}\n`, 'utf8')
-    await rename(tmp, path)
-    return { ok: true, value: { name: named.value } }
+    return this.withWriteLock(path, async () => {
+      const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      await writeFile(tmp, `${JSON.stringify({ name: named.value })}\n`, 'utf8')
+      await rename(tmp, path)
+      return { ok: true, value: { name: named.value } }
+    })
   }
 
   /** Publish the latest verified update for the browser-side auto-open loop. */
@@ -656,13 +661,13 @@ export class SceneStore {
     if (!gated.ok) return gated
     const named = this.checkName(name)
     if (!named.ok) return named
-    this.revealCounter += 1
+    revealCounter += 1
     const request = {
-      id: `reveal-${Date.now().toString(36)}-${this.revealCounter.toString(36)}`,
+      id: `reveal-${Date.now().toString(36)}-${revealCounter.toString(36)}`,
       board: named.value,
       createdAt: Date.now(),
     }
-    this.boardReveals.set(gated.value, request)
+    BOARD_REVEALS.set(gated.value, request)
     return { ok: true, value: request }
   }
 
@@ -670,7 +675,7 @@ export class SceneStore {
   async getBoardReveal(root: string): Promise<SceneResult<{ request: BoardRevealRequest | null }>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
-    return { ok: true, value: { request: this.boardReveals.get(gated.value) ?? null } }
+    return { ok: true, value: { request: BOARD_REVEALS.get(gated.value) ?? null } }
   }
 
   /** The versions directory of one board (inside draw2code/.versions/<name>). */
@@ -968,7 +973,10 @@ export class SceneStore {
             return err('conflict', `scene changed on disk since rev ${baseRev}`)
           }
         } catch {
-          // Absent file: creating, no conflict.
+          // baseRev=0 is the explicit first-create sentinel. A non-zero
+          // revision whose file disappeared means the board was deleted;
+          // accepting it would let a delayed Canvas save resurrect the board.
+          if (baseRev !== 0) return err('conflict', `scene was deleted since rev ${baseRev}`)
         }
       }
       await mkdir(this.dir(gated.value), { recursive: true })
@@ -1009,18 +1017,25 @@ export class SceneStore {
     const named = this.checkName(name)
     if (!named.ok) return named
     const path = await this.scenePath(gated.value, named.value)
-    try {
-      await rm(path)
-    } catch {
-      return err('not-found', `scene "${name}" does not exist`)
-    }
-    // Also drop this board's snapshots — they are meaningless without it.
-    await rm(this.versionsDir(gated.value, named.value), { recursive: true, force: true }).catch(() => undefined)
-    const active = await this.getActiveBoard(root)
-    if (active.ok && active.value.name === named.value) {
-      await rm(this.activeBoardPath(gated.value), { force: true }).catch(() => undefined)
-    }
-    return { ok: true, value: { deleted: true } }
+    return this.withWriteLock(path, async () => {
+      try {
+        await rm(path)
+      } catch {
+        return err('not-found', `scene "${name}" does not exist`)
+      }
+      // Also drop this board's snapshots — they are meaningless without it.
+      await rm(this.versionsDir(gated.value, named.value), { recursive: true, force: true }).catch(() => undefined)
+      const active = await this.getActiveBoard(root)
+      if (active.ok && active.value.name === named.value) {
+        const activePath = this.activeBoardPath(gated.value)
+        await this.withWriteLock(activePath, async () => {
+          const latest = await this.getActiveBoard(root)
+          if (latest.ok && latest.value.name === named.value) await rm(activePath, { force: true })
+        })
+      }
+      BOARD_REVEALS.delete(gated.value)
+      return { ok: true, value: { deleted: true } }
+    })
   }
 
   /**

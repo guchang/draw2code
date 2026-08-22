@@ -1,5 +1,7 @@
-// src/index.ts
-import { resolve as resolve2 } from "node:path";
+// src/runtime.ts
+import { randomBytes } from "node:crypto";
+import { mkdir as mkdir3, readFile as readFile3, realpath as realpath4, rename as rename3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
+import { dirname } from "node:path";
 
 // src/project-store.ts
 import { randomUUID } from "node:crypto";
@@ -422,21 +424,21 @@ var SceneStore = class {
     return join(this.dir(canonicalRoot), ACTIVE_BOARD_FILE);
   }
   /** Validate a scene name. */
-  checkName(name2) {
-    const trimmed = typeof name2 === "string" ? name2.trim() : "";
+  checkName(name) {
+    const trimmed = typeof name === "string" ? name.trim() : "";
     if (!NAME_RE.test(trimmed)) {
-      return err("bad-name", `scene name "${name2}" is invalid (1-64 chars of letters/digits/_/-/space/CJK, no extension)`);
+      return err("bad-name", `scene name "${name}" is invalid (1-64 chars of letters/digits/_/-/space/CJK, no extension)`);
     }
     return { ok: true, value: trimmed };
   }
-  async scenePath(canonicalRoot, name2) {
-    return join(this.dir(canonicalRoot), `${name2}.excalidraw.json`);
+  async scenePath(canonicalRoot, name) {
+    return join(this.dir(canonicalRoot), `${name}.excalidraw.json`);
   }
   async withWriteLock(path, task) {
     const previous = WRITE_QUEUES.get(path) ?? Promise.resolve();
     let release = () => void 0;
-    const current = new Promise((resolve3) => {
-      release = resolve3;
+    const current = new Promise((resolve2) => {
+      release = resolve2;
     });
     const tail = previous.catch(() => void 0).then(() => current);
     WRITE_QUEUES.set(path, tail);
@@ -467,10 +469,10 @@ var SceneStore = class {
     }
   }
   /** Persist the browser's selected board for agent tools in this workspace. */
-  async setActiveBoard(root, name2) {
+  async setActiveBoard(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     await mkdir(this.dir(gated.value), { recursive: true });
     const path = this.activeBoardPath(gated.value);
@@ -483,10 +485,10 @@ var SceneStore = class {
     });
   }
   /** Publish the latest verified update for the browser-side auto-open loop. */
-  async publishBoardReveal(root, name2) {
+  async publishBoardReveal(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     revealCounter += 1;
     const request = {
@@ -504,8 +506,8 @@ var SceneStore = class {
     return { ok: true, value: { request: BOARD_REVEALS.get(gated.value) ?? null } };
   }
   /** The versions directory of one board (inside draw2code/.versions/<name>). */
-  versionsDir(canonicalRoot, name2) {
-    return join(this.dir(canonicalRoot), VERSIONS_DIR, name2);
+  versionsDir(canonicalRoot, name) {
+    return join(this.dir(canonicalRoot), VERSIONS_DIR, name);
   }
   /**
    * Snapshot the CURRENT disk scene of a board before it gets overwritten.
@@ -513,8 +515,8 @@ var SceneStore = class {
    * byte-identical, or (client throttling) when the newest snapshot of the
    * board is younger than CLIENT_ARCHIVE_INTERVAL_MS. Prunes to MAX_VERSIONS.
    */
-  async archiveCurrent(canonicalRoot, name2, incomingJson, always) {
-    const scenePath = await this.scenePath(canonicalRoot, name2);
+  async archiveCurrent(canonicalRoot, name, incomingJson, always) {
+    const scenePath = await this.scenePath(canonicalRoot, name);
     let raw;
     try {
       const info = await stat(scenePath);
@@ -525,7 +527,7 @@ var SceneStore = class {
     }
     const currentJson = JSON.stringify(JSON.parse(raw));
     if (currentJson === JSON.stringify(JSON.parse(incomingJson))) return;
-    const dir = this.versionsDir(canonicalRoot, name2);
+    const dir = this.versionsDir(canonicalRoot, name);
     let entries = [];
     try {
       entries = (await readdir(dir)).filter((entry) => versionStamp(entry) !== null);
@@ -550,10 +552,10 @@ var SceneStore = class {
     }
   }
   /** List the archived versions of a board (newest first, empty when none). */
-  async listVersions(root, name2) {
+  async listVersions(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     const dir = this.versionsDir(gated.value, named.value);
     let entries;
@@ -582,10 +584,10 @@ var SceneStore = class {
   }
   /** Roll a board back to one archived version (snapshotting the current
    * state first, so the rollback itself is reversible). */
-  async restoreVersion(root, name2, id) {
+  async restoreVersion(root, name, id) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     if (!/^\d{9,}-[0-9a-z]{1,8}$/.test(id)) return err("bad-version", `version id "${id}" is invalid`);
     let raw;
@@ -607,10 +609,10 @@ var SceneStore = class {
    * (draw2code-pages/<board>/, empty when absent) — the style-continuation
    * basis for draw2code_generate.
    */
-  async existingPages(root, name2) {
+  async existingPages(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     const dir = join(gated.value, PAGES_DIR, named.value);
     let entries;
@@ -658,10 +660,10 @@ var SceneStore = class {
     return { ok: true, value: normalized };
   }
   /** Project-level visual direction inherited by later generate sessions. */
-  async readGenerateSettings(root, name2) {
+  async readGenerateSettings(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     try {
       const raw = await readFile(join(this.dir(gated.value), GENERATE_SETTINGS_DIR, `${named.value}.json`), "utf8");
@@ -670,10 +672,10 @@ var SceneStore = class {
       return { ok: true, value: null };
     }
   }
-  async writeGenerateSettings(root, name2, settings) {
+  async writeGenerateSettings(root, name, settings) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     const dir = join(this.dir(gated.value), GENERATE_SETTINGS_DIR);
     await mkdir(dir, { recursive: true });
@@ -698,7 +700,7 @@ var SceneStore = class {
     const metas = [];
     for (const entry of entries) {
       if (!entry.endsWith(".excalidraw.json")) continue;
-      const name2 = entry.slice(0, -".excalidraw.json".length);
+      const name = entry.slice(0, -".excalidraw.json".length);
       const path = join(this.dir(gated.value), entry);
       try {
         const info = await stat(path);
@@ -707,7 +709,7 @@ var SceneStore = class {
         const parsed = JSON.parse(raw);
         const elements = parsed.elements;
         metas.push({
-          name: name2,
+          name,
           rev: info.mtimeMs,
           updatedAt: info.mtimeMs,
           elementCount: Array.isArray(elements) ? elements.length : 0
@@ -719,10 +721,10 @@ var SceneStore = class {
     return { ok: true, value: metas };
   }
   /** Read one scene. */
-  async read(root, name2) {
+  async read(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     const path = await this.scenePath(gated.value, named.value);
     let raw;
@@ -756,10 +758,10 @@ var SceneStore = class {
     return { ok: true, value: { rev, scene } };
   }
   /** Write a whole scene (validated). baseRev conflicts return 'conflict'. */
-  async write(root, name2, sceneInput, baseRev, archive = "client") {
+  async write(root, name, sceneInput, baseRev, archive = "client") {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     let scene;
     try {
@@ -796,25 +798,25 @@ var SceneStore = class {
     });
   }
   /** Create an empty scene (fails when it already exists). */
-  async create(root, name2) {
-    const read = await this.read(root, name2);
-    if (read.ok) return err("exists", `scene "${name2}" already exists`);
+  async create(root, name) {
+    const read = await this.read(root, name);
+    if (read.ok) return err("exists", `scene "${name}" already exists`);
     if (read.error.code !== "not-found") return read;
-    const written = await this.write(root, name2, emptyScene(), 0);
-    return !written.ok && written.error.code === "conflict" ? err("exists", `scene "${name2}" already exists`) : written;
+    const written = await this.write(root, name, emptyScene(), 0);
+    return !written.ok && written.error.code === "conflict" ? err("exists", `scene "${name}" already exists`) : written;
   }
   /** Delete one scene. */
-  async remove(root, name2) {
+  async remove(root, name) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const named = this.checkName(name2);
+    const named = this.checkName(name);
     if (!named.ok) return named;
     const path = await this.scenePath(gated.value, named.value);
     return this.withWriteLock(path, async () => {
       try {
         await rm(path);
       } catch {
-        return err("not-found", `scene "${name2}" does not exist`);
+        return err("not-found", `scene "${name}" does not exist`);
       }
       await rm(this.versionsDir(gated.value, named.value), { recursive: true, force: true }).catch(() => void 0);
       const active = await this.getActiveBoard(root);
@@ -834,14 +836,14 @@ var SceneStore = class {
    * does not exist yet) — the agent-side mutation path. Upserts normalize
    * their element, so partial authored fields are filled.
    */
-  async applyOps(root, name2, opsInput, baseRev) {
+  async applyOps(root, name, opsInput, baseRev) {
     let ops;
     try {
       ops = parseOps(opsInput);
     } catch (error2) {
       return err("bad-ops", error2 instanceof Error ? error2.message : String(error2));
     }
-    const current = await this.read(root, name2);
+    const current = await this.read(root, name);
     let scene;
     if (current.ok) {
       scene = current.value.scene;
@@ -907,7 +909,7 @@ var SceneStore = class {
         alignWholeScene ? void 0 : alignmentFocusIds
       )
     };
-    const written = await this.write(root, name2, scene, expectedBaseRev, "agent");
+    const written = await this.write(root, name, scene, expectedBaseRev, "agent");
     if (!written.ok) return written;
     return { ok: true, value: { ...written.value, applied } };
   }
@@ -945,8 +947,8 @@ var ProjectStore = class {
   async withMutationLock(path, task) {
     const previous = PROJECT_MUTATION_QUEUES.get(path) ?? Promise.resolve();
     let release = () => void 0;
-    const current = new Promise((resolve3) => {
-      release = resolve3;
+    const current = new Promise((resolve2) => {
+      release = resolve2;
     });
     const tail = previous.catch(() => void 0).then(() => current);
     PROJECT_MUTATION_QUEUES.set(path, tail);
@@ -1078,10 +1080,18 @@ var ProjectStore = class {
     const entries = (await readdir2(dir)).filter((entry) => versionStamp2(entry) !== null);
     if (entries.length <= 30) return;
     const doomed = entries.map((entry) => ({ entry, stamp: versionStamp2(entry) ?? 0 })).sort((a, b) => a.stamp - b.stamp).slice(0, entries.length - 30);
-    const { rm: rm3 } = await import("node:fs/promises");
-    await Promise.all(doomed.map(({ entry }) => rm3(join2(dir, entry), { force: true })));
+    const { rm: rm2 } = await import("node:fs/promises");
+    await Promise.all(doomed.map(({ entry }) => rm2(join2(dir, entry), { force: true })));
   }
 };
+
+// src/store-context.ts
+function storeContextFor(workspaceRoot) {
+  return {
+    workspaceRegistry: { list: () => [{ path: workspaceRoot }] },
+    logger: { warn: (message, ...args) => console.warn(message, ...args) }
+  };
+}
 
 // src/create-tool.ts
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -2019,17 +2029,17 @@ function pageNameWarnings(elements) {
   const firstByName = /* @__PURE__ */ new Map();
   const warnings = [];
   for (const element of elements) {
-    const name2 = prototypePageName(element);
-    if (name2 === "") continue;
-    const firstId = firstByName.get(name2);
+    const name = prototypePageName(element);
+    if (name === "") continue;
+    const firstId = firstByName.get(name);
     if (firstId === void 0) {
-      firstByName.set(name2, str(element.id));
+      firstByName.set(name, str(element.id));
       continue;
     }
     warnings.push({
       code: "page-name-duplicate",
       id: str(element.id),
-      message: `\u9875\u9762\u300C${name2}\u300D\u540C\u65F6\u7528\u4E8E ${firstId} \u548C ${str(element.id)}\uFF0C\u65E0\u6CD5\u6309\u9875\u9762\u540D\u552F\u4E00\u9009\u62E9\uFF1B\u8BF7\u4E3A\u5176\u4E2D\u4E00\u4E2A\u9875\u9762\u8BBE\u7F6E\u4E0D\u540C\u540D\u79F0`
+      message: `\u9875\u9762\u300C${name}\u300D\u540C\u65F6\u7528\u4E8E ${firstId} \u548C ${str(element.id)}\uFF0C\u65E0\u6CD5\u6309\u9875\u9762\u540D\u552F\u4E00\u9009\u62E9\uFF1B\u8BF7\u4E3A\u5176\u4E2D\u4E00\u4E2A\u9875\u9762\u8BBE\u7F6E\u4E0D\u540C\u540D\u79F0`
     });
   }
   return warnings;
@@ -2633,8 +2643,8 @@ function layoutWarnings(elements) {
     message: item.message
   }));
 }
-function makeKey(root, name2) {
-  return `${root}::${name2}`;
+function makeKey(root, name) {
+  return `${root}::${name}`;
 }
 function snapshotElementsById(elements) {
   const map = /* @__PURE__ */ new Map();
@@ -3198,18 +3208,18 @@ function pageScopeQuestion(pages, recommended, recommendationReasons = /* @__PUR
     minSelections: 1,
     allowOther: false,
     options: orderedPages.map((page) => {
-      const name2 = page.name;
-      const isRecommended = recommendedSet.has(name2);
-      const displayLabel = `${name2}${isRecommended ? "\uFF08\u63A8\u8350\uFF09" : ""}`;
+      const name = page.name;
+      const isRecommended = recommendedSet.has(name);
+      const displayLabel = `${name}${isRecommended ? "\uFF08\u63A8\u8350\uFF09" : ""}`;
       return {
         id: displayLabel,
         label: displayLabel,
-        valueLabel: name2,
+        valueLabel: name,
         description: isRecommended ? "\u5EFA\u8BAE\u7EB3\u5165\u672C\u6B21\u751F\u6210\u8303\u56F4\uFF1B\u5BBF\u4E3B\u6682\u4E0D\u652F\u6301\u81EA\u52A8\u9884\u52FE\u9009\uFF0C\u53EF\u76F4\u63A5\u53D6\u6D88\u6216\u6539\u9009" : "\u672C\u6B21\u53EF\u9009\u9875\u9762",
-        ...isRecommended ? { recommended: true, reason: recommendationReasons.get(name2) ?? "\u5F53\u524D\u753B\u677F\u6838\u5FC3\u6D41\u7A0B\u9875\u9762" } : {}
+        ...isRecommended ? { recommended: true, reason: recommendationReasons.get(name) ?? "\u5F53\u524D\u753B\u677F\u6838\u5FC3\u6D41\u7A0B\u9875\u9762" } : {}
       };
     }),
-    recommendedValues: recommended.map((name2) => `${name2}\uFF08\u63A8\u8350\uFF09`)
+    recommendedValues: recommended.map((name) => `${name}\uFF08\u63A8\u8350\uFF09`)
   };
 }
 function directlyConnectedPages(elements, requested) {
@@ -3325,13 +3335,13 @@ function semanticMockDataIssues(pages, elements) {
   const repeatedContentPage = /列表|好友|聊天|消息|清单|统计|图表|日历|万年历|雷达|推荐|记录|详情/u;
   const genericUiText = /^(?:首页|列表|好友|聊天|消息|清单|统计|日历|雷达|推荐|详情|返回|保存|提交|确认|取消|搜索|筛选|新增|添加|我的|设置|发送|请输入.*)$/u;
   return pages.flatMap((page) => {
-    const name2 = page.name;
-    if (!repeatedContentPage.test(name2)) return [];
+    const name = page.name;
+    if (!repeatedContentPage.test(name)) return [];
     const texts = elements.filter((element) => element !== page.element && str3(element.type) === "text" && elementBelongsToPage(element, page, pages));
     let records = 0;
     for (const element of texts) {
       const value = str3(element.text).trim();
-      if (value === "" || value === name2 || genericUiText.test(value)) continue;
+      if (value === "" || value === name || genericUiText.test(value)) continue;
       const role2 = str3((typeof element.customData === "object" && element.customData !== null ? element.customData : {}).role).toLowerCase();
       const lines = value.split(/\r?\n/u).filter((line) => line.trim().length >= 2).length;
       if (role2 === "mock-data" || /\d|·|：|:|公里|km|米|m\b|已|待|完成|进行中|昨天|今天|刚刚/u.test(value) || value.length >= 8) {
@@ -3341,7 +3351,7 @@ function semanticMockDataIssues(pages, elements) {
     return records >= 3 ? [] : [{
       code: "mock-data-insufficient",
       id: page.id,
-      message: `${name2} \u9700\u8981\u81F3\u5C11 3 \u6761\u53EF\u8BFB mock \u6570\u636E\u5E2E\u52A9\u7406\u89E3\u9875\u9762\uFF1B\u5F53\u524D\u8BC6\u522B\u5230 ${records} \u6761`
+      message: `${name} \u9700\u8981\u81F3\u5C11 3 \u6761\u53EF\u8BFB mock \u6570\u636E\u5E2E\u52A9\u7406\u89E3\u9875\u9762\uFF1B\u5F53\u524D\u8BC6\u522B\u5230 ${records} \u6761`
     }];
   });
 }
@@ -3474,9 +3484,9 @@ function normalizedVisibleText(value) {
 }
 function expectedPageTexts(pages, elements) {
   return Object.fromEntries(pages.map((page) => {
-    const name2 = page.name;
+    const name = page.name;
     const texts = elements.filter((element) => str3(element.type) === "text" && elementBelongsToPage(element, page, pages)).flatMap((element) => str3(element.text).split(/\r?\n/gu)).map(normalizedVisibleText).filter((value) => value !== "");
-    return [name2, [...new Set(texts)]];
+    return [name, [...new Set(texts)]];
   }));
 }
 function pageBlock(html, page) {
@@ -3490,7 +3500,7 @@ function pageBlock(html, page) {
 }
 async function preparePagePreservation(root, draft) {
   const allFrames = draft.allFrames ?? draft.selectedFrames;
-  draft.unselectedFrames = allFrames.filter((name2) => !draft.selectedFrames.includes(name2));
+  draft.unselectedFrames = allFrames.filter((name) => !draft.selectedFrames.includes(name));
   draft.preservedPageHashes = {};
   if (!draft.hadExistingIndex || draft.unselectedFrames.length === 0) return;
   const file = await workspaceFile(root, resolve(root, "draw2code-pages", draft.board, "index.html"));
@@ -3655,7 +3665,7 @@ function briefFor(draft, existingPages) {
   return {
     board: draft.board,
     selectedPages: draft.selectedFrames,
-    relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name2) => !draft.selectedFrames.includes(name2)),
+    relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name) => !draft.selectedFrames.includes(name)),
     pageChanges: existingPages.includes("index.html") ? "\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\uFF0C\u672A\u9009\u62E9\u9875\u9762\u4FDD\u6301\u4E0D\u53D8" : "\u9996\u6B21\u751F\u6210\u6240\u9009\u9875\u9762",
     visualDirection: draft.visualDirection,
     visualBrief,
@@ -3738,12 +3748,12 @@ async function runGeneratePreflight(store, root, draft) {
   if (!board.ok) return generateError(board.error.code, board.error.message, draft);
   const allPages = prototypePages(board.value.scene.elements);
   draft.allFrames = allPages.map((page) => page.name);
-  draft.unselectedFrames = draft.allFrames.filter((name2) => !draft.selectedFrames.includes(name2));
+  draft.unselectedFrames = draft.allFrames.filter((name) => !draft.selectedFrames.includes(name));
   draft.expectedPageTexts = expectedPageTexts(allPages, board.value.scene.elements);
   const scope = elementsInPages(board.value.scene.elements, draft.selectedFrames);
   if (scope.pages.length !== draft.selectedFrames.length) {
     const found = new Set(scope.pages.map((page) => page.name));
-    const missing = draft.selectedFrames.filter((name2) => !found.has(name2));
+    const missing = draft.selectedFrames.filter((name) => !found.has(name));
     draft.blockers = [{ code: "page-not-found", message: `\u6240\u9009\u9875\u9762\u5DF2\u4E0D\u5728\u753B\u677F\u4E0A\uFF1A${missing.join("\u3001")}` }];
   } else {
     const report = inspectPrototypeLayout(scope.elements);
@@ -3891,13 +3901,13 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         const pages = prototypePages(board.value.scene.elements);
         if (pages.length === 0) return generateError("no-pages", `\u753B\u677F\u300C${target.name}\u300D\u6CA1\u6709\u53EF\u8BC6\u522B\u7684\u539F\u578B\u9875\u9762\uFF1B\u65B0\u9875\u9762\u5E94\u4F7F\u7528 rectangle + customData.role=prototype-page + customData.pageName\uFF0C\u65E7\u547D\u540D Frame \u4ECD\u517C\u5BB9`);
         const allNames = pages.map((page) => page.name);
-        const requestedPages = [...new Set((args.pages ?? []).map((name2) => name2.trim()).filter((name2) => name2 !== ""))];
-        const requestedFrames = [...new Set((args.frames ?? []).map((name2) => name2.trim()).filter((name2) => name2 !== ""))];
+        const requestedPages = [...new Set((args.pages ?? []).map((name) => name.trim()).filter((name) => name !== ""))];
+        const requestedFrames = [...new Set((args.frames ?? []).map((name) => name.trim()).filter((name) => name !== ""))];
         if (requestedPages.length > 0 && requestedFrames.length > 0 && JSON.stringify([...requestedPages].sort()) !== JSON.stringify([...requestedFrames].sort())) {
           return generateError("page-scope-conflict", "pages \u4E0E deprecated frames \u6307\u5B9A\u4E86\u4E0D\u540C\u9875\u9762\uFF1B\u8BF7\u53EA\u4F20 pages\uFF0C\u6216\u786E\u4FDD\u4E24\u8005\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4");
         }
         const requested = requestedPages.length > 0 ? requestedPages : requestedFrames;
-        const missing = requested.filter((name2) => !allNames.includes(name2));
+        const missing = requested.filter((name) => !allNames.includes(name));
         if (missing.length > 0) return generateError("page-not-found", `\u753B\u677F\u4E0A\u6CA1\u6709\u8FD9\u4E9B\u9875\u9762\uFF1A${missing.join("\u3001")}\u3002\u73B0\u6709\u9875\u9762\uFF1A${allNames.join("\u3001")}`);
         const settings = await store.readGenerateSettings(args.root, target.name);
         if (!settings.ok) return generateError(settings.error.code, settings.error.message);
@@ -3910,11 +3920,11 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         const connected = directlyConnectedPages(board.value.scene.elements, requested);
         const recommended = requested.length > 0 ? [...requested, ...connected] : briefPages.length > 0 ? briefPages : allNames.slice(0, Math.min(3, allNames.length));
         const recommendationReasons = /* @__PURE__ */ new Map();
-        for (const name2 of requested) recommendationReasons.set(name2, "\u7528\u6237\u672C\u6B21\u660E\u786E\u70B9\u540D");
-        for (const name2 of connected) recommendationReasons.set(name2, "\u4E0E\u7528\u6237\u70B9\u540D\u9875\u9762\u5B58\u5728\u76F4\u63A5 Arrow \u4EA4\u4E92\u5173\u7CFB");
-        for (const name2 of briefPages) recommendationReasons.set(name2, "\u6765\u81EA\u5DF2\u786E\u8BA4 create \u7B80\u62A5\u7684\u6838\u5FC3\u9875\u9762");
+        for (const name of requested) recommendationReasons.set(name, "\u7528\u6237\u672C\u6B21\u660E\u786E\u70B9\u540D");
+        for (const name of connected) recommendationReasons.set(name, "\u4E0E\u7528\u6237\u70B9\u540D\u9875\u9762\u5B58\u5728\u76F4\u63A5 Arrow \u4EA4\u4E92\u5173\u7CFB");
+        for (const name of briefPages) recommendationReasons.set(name, "\u6765\u81EA\u5DF2\u786E\u8BA4 create \u7B80\u62A5\u7684\u6838\u5FC3\u9875\u9762");
         if (requested.length === 0 && briefPages.length === 0) {
-          for (const name2 of recommended) recommendationReasons.set(name2, "\u4F4D\u4E8E\u5F53\u524D\u753B\u677F\u6838\u5FC3\u6D41\u7A0B\u7684\u524D\u5E8F\u4F4D\u7F6E");
+          for (const name of recommended) recommendationReasons.set(name, "\u4F4D\u4E8E\u5F53\u524D\u753B\u677F\u6838\u5FC3\u6D41\u7A0B\u7684\u524D\u5E8F\u4F4D\u7F6E");
         }
         const existing = await store.existingPages(args.root, target.name);
         if (!existing.ok) return generateError(existing.error.code, existing.error.message);
@@ -4057,43 +4067,6 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
   });
 }
 
-// references/workflow-contract.md
-var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u53EA\u8C03\u7528 `draw2code_open`\uFF1A\u6709 active board \u5C31\u6062\u590D\uFF1B\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\uFF0C\u4E0D\u80FD\u64C5\u81EA\u5F00\u59CB Create\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002\u6BCF\u6B21\u53EA\u5C55\u793A\u8FD4\u56DE\u7684\u4E00\u4E2A\u7ED3\u6784\u5316 question\uFF1B\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u9009\u62E9\u9898\uFF0C\u53EA\u6709\u5BBF\u4E3B\u4E0D\u652F\u6301\u65F6\u624D\u9000\u5316\u4E3A\u5B8C\u6574\u7F16\u53F7\u6587\u672C\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName` \u548C brief \u8C03\u7528 `draw2code_update`\u3002\u5DF2\u6709\u753B\u677F\u4FEE\u6539\u5FC5\u987B\u5148 `draw2code_read` \u518D `draw2code_update`\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- \u7B2C\u4E00\u6B21\u521B\u5EFA\u3001\u8BFB\u53D6\u6216\u7528\u6237\u660E\u786E\u6253\u5F00\u65F6\u5C55\u793A\u753B\u677F\uFF1A\u652F\u6301 MCP UI \u5C31\u5185\u5D4C\uFF1B\u5426\u5219\u672C\u5730\u56FE\u5F62\u73AF\u5883\u6253\u5F00 daemon \u7684\u77ED\u671F URL\uFF1Bheadless \u53EA\u8FD4\u56DE URL\u3002\u4E0D\u8981\u6839\u636E\u5BBF\u4E3B\u4EA7\u54C1\u540D\u5206\u652F\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\u3002\u82E5\u76EE\u6807\u4E0D\u662F active board\uFF0C\u5FC5\u987B\u660E\u786E\u533A\u5206\u201C\u78C1\u76D8\u5DF2\u9A8C\u8BC1\u201D\u548C\u201C\u5F53\u524D\u754C\u9762\u4E0D\u53EF\u89C1\u201D\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F workspace/board scoped token\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n";
-
-// src/guidance.ts
-var SECTION_ORDER = 220;
-var DRAW2CODE_GUIDANCE = [
-  "\u65B0\u9879\u76EE\u547D\u540D\u5951\u7EA6\uFF1A\u8C03\u7528 draw2code_create action=start \u524D\uFF0CAgent \u5FC5\u987B\u7406\u89E3\u5B8C\u6574 idea\uFF0C\u5E76\u76F4\u63A5\u6982\u62EC\u4E00\u4E2A\u901A\u5E38\u4E3A 4\u201312 \u4E2A\u4E2D\u6587\u5B57\u7B26\u7684\u8BED\u4E49\u5316 projectName\uFF1B\u540D\u79F0\u5E94\u8BA9\u7528\u6237\u4E00\u773C\u77E5\u9053\u4EA7\u54C1\u662F\u4EC0\u4E48\uFF0C\u4E0D\u80FD\u590D\u5236\u539F\u8BDD\u3001\u622A\u53D6\u524D N \u4E2A\u5B57\u7B26\u6216\u4F9D\u8D56\u5173\u952E\u8BCD\u62FC\u63A5\u89C4\u5219\u3002idea \u4ECD\u5B8C\u6574\u4FDD\u7559\uFF0CprojectName \u5FC5\u987B\u4F5C\u4E3A\u72EC\u7ACB\u53C2\u6570\u663E\u5F0F\u4F20\u5165\u3002\u5DE5\u5177\u53EA\u6821\u9A8C\u540D\u79F0\u662F\u5426\u5408\u6CD5\uFF0C\u4E0D\u8D1F\u8D23\u4ECE idea \u751F\u6210\u540D\u79F0\uFF1B\u786E\u8BA4\u540E\u753B\u677F\u540D\u76F4\u63A5\u4F7F\u7528 projectName\uFF0C\u4E0D\u8FFD\u52A0\u201C\u539F\u578B\u201D\u201C\u8349\u7A3F\u201D\u7B49\u6D41\u7A0B\u540E\u7F00\u3002",
-  'draw2code_update \u8C03\u7528\u5951\u7EA6\uFF1A\u63A8\u8350\u628A\u6BCF\u4E2A\u5143\u7D20\u5199\u6210 {op:"upsert",element:{id,type,x,y,...}}\uFF1B\u5DE5\u5177\u4E5F\u517C\u5BB9\u4E09\u79CD\u65E0\u6B67\u4E49 upsert \u7B80\u5199\u2014\u2014\u76F4\u63A5\u5143\u7D20 {id,type,...}\u3001\u7701\u7565 op \u7684 {element:{...}}\u3001\u4EE5\u53CA {op:"upsert",id,type,...}\u3002delete \u63A8\u8350 {op:"delete",id}\uFF0C\u540C\u65F6\u517C\u5BB9 id \u5199\u5728 elementId \u6216 element.id\u3002\u65B0\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u666E\u901A rectangle \u5916\u6846\uFF0C\u8BBE\u7F6E customData.role=prototype-page\u3001customData.pageName \u548C customData.mockDataMin\uFF1B\u9875\u9762\u540D\u7528\u5916\u6846\u4E0A\u65B9\u72EC\u7ACB text\uFF0C\u8BBE\u7F6E role=prototype-page-label \u4E0E pageId\u3002\u9875\u9762\u5B50\u5143\u7D20\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u5E76\u4FDD\u6301 frameId=null\uFF0C\u9875\u9762\u5F52\u5C5E\u7531\u51E0\u4F55\u4F4D\u7F6E\u5224\u65AD\u3002\u5DF2\u6709\u547D\u540D Frame \u7EE7\u7EED\u517C\u5BB9\uFF1B\u5176 frameId \u5B50\u5143\u7D20\u4ECD\u652F\u6301\u5B89\u5168\u7684\u5C40\u90E8\u5750\u6807\u6362\u7B97\uFF0C\u4F46\u4E0D\u4F1A\u81EA\u52A8\u8FC1\u79FB\u3002',
-  '\u672C\u673A\u5DF2\u5B89\u88C5 dsh-draw2code \u63D2\u4EF6\uFF08\u753B\u7801 \xB7 Draw2Code\uFF09\uFF1ADSH Web GUI \u53F3\u4FA7 better-sidebar \u8FB9\u680F\u91CC\u7684\u300C\u753B\u7801\u300D\u6807\u7B7E\u9875\uFF08Excalidraw \u753B\u677F\uFF0C\u4ECE + \u83DC\u5355\u6216\u6807\u7B7E\u680F\u6253\u5F00\uFF09\u3002\u4EC5\u5F53\u7528\u6237\u660E\u786E\u8BF4 Draw2Code\u3001\u753B\u7801\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165\u672C\u5DE5\u4F5C\u6D41\uFF1B\u666E\u901A\u201C\u505A/\u521B\u5EFA/\u5F00\u53D1\u4E00\u4E2A App\u201D\u201C\u5199\u4E00\u4E2A\u9875\u9762\u201D\u4EE5\u53CA\u6CDB\u6CDB\u63D0\u5230\u753B\u677F\u6216\u539F\u578B\u90FD\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF0C\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u753B\u4E00\u4E0B\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\u65B0\u9879\u76EE\u5DE5\u4F5C\u6D41\uFF1A\u660E\u786E\u5524\u9192\u540E\uFF0C\u5148\u8C03\u7528 draw2code_create action=start \u8FDB\u5165 choice-first grilling\uFF0C\u4E0D\u80FD\u76F4\u63A5\u8C03\u7528 draw2code_update\uFF1Bidea \u5FC5\u987B\u5FE0\u5B9E\u4F20\u5165\u7528\u6237\u539F\u8BDD\uFF0C\u4E0D\u8981\u5148\u66FF\u7528\u6237\u6269\u5199\u9700\u6C42\u3002\u6BCF\u6B21\u8FD4\u56DE question \u65F6\uFF0C\u4F18\u5148\u8C03\u7528\u5BBF\u4E3B ask_user_question\uFF0C\u4EE5\u4E00\u4E2A\u95EE\u9898\u548C\u5168\u90E8\u7ED3\u6784\u5316 options \u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\uFF0C\u5FC5\u987B\u4FDD\u7559\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u548C\u201C\u5176\u4ED6\u201D\u7B49\u9009\u9879\uFF0C\u7981\u6B62\u622A\u65AD\u9009\u9879\u6216\u53EA\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\uFF1B\u6536\u5230\u9009\u62E9\u540E\u628A label \u6620\u5C04\u56DE option id\uFF0C\u518D\u8C03\u7528 draw2code_create action=answer\u3002\u53EA\u6709\u5BBF\u4E3B\u6CA1\u6709 ask_user_question \u65F6\uFF0C\u624D\u9000\u5316\u4E3A\u7F16\u53F7\u6587\u672C\u3002\u7528\u6237\u8BF4\u201C\u7EE7\u7EED\u4E4B\u524D\u7684\u9879\u76EE\u201D\u4F46\u6CA1\u6709\u660E\u786E\u9879\u76EE\u65F6\uFF0C\u5148\u8C03\u7528 draw2code_create action=list\uFF0C\u8BA9\u7528\u6237\u9009\u62E9\u8349\u7A3F\uFF1B\u660E\u786E\u9879\u76EE\u540E\u7528 action=resume\u3002\u7528\u6237\u786E\u8BA4 ready \u7684\u9879\u76EE\u7B80\u62A5\u540E\uFF0C\u8C03\u7528 draw2code_create action=confirm\uFF1B\u53EA\u6709\u62FF\u5230 nextAction=draw2code_update \u548C boardName \u540E\uFF0C\u624D\u8C03\u7528 draw2code_update \u628A\u7B2C\u4E00\u8F6E\u6838\u5FC3\u539F\u578B\u753B\u5230\u8FD9\u4E2A\u65B0\u753B\u677F\u3002\u5DF2\u6709\u9879\u76EE\u5DE5\u4F5C\u6D41\uFF1A\u7528\u6237\u76F4\u63A5\u5728\u753B\u677F\u4E0A\u62D6\u6539\u3001\u5220\u6A21\u5757\u3001\u52A0\u6587\u6848\uFF1B\u4F60\u5148\u7528 draw2code_read \u8BFB\u53D6\u6700\u65B0\u753B\u677F\uFF0C\u518D\u7EE7\u7EED draw2code_update \u8FED\u4EE3\uFF1B\u6253\u78E8\u597D\u540E\u7528\u6237\u8BF4"\u6839\u636E\u753B\u677F\u751F\u6210\u9875\u9762"\uFF0C\u4F60\u8C03\u7528 draw2code_generate \u62FF\u5230\u8303\u56F4\u4E0E\u7EA6\u675F\u540E\u751F\u6210\u524D\u7AEF\u9875\u9762\u3002',
-  "draw2code_create \u7684 grilling SOP\uFF1A\u4F9D\u6B21\u8865\u9F50\u76EE\u6807\u7AEF\u3001\u6838\u5FC3\u7528\u6237\u3001\u6838\u5FC3\u76EE\u6807\u3001\u6700\u91CD\u8981\u7684\u7528\u6237\u6D41\u7A0B\u3001\u9996\u7248\u6838\u5FC3\u6A21\u5757\u3001\u9996\u8F6E\u6838\u5FC3\u9875\u9762\uFF1B\u7528\u6237\u539F\u8BDD\u5DF2\u7ECF\u660E\u786E App/Web/\u5C0F\u7A0B\u5E8F\u65F6\u5DE5\u5177\u4F1A\u9884\u586B\u5E76\u8DF3\u8FC7\u76EE\u6807\u7AEF\uFF0C\u7981\u6B62\u91CD\u590D\u8FFD\u95EE\u3002\u5E73\u53F0/\u7528\u6237/\u76EE\u6807/\u6D41\u7A0B\u9ED8\u8BA4\u5355\u9009\uFF0C\u6A21\u5757\u548C\u9875\u9762\u53EF\u591A\u9009\u3002\u5019\u9009\u9009\u9879\u662F\u5E2E\u52A9\u601D\u8003\u7684\u811A\u624B\u67B6\uFF0C\u4E0D\u9650\u5236\u7528\u6237\uFF1A\u7528\u6237\u53EF\u4EE5\u9009\u201C\u5176\u4ED6\u201D\u5E76\u8865\u5145\u6587\u5B57\uFF1B\u81EA\u7531\u6587\u5B57\u7531\u5DE5\u5177\u76F4\u63A5\u8BB0\u5F55\uFF0Cready \u7B80\u62A5\u662F\u552F\u4E00\u7EDF\u4E00\u786E\u8BA4\u70B9\uFF0C\u4E0D\u8981\u9010\u9879\u590D\u8FF0\u539F\u8BDD\u518D\u95EE\u201C\u8FD9\u6837\u7406\u89E3\u5BF9\u5417\u201D\u3002\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u53EF\u4EE5\u8DF3\u8FC7\uFF0C\u4F46\u8981\u4F5C\u4E3A\u663E\u5F0F\u5F85\u5B9A\u9879\u6216\u9ED8\u8BA4\u5047\u8BBE\u8BB0\u5F55\u3002\u9879\u76EE\u540D\u53EA\u4FDD\u7559\u6838\u5FC3\u4EA7\u54C1\u540D\uFF0C\u4E0D\u8981\u628A\u201C\u7C7B\u4F3C\u3001\u98CE\u683C\u3001\u901A\u8FC7\u3001\u529F\u80FD\u63CF\u8FF0\u201D\u7B49\u6574\u53E5\u585E\u8FDB\u9879\u76EE\u540D\u6216\u753B\u677F\u540D\uFF1BAPP/Web/\u5C0F\u7A0B\u5E8F/\u5E73\u53F0/\u7CFB\u7EDF\u7B49\u5B8C\u6574\u4EA7\u54C1\u7C7B\u578B\u4E0D\u80FD\u518D\u8FFD\u52A0\u201C\u5DE5\u5177\u201D\u3002draw2code_update \u7ED8\u5236\u65B0\u9875\u9762\u65F6\u5FC5\u987B\u4F7F\u7528\u666E\u901A rectangle \u5916\u6846\u5E76\u8BBE\u7F6E customData.role=prototype-page\u3001pageName \u548C mockDataMin\uFF1B\u5916\u6846\u4E0A\u65B9\u7528\u72EC\u7ACB prototype-page-label text \u663E\u793A\u9875\u9762\u540D\uFF0C\u9875\u9762\u5B50\u5143\u7D20\u5168\u90E8\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u5E76\u4FDD\u6301 frameId=null\u3002\u5DF2\u6709\u547D\u540D Frame \u53EA\u4F5C\u4E3A\u65E7\u753B\u677F\u517C\u5BB9\uFF0C\u4E0D\u7528\u4E8E\u65B0\u9875\u9762\u3002\u7EC4\u4EF6\u5FC5\u987B\u6709\u6E05\u6670 text \u6807\u7B7E\u6216\u8BED\u4E49 customData\uFF0C\u4E0D\u8981\u628A\u6240\u6709\u63A7\u4EF6\u753B\u6210\u65E0\u6807\u7B7E\u65B9\u6846\u3002\u5FC5\u987B\u9010\u9875\u843D\u5B9E brief.pageMockData\uFF1A\u5217\u8868\u3001\u96F7\u8FBE\u3001\u804A\u5929\u3001\u56FE\u8868\u3001\u8BE6\u60C5\u548C\u72B6\u6001\u7EC4\u4EF6\u81F3\u5C11\u653E\u5165 3 \u6761\u5177\u6709\u771F\u5B9E\u8BED\u4E49\u7684\u793A\u4F8B\u5185\u5BB9\uFF0C\u5305\u542B\u5BF9\u8C61\u3001\u6570\u503C\u3001\u72B6\u6001\u3001\u65F6\u95F4\u6216\u6D88\u606F\uFF1B\u6BCF\u6761\u627F\u8F7D mock \u6570\u636E\u7684\u53EF\u89C1 text \u8BBE\u7F6E role=mock-data\uFF0C\u7981\u6B62\u7528\u7A7A\u767D\u65B9\u6846\u3001Lorem ipsum\u3001\u201C\u7528\u6237A\u201D\u201C\u6807\u9898\u201D\u201C\u5185\u5BB9\u201D\u7B49\u65E0\u610F\u4E49\u5360\u4F4D\u7B26\u3002\u4F18\u5148\u8868\u8FBE\u6309\u94AE\u3001\u8F93\u5165\u6846\u3001Tab\u3001\u5217\u8868\u3001\u5361\u7247\u3001\u5BFC\u822A\u548C\u7BAD\u5934\u7B49\u4EA7\u54C1\u8BED\u4E49\uFF0C\u4F4E\u4FDD\u771F\u53EA\u964D\u4F4E\u89C6\u89C9\u7CBE\u5EA6\uFF0C\u4E0D\u964D\u4F4E\u4FE1\u606F\u53EF\u8BFB\u6027\u3002containerId \u53EA\u7528\u4E8E\u7ED1\u5B9A rectangle/diamond/ellipse \u7684\u552F\u4E00\u6587\u5B57\u6807\u7B7E\uFF0C\u4E0D\u80FD\u8868\u793A\u9875\u9762\u5F52\u5C5E\uFF1B\u4E00\u4E2A\u5916\u6846\u53EA\u6709\u4E00\u4E2A\u6807\u7B7E\u65F6\u7ED9 text \u8BBE\u7F6E containerId\uFF0C\u5E76\u5728\u5916\u6846\u6216\u6587\u5B57\u4E0A\u58F0\u660E button/primary-action/select/input/chip/card \u7B49\u7EC4\u4EF6 role\u3002button/primary-action/chip/tab \u6587\u6848\u89C4\u8303\u4E3A center/middle\uFF0Cinput/select/dropdown/search-field \u6587\u6848\u89C4\u8303\u4E3A left/middle\u3002\u5E95\u90E8\u5BFC\u822A\u4F7F\u7528 role=bottom-navigation \u7684\u77E9\u5F62 shell \u52A0\u72EC\u7ACB role=bottom-navigation-item \u6807\u7B7E\uFF0C\u8D34\u8FD1\u9875\u9762\u77E9\u5F62\u5E95\u90E8\u5B89\u5168\u533A\uFF0C\u680F\u76EE\u69FD\u4F4D\u4E0D\u5F97\u91CD\u53E0\u3002\u7EC4\u4EF6\u4E0D\u8981\u8D8A\u51FA\u9875\u9762\u8FB9\u754C\uFF1B\u8DE8\u9875\u7BAD\u5934\u4FDD\u6301\u753B\u5E03\u7EA7\uFF0C\u4E0D\u80FD\u8BBE\u7F6E frameId\u3002draw2code_update \u4F1A\u5728\u5199\u76D8\u524D\u6267\u884C layout-invalid \u9884\u68C0\uFF0C\u5931\u8D25\u65F6\u6309\u9519\u8BEF\u4FE1\u606F\u4FEE\u6B63\u5E76\u91CD\u8BD5\uFF0C\u4E0D\u8981\u628A\u5931\u8D25\u7ED3\u679C\u62A5\u544A\u4E3A\u5DF2\u753B\u597D\u3002\u539F\u578B\u9636\u6BB5\u4E0D\u8BE2\u95EE\u54C1\u724C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u3001\u9634\u5F71\u30013D/2D\u3001\u6241\u5E73/\u62DF\u7269\u7B49\u89C6\u89C9\u98CE\u683C\uFF1B\u4F46\u539F\u578B\u4E5F\u4E0D\u80FD\u53EA\u6709\u9ED1\u767D\u7A7A\u6846\uFF0C\u5E94\u4F7F\u7528\u514B\u5236\u8BED\u4E49\u8272\u5E2E\u52A9\u626B\u8BFB\uFF1Aprimary\u3001success\u3001warning\u3001danger\u3001info\u3001neutral\u3002\u7528\u6237\u4E3B\u52A8\u63D0\u5230\u7684\u54C1\u724C\u6216\u89C6\u89C9\u98CE\u683C\u53EA\u4F5C\u4E3A styleNote \u5EF6\u8FDF\u7ED9 draw2code_generate\u3002\u4E13\u4E1A\u7528\u6237\u56DE\u7B54\u5177\u4F53\u65F6\u51CF\u5C11\u8FFD\u95EE\uFF0C\u975E\u4E13\u4E1A\u7528\u6237\u6A21\u7CCA\u65F6\u7528\u4F8B\u5B50\u548C\u9009\u9879\u5F15\u5BFC\u3002",
-  "\u8981\u70B9\uFF1A\u753B\u677F\u6587\u4EF6\u662F\u5DE5\u4F5C\u533A\u91CC\u7684 draw2code/<name>.excalidraw.json\uFF08\u7528\u6237\u53EF\u5728\u753B\u677F\u5DE5\u5177\u680F\u5207\u6362/\u65B0\u5EFA\u591A\u5757\u753B\u677F\uFF0C\u5982 prototype / \u987E\u5BA2\u7AEF / \u5E97\u5BB6\u7AEF\uFF09\uFF1B\u753B\u677F\u4F1A\u628A\u5F53\u524D\u9009\u4E2D\u7684\u540D\u5B57\u540C\u6B65\u5230\u5DE5\u4F5C\u533A\uFF0CAgent \u5DE5\u5177\u7701\u7565 name \u65F6\u5FC5\u987B\u66F4\u65B0\u7528\u6237\u5F53\u524D\u6B63\u5728\u770B\u7684\u753B\u677F\uFF0C\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u4F20 name\u3002draw2code_list \u4F1A\u8FD4\u56DE\u5F53\u524D\u753B\u677F\u3002\u5DE5\u5177 root \u53C2\u6570\u586B\u4F1A\u8BDD\u5DE5\u4F5C\u76EE\u5F55\u3002draw2code_update \u7528 ops \u6279\u91CF upsert/delete\uFF08\u6309 id \u5E42\u7B49\uFF09\uFF0C\u5143\u7D20\u5750\u6807\u4E3A\u753B\u5E03\u50CF\u7D20\uFF08y \u5411\u4E0B\uFF09\uFF0Ctext \u5143\u7D20\u9700\u7ED9 text \u5B57\u6BB5\uFF1B\u65B0\u9875\u9762\u7528 prototype-page rectangle\uFF0C\u9875\u9762\u5185\u6A21\u5757\u4FDD\u6301\u81EA\u7531\u5143\u7D20\uFF0C\u6D41\u7A0B\u7528 arrow\uFF08points \u76F8\u5BF9\u5750\u6807 [[0,0],[dx,dy]]\uFF09\u3002\u4E0D\u8981\u4E3A\u4E86\u9875\u9762\u5F52\u5C5E\u7ED9\u65B0\u5143\u7D20\u8BBE\u7F6E frameId\uFF0C\u4E5F\u4E0D\u8981\u628A\u6574\u9875\u5F3A\u5236\u6210\u7EC4\uFF1B\u8FD9\u6837\u7528\u6237\u53EF\u4EE5\u81EA\u7531\u7F16\u8F91\uFF0C\u624B\u7ED8\u8DE8\u9875\u7BAD\u5934\u4E5F\u4E0D\u4F1A\u88AB Frame \u88C1\u5207\u3002\u4E25\u7981\u7528 Bash\u3001\u811A\u672C\u6216\u76F4\u63A5\u6587\u4EF6\u5199\u5165\u4FEE\u6539 .excalidraw.json\uFF0C\u5FC5\u987B\u8D70 draw2code_update\uFF0C\u5426\u5219\u65E0\u6CD5\u8FDB\u884C\u51B2\u7A81\u548C\u5199\u5165\u9A8C\u8BC1\u3002\u753B\u5B8C\u539F\u578B\u4E3B\u52A8\u63D0\u793A\u7528\u6237\uFF1A\u53EF\u4EE5\u5728\u53F3\u4FA7\u753B\u677F\u4E0A\u76F4\u63A5\u62D6\u6539\u3001\u5220\u6539\u6216\u8865\u5145\u6587\u6848\u3002",
-  "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002pages \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684\u9875\u9762\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1Bframes \u4EC5\u662F\u65E7\u8C03\u7528\u517C\u5BB9\u522B\u540D\uFF0C\u4E24\u8005\u540C\u65F6\u4F20\u5165\u65F6\u5FC5\u987B\u4E00\u81F4\u3002\u5DE5\u5177\u4F1A\u8BC6\u522B\u65B0 prototype-page rectangle \u548C\u65E7\u547D\u540D Frame\uFF0C\u8FD4\u56DE\u753B\u677F\u5168\u90E8\u9875\u9762\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\uFF1B\u5DE5\u5177\u4F1A\u628A\u8FD9\u4E00\u9009\u62E9\u5C55\u5F00\u4E3A\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u4E0D\u8981\u518D\u5411\u7528\u6237\u9010\u9879\u786E\u8BA4\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements\u3001pageRelations \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u753B\u677F\u662F\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\u7684\u4E8B\u5B9E\u6765\u6E90\uFF0C\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u6700\u7EC8\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u65B0\u6392\u7248\uFF0C\u7981\u6B62\u7167\u642C Excalidraw \u7EDD\u5BF9\u5750\u6807\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u76EE\u6807\u89C6\u53E3\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u6A2A\u5411\u6EA2\u51FA\u3001\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u548C\u5E95\u90E8\u5BFC\u822A\uFF0C\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u5B9E\u73B0\u95EE\u9898\u81EA\u52A8\u4FEE\u590D\u5E76\u91CD\u9A8C\u3002\u5168\u90E8\u901A\u8FC7\u540E\u63D0\u4EA4\u5305\u542B previewUrl\u3001viewports\u3001\u9010\u9875 screenshots\u3001consoleErrors\u3001domChecks\u3001layoutChecks \u548C interactionChecks \u7684 verificationEvidence\uFF0C\u518D\u8C03\u7528 action=complete\uFF1B\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4E0D\u80FD\u66FF\u4EE3\u8BC1\u636E\u3002\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
-  "generate \u8BC1\u636E\u4E0E\u9875\u9762\u4FDD\u62A4\u8865\u5145\uFF1A\u6BCF\u4E2A\u9875\u9762\u5FC5\u987B\u7528 <!-- d2c-page:<\u9875\u9762\u539F\u540D>:start/end --> \u6CE8\u91CA\u5305\u4F4F\uFF0C\u91CD\u65B0\u751F\u6210\u65F6\u5DE5\u5177\u4F1A\u76F4\u63A5\u6BD4\u8F83\u672A\u9009\u9875\u9762\u5757\u7684\u54C8\u5E0C\u3002verificationEvidence \u5FC5\u987B\u5E26\u672C\u6B21\u9A8C\u6536\u552F\u4E00 captureId \u548C\u5F53\u524D\u751F\u6210\u5165\u53E3 outputSha256\uFF1BpreviewUrl \u8FD4\u56DE\u5185\u5BB9\u7684\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\u3002screenshots \u548C domSnapshots \u90FD\u5FC5\u987B\u4FDD\u5B58\u4E3A workspace \u5185\u771F\u5B9E\u6587\u4EF6\uFF0C\u643A\u5E26\u540C\u4E00\u4E2A captureId \u4E0E\u5404\u81EA sha256\uFF1B\u622A\u56FE\u5FC5\u987B\u662F\u4E0E viewport \u5C3A\u5BF8\u4E00\u81F4\u7684\u53EF\u89E3\u538B PNG\uFF0CDOM \u5FEB\u7167\u5FC5\u987B\u5305\u542B\u539F\u578B\u4E2D\u7684\u5173\u952E\u6587\u6848\u548C mock \u6570\u636E\u3002consoleErrors \u4E0E consoleWarnings \u90FD\u5FC5\u987B\u662F\u7A7A\u6570\u7EC4\uFF1B\u591A\u9875\u9762\u751F\u6210\u8FD8\u5FC5\u987B\u63D0\u4EA4 page-switching \u68C0\u67E5\u3002\u65E7\u7684 previewOpened\u3001selectedPagesVisible\u3001coreFlowPassed\u3001mockDataVisible \u548C unselectedPagesPreserved \u53EA\u4FDD\u7559\u53C2\u6570\u517C\u5BB9\uFF0C\u4E0D\u518D\u80FD\u5355\u72EC\u5B8C\u6210\u9A8C\u6536\u3002",
-  "\u753B\u7F16\u8F91\u534F\u4F5C\u89C4\u5219\uFF1A\u6BCF\u6B21 draw2code_update \u90FD\u5E94\u5148\u8F93\u51FA\u4E00\u6BB5\u201C\u66F4\u65B0\u6458\u8981\u201D\uFF08\u4E0D\u662F\u6A21\u677F\u5316\u63D0\u95EE\uFF09\uFF1A1) \u4E0A\u4E00\u8F6E\u7528\u6237\u624B\u5DE5\u6539\u52A8\uFF1B2) \u8FD9\u4E00\u8F6E\u8BA1\u5212\u6539\u52A8\uFF1B3) \u51B2\u7A81\u68C0\u67E5\uFF08\u662F\u5426\u89E6\u53CA\u624B\u5DE5\u6539\u52A8\u6216\u66FF\u6362/\u6E05\u7A7A\uFF09\u3002\u53EA\u6709\u201C\u51B2\u7A81\u201D\u65F6\u624D\u8981\u6C42\u786E\u8BA4\uFF0C\u8FD4\u56DE pending \u540E\u8BF7\u53EA\u8BE2\u95EE\u76F8\u5173\u53D8\u66F4\u662F\u5426\u8986\u76D6\uFF1B\u6CA1\u51B2\u7A81\u5219\u76F4\u63A5\u6267\u884C\u5E76\u6C47\u62A5\u7ED3\u679C\uFF08\u4E0D\u6253\u65AD\u7528\u6237\uFF09\u3002\u5DE5\u5177\u8FD4\u56DE\u524D\u4F1A\u91CD\u65B0\u8BFB\u53D6\u540C\u4E00\u753B\u677F\u9A8C\u8BC1\u5199\u5165\uFF1B\u53EA\u6709\u8FD4\u56DE verified=true \u4E14 targetBoard \u4E0E activeBoard \u76F8\u540C\uFF0C\u624D\u80FD\u8BF4\u201C\u7528\u6237\u5F53\u524D\u753B\u677F\u5DF2\u753B\u597D\u201D\uFF1B\u82E5 verified=true \u4F46\u4E24\u8005\u4E0D\u540C\uFF0C\u5FC5\u987B\u660E\u786E\u8BF4\u201C\u76EE\u6807\u753B\u677F\u5DF2\u5199\u5165\u3001\u5F53\u524D\u754C\u9762\u4E0D\u53EF\u89C1\u201D\uFF0C\u4E0D\u80FD\u58F0\u79F0\u7528\u6237\u5DF2\u770B\u5230\u3002\u82E5\u68C0\u6D4B\u5230\u624B\u5DE5\u6539\u52A8\u4E0E\u672C\u8F6E upsert/delete \u540C id\u3001\u6216\u6267\u884C clear/replace \u4E14\u9762\u677F\u975E\u7A7A\uFF0C\u5C31\u5E94\u8FDB\u5165\u786E\u8BA4\u6D41\u7A0B\uFF1B\u786E\u8BA4\u540E\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002",
-  "\u9650\u5236\uFF1A\u5355\u753B\u677F \u22642000 \u5143\u7D20\u3001\u2264512KB\uFF1B\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u5148 draw2code_read \u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5E26\u81EA\u52A8\u7248\u672C\u5B58\u6863\uFF1A\u4F60\u7684\u6BCF\u6B21 draw2code_update \u90FD\u4F1A\u5148\u5FEB\u7167\u65E7\u72B6\u6001\uFF08\u7528\u6237\u53EF\u5728\u300C\u5386\u53F2\u300D\u83DC\u5355\u56DE\u6EDA\u4EFB\u610F\u7248\u672C\uFF09\uFF0C\u56E0\u6B64\u5927\u6539\u4E0D\u5FC5\u72B9\u8C6B\u3002\u53EA\u6709\u660E\u786E\u7684 Draw2Code / \u753B\u7801 / \u753B\u539F\u578B\u5524\u9192\u672C\u63D2\u4EF6\uFF1B\u5524\u9192\u540E\u7684\u540C\u4E00\u4EFB\u52A1\u91CC\uFF0C\u753B\u677F\u3001\u539F\u578B\u3001\u753B\u4E00\u4E0B\u7B49\u540E\u7EED\u8BF4\u6CD5\u7EE7\u7EED\u6CBF\u7528\u672C\u5DE5\u4F5C\u6D41\u3002",
-  workflow_contract_default
-].join("\n\n");
-
-// src/daemon-client.ts
-import { execFile, spawn } from "node:child_process";
-import { open as open2, mkdir as mkdir4, rm as rm2 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join as join3 } from "node:path";
-
-// src/runtime.ts
-import { randomBytes } from "node:crypto";
-import { mkdir as mkdir3, readFile as readFile3, realpath as realpath4, rename as rename3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
-import { dirname } from "node:path";
-
-// src/store-context.ts
-function storeContextFor(workspaceRoot) {
-  return {
-    workspaceRegistry: { list: () => [{ path: workspaceRoot }] },
-    logger: { warn: (message, ...args) => console.warn(message, ...args) }
-  };
-}
-
 // src/runtime.ts
 function choosePresentation(requested = "auto", capabilities) {
   if (requested === "inline") return capabilities.mcpUi ? "inline" : capabilities.externalBrowser ? "browser" : "headless";
@@ -4132,8 +4105,8 @@ var Draw2CodeRuntimeImpl = class {
   async serialize(key, task) {
     const previous = this.mutationQueues.get(key) ?? Promise.resolve();
     let release = () => void 0;
-    const current = new Promise((resolve3) => {
-      release = resolve3;
+    const current = new Promise((resolve2) => {
+      release = resolve2;
     });
     const tail = previous.catch(() => void 0).then(() => current);
     this.mutationQueues.set(key, tail);
@@ -4243,620 +4216,9 @@ async function validateDaemonDescriptor(path) {
     return null;
   }
 }
-
-// src/daemon-client.ts
-function daemonRuntimeDir() {
-  const uid = typeof process.getuid === "function" ? process.getuid() : "user";
-  return join3(tmpdir(), `draw2code-${uid}`);
-}
-function daemonDescriptorPath() {
-  return process.env.DRAW2CODE_DESCRIPTOR_PATH ?? join3(daemonRuntimeDir(), "daemon.json");
-}
-async function healthy(descriptor) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}/health`, {
-      headers: { authorization: `Bearer ${descriptor.token}` },
-      signal: AbortSignal.timeout(800)
-    });
-    const body = await response.json();
-    return response.ok && body.ok === true && body.nonce === descriptor.nonce;
-  } catch {
-    return false;
-  }
-}
-async function waitForDescriptor(path, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const descriptor = await validateDaemonDescriptor(path);
-    if (descriptor !== null && await healthy(descriptor)) return descriptor;
-    await new Promise((resolve3) => setTimeout(resolve3, 50));
-  }
-  throw new Error("draw2code daemon did not become healthy");
-}
-var Draw2CodeDaemonClient = class {
-  constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
-    this.daemonEntry = daemonEntry;
-    this.canvasHtmlPath = canvasHtmlPath;
-    this.descriptorPath = descriptorPath;
-  }
-  async ensure() {
-    const current = await validateDaemonDescriptor(this.descriptorPath);
-    if (current !== null && await healthy(current)) return current;
-    await mkdir4(daemonRuntimeDir(), { recursive: true, mode: 448 });
-    await rm2(this.descriptorPath, { force: true });
-    const lockPath = `${this.descriptorPath}.lock`;
-    let lock = null;
-    try {
-      lock = await open2(lockPath, "wx", 384);
-      const child = spawn(process.execPath, [this.daemonEntry], {
-        detached: true,
-        stdio: "ignore",
-        env: {
-          ...process.env,
-          DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
-          DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
-        }
-      });
-      child.unref();
-      return await waitForDescriptor(this.descriptorPath, 8e3);
-    } catch (error2) {
-      if (error2.code !== "EEXIST") throw error2;
-    } finally {
-      await lock?.close();
-      if (lock !== null) await rm2(lockPath, { force: true });
-    }
-    return waitForDescriptor(this.descriptorPath, 8e3);
-  }
-  async execute(command, context) {
-    const descriptor = await this.ensure();
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}/rpc`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ command, context })
-    });
-    return await response.json();
-  }
-  async registerWorkspace(root, context) {
-    const descriptor = await this.ensure();
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}/register`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ root, context })
-    });
-    if (!response.ok) {
-      const body = await response.json();
-      throw new Error(body.error?.message ?? "failed to register workspace");
-    }
-  }
-  async proxy(path, init) {
-    const descriptor = await this.ensure();
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}${path}`, {
-      method: init.method,
-      headers: {
-        authorization: `Bearer ${descriptor.token}`,
-        ...init.body === void 0 ? {} : { "content-type": "application/json" }
-      },
-      body: init.body
-    });
-    return { status: response.status, headers: response.headers, body: Buffer.from(await response.arrayBuffer()) };
-  }
-  async canvas(root, board, context) {
-    const descriptor = await this.ensure();
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}/canvas-token`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ root, board, context })
-    });
-    const body = await response.json();
-    if (!response.ok || body.ok !== true || body.url === void 0 || body.token === void 0 || body.expiresAt === void 0) {
-      throw new Error(body.error?.message ?? "failed to create canvas URL");
-    }
-    return { url: body.url, token: body.token, expiresAt: body.expiresAt };
-  }
-  async openBrowser(url) {
-    if (process.platform !== "darwin") return;
-    await new Promise((resolve3, reject) => {
-      execFile("/usr/bin/open", [url], (error2) => error2 === null ? resolve3() : reject(error2));
-    });
-  }
-};
-
-// src/daemon-adapter.ts
-var ROUTES = [
-  "/api/draw2code/scenes",
-  "/api/draw2code/active-board",
-  "/api/draw2code/reveal-request",
-  "/api/draw2code/scene",
-  "/api/draw2code/scene/write",
-  "/api/draw2code/versions",
-  "/api/draw2code/restore",
-  "/api/draw2code/export"
-];
-var MAX_BODY_BYTES = 2 * 1024 * 1024;
-function isLoopbackRequest(request) {
-  const address = request.socket.remoteAddress;
-  if (address !== "127.0.0.1" && address !== "::1" && address !== "::ffff:127.0.0.1") return false;
-  const host = request.headers.host;
-  if (typeof host !== "string") return false;
-  let hostUrl;
-  try {
-    hostUrl = new URL(`http://${host}`);
-  } catch {
-    return false;
-  }
-  if (hostUrl.hostname !== "127.0.0.1" && hostUrl.hostname !== "localhost" && hostUrl.hostname !== "[::1]") return false;
-  if (request.headers["sec-fetch-site"] === "cross-site") return false;
-  const origin = request.headers.origin;
-  if (origin === void 0) return true;
-  try {
-    return new URL(origin).host === hostUrl.host;
-  } catch {
-    return false;
-  }
-}
-async function bodyBuffer(req) {
-  if (req.method === "GET" || req.method === "DELETE") return void 0;
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.from(chunk);
-    size += buffer.length;
-    if (size > MAX_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks);
-}
-function rootFrom(req, body) {
-  const query = new URL(req.url ?? "/", "http://localhost").searchParams.get("root");
-  if (query !== null) return query;
-  if (body === void 0) return null;
-  try {
-    const parsed = JSON.parse(body.toString("utf8"));
-    return typeof parsed.root === "string" ? parsed.root : null;
-  } catch {
-    return null;
-  }
-}
-function dshContext(ctx, root) {
-  const workspace = ctx.workspaceRegistry.list().find((candidate) => isPathInside(candidate.path, root));
-  return {
-    clientId: `dsh-${process.pid}`,
-    host: "dsh",
-    workspaceRoot: workspace?.path ?? "",
-    interactive: true,
-    uiCapabilities: { mcpUi: false, externalBrowser: false }
-  };
-}
-function makeDaemonProxyRoutes(ctx, client) {
-  const routes = ROUTES.map((path) => ({
-    kind: "exact",
-    path,
-    handler: async (req, res) => {
-      if (!isLoopbackRequest(req)) {
-        res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: { code: "forbidden", message: "loopback-only" } }));
-        return;
-      }
-      try {
-        const body = await bodyBuffer(req);
-        const root = rootFrom(req, body);
-        if (root !== null) await client.registerWorkspace(root, dshContext(ctx, root));
-        const upstream = await client.proxy(req.url ?? path, { method: req.method ?? "GET", body });
-        res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8" });
-        res.end(upstream.body);
-      } catch (error2) {
-        res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: { code: "daemon-unavailable", message: error2 instanceof Error ? error2.message : String(error2) } }));
-      }
-    }
-  }));
-  routes.push({
-    kind: "exact",
-    path: "/api/draw2code/events-config",
-    handler: async (req, res) => {
-      if (!isLoopbackRequest(req) || req.method !== "GET") {
-        res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: { code: "forbidden", message: "same-origin loopback only" } }));
-        return;
-      }
-      try {
-        const root = rootFrom(req, void 0);
-        if (root === null) throw new Error("missing root");
-        const context = dshContext(ctx, root);
-        await client.registerWorkspace(root, context);
-        const canvas = await client.canvas(root, null, context);
-        const url = new URL(canvas.url);
-        url.protocol = "ws:";
-        url.pathname = "/events";
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify({ ok: true, url: url.toString(), expiresAt: canvas.expiresAt }));
-      } catch (error2) {
-        res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: { code: "daemon-unavailable", message: error2 instanceof Error ? error2.message : String(error2) } }));
-      }
-    }
-  });
-  return routes;
-}
-function daemonTool(ctx, client, base, commandFor) {
-  return {
-    ...base,
-    async execute(args, exec) {
-      const command = commandFor(args);
-      const result = await client.execute(command, dshContext(ctx, command.root));
-      if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
-      return result.data;
-    }
-  };
-}
-
-// src/routes.ts
-import { execFile as execFile2 } from "node:child_process";
-import { writeFile as writeFile4 } from "node:fs/promises";
-var MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
-function runNative(command, args) {
-  return new Promise((resolve3) => {
-    execFile2(command, args, { encoding: "utf8" }, (error2, stdout, stderr) => {
-      if (error2 !== null) {
-        resolve3({ stdout, stderr, code: error2.code });
-        return;
-      }
-      resolve3({ stdout, stderr });
-    });
-  });
-}
-async function chooseExportPath(defaultName) {
-  if (process.platform !== "darwin") throw new Error(`native export is unsupported on ${process.platform}`);
-  const script = [
-    "ObjC.import('Cocoa')",
-    "function run(argv) {",
-    "  const panel = $.NSSavePanel.savePanel",
-    '  panel.title = "\u5BFC\u51FA\u753B\u677F"',
-    '  panel.nameFieldStringValue = argv[0] || "prototype.excalidraw"',
-    "  panel.canCreateDirectories = true",
-    '  if (panel.runModal() !== $.NSModalResponseOK) return ""',
-    "  return ObjC.unwrap(panel.URL.path)",
-    "}"
-  ].join("\n");
-  const result = await runNative("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, defaultName]);
-  const output = result.stdout.trim();
-  const cancelled = result.code === -128 || result.code === "-128" || /user canceled|用户(?:已)?取消/i.test(`${result.stderr} ${result.stdout}`);
-  if (cancelled) return null;
-  if (result.code !== void 0) {
-    throw new Error(result.stderr.trim() || "native save dialog failed");
-  }
-  if (output === "") return null;
-  return output;
-}
-function isLoopbackRequest2(request) {
-  const address = request.socket.remoteAddress;
-  if (address !== "127.0.0.1" && address !== "::1" && address !== "::ffff:127.0.0.1") return false;
-  const host = request.headers.host;
-  if (typeof host !== "string") return false;
-  let hostUrl;
-  try {
-    hostUrl = new URL(`http://${host}`);
-  } catch {
-    return false;
-  }
-  if (hostUrl.hostname !== "127.0.0.1" && hostUrl.hostname !== "localhost" && hostUrl.hostname !== "[::1]") return false;
-  if (request.headers["sec-fetch-site"] === "cross-site") return false;
-  const origin = request.headers.origin;
-  if (origin === void 0) return true;
-  try {
-    return new URL(origin).host === hostUrl.host;
-  } catch {
-    return false;
-  }
-}
-function writeJson(res, status, body) {
-  const json = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-  res.end(json);
-}
-async function readJsonBody(req) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_JSON_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(chunk);
-  }
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (typeof parsed !== "object" || parsed === null) throw new Error("request body must be a JSON object");
-  return parsed;
-}
-function respond(res, result) {
-  if (result.ok) {
-    writeJson(res, 200, { ok: true, ...result.value });
-  } else {
-    const status = result.error.code === "conflict" ? 409 : result.error.code === "not-found" || result.error.code === "workspace-unknown" ? 404 : 400;
-    writeJson(res, status, { ok: false, error: result.error });
-  }
-}
-function makeRoutes(store) {
-  const guard = (req, res, method) => {
-    if (req.method !== method) {
-      writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${req.method}` } });
-      return false;
-    }
-    if (!isLoopbackRequest2(req)) {
-      writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-      return false;
-    }
-    return true;
-  };
-  const query = (req, key) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const value = url.searchParams.get(key);
-    return value === null ? void 0 : value;
-  };
-  return [
-    // -------------------------------------------------- scenes (list)
-    {
-      kind: "exact",
-      path: "/api/draw2code/scenes",
-      handler: async (req, res) => {
-        if (!guard(req, res, "GET")) return;
-        const root = query(req, "root");
-        if (root === void 0) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
-          return;
-        }
-        const result = await store.list(root);
-        if (result.ok) writeJson(res, 200, { ok: true, scenes: result.value });
-        else respond(res, result);
-      }
-    },
-    // --------------------------------------------- active board (shared UI state)
-    {
-      kind: "exact",
-      path: "/api/draw2code/active-board",
-      handler: async (req, res) => {
-        const method = req.method ?? "";
-        if (method === "GET") {
-          if (!isLoopbackRequest2(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          const root = query(req, "root");
-          if (root === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
-            return;
-          }
-          respond(res, await store.getActiveBoard(root));
-          return;
-        }
-        if (method === "PUT") {
-          if (!guard(req, res, "PUT")) return;
-          try {
-            const body = await readJsonBody(req);
-            respond(res, await store.setActiveBoard(String(body.root ?? ""), String(body.name ?? "")));
-          } catch (error2) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-          }
-          return;
-        }
-        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
-      }
-    },
-    // ---------------------------------------- verified update reveal request
-    {
-      kind: "exact",
-      path: "/api/draw2code/reveal-request",
-      handler: async (req, res) => {
-        if (!guard(req, res, "GET")) return;
-        const root = query(req, "root");
-        if (root === void 0) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
-          return;
-        }
-        respond(res, await store.getBoardReveal(root));
-      }
-    },
-    // -------------------------------------------------- scene (read / create / delete)
-    {
-      kind: "exact",
-      path: "/api/draw2code/scene",
-      handler: async (req, res) => {
-        const method = req.method ?? "";
-        if (method === "GET") {
-          if (!isLoopbackRequest2(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          const root = query(req, "root");
-          const name2 = query(req, "name");
-          if (root === void 0 || name2 === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
-            return;
-          }
-          const result = await store.read(root, name2);
-          if (result.ok) {
-            writeJson(res, 200, { ok: true, rev: result.value.rev, scene: result.value.scene });
-          } else {
-            respond(res, result);
-          }
-          return;
-        }
-        if (method === "POST") {
-          if (!isLoopbackRequest2(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          try {
-            const body = await readJsonBody(req);
-            respond(res, await store.create(String(body.root ?? ""), String(body.name ?? "")));
-          } catch (error2) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-          }
-          return;
-        }
-        if (method === "DELETE") {
-          if (!isLoopbackRequest2(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          const root = query(req, "root");
-          const name2 = query(req, "name");
-          if (root === void 0 || name2 === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
-            return;
-          }
-          respond(res, await store.remove(root, name2));
-          return;
-        }
-        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
-      }
-    },
-    // -------------------------------------------------- scene (write whole)
-    {
-      kind: "exact",
-      path: "/api/draw2code/scene/write",
-      handler: async (req, res) => {
-        if (!guard(req, res, "PUT")) return;
-        try {
-          const body = await readJsonBody(req);
-          const baseRev = typeof body.baseRev === "number" ? body.baseRev : void 0;
-          respond(res, await store.write(String(body.root ?? ""), String(body.name ?? ""), body.scene, baseRev));
-        } catch (error2) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-        }
-      }
-    },
-    // -------------------------------------------------- versions (list / restore)
-    {
-      kind: "exact",
-      path: "/api/draw2code/versions",
-      handler: async (req, res) => {
-        if (!guard(req, res, "GET")) return;
-        const root = query(req, "root");
-        const name2 = query(req, "name");
-        if (root === void 0 || name2 === void 0) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
-          return;
-        }
-        const result = await store.listVersions(root, name2);
-        if (result.ok) writeJson(res, 200, { ok: true, versions: result.value });
-        else respond(res, result);
-      }
-    },
-    {
-      kind: "exact",
-      path: "/api/draw2code/restore",
-      handler: async (req, res) => {
-        if (!guard(req, res, "POST")) return;
-        try {
-          const body = await readJsonBody(req);
-          respond(res, await store.restoreVersion(String(body.root ?? ""), String(body.name ?? ""), String(body.id ?? "")));
-        } catch (error2) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-        }
-      }
-    },
-    // -------------------------------------------------- scene export
-    {
-      kind: "exact",
-      path: "/api/draw2code/export",
-      handler: async (req, res) => {
-        if (!guard(req, res, "POST")) return;
-        try {
-          const body = await readJsonBody(req);
-          if (typeof body.scene !== "object" || body.scene === null || !Array.isArray(body.scene.elements)) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-scene", message: "scene.elements must be an array" } });
-            return;
-          }
-          const json = JSON.stringify(body.scene, null, 2);
-          if (typeof json !== "string" || Buffer.byteLength(json) > MAX_JSON_BODY_BYTES) {
-            writeJson(res, 400, { ok: false, error: { code: "too-large", message: "scene exceeds export size limit" } });
-            return;
-          }
-          const defaultName = typeof body.filename === "string" && body.filename.trim() !== "" ? body.filename.trim() : "prototype.excalidraw";
-          const selectedPath = await chooseExportPath(defaultName);
-          if (selectedPath === null) {
-            writeJson(res, 200, { ok: true, cancelled: true });
-            return;
-          }
-          await writeFile4(selectedPath, `${json}
-`, "utf8");
-          writeJson(res, 200, { ok: true, exported: true, path: selectedPath });
-        } catch (error2) {
-          writeJson(res, 500, { ok: false, error: { code: "export-failed", message: error2 instanceof Error ? error2.message : String(error2) } });
-        }
-      }
-    }
-  ];
-}
-
-// src/index.ts
-var name = "draw2code";
-var inject = ["webServer", "tools", "systemPrompt", "workspaceRegistry"];
-function apply(ctx) {
-  const projects = new ProjectStore(ctx);
-  const store = new SceneStore(ctx);
-  const client = new Draw2CodeDaemonClient(
-    resolve2(import.meta.dirname, "draw2code-daemon.js"),
-    resolve2(import.meta.dirname, "../lib/canvas.html")
-  );
-  const routes = makeDaemonProxyRoutes(ctx, client);
-  const localTools = [draw2codeListTool(store), draw2codeReadTool(store), draw2codeCreateTool(projects, store), draw2codeUpdateTool(store), draw2codeGenerateTool(store, projects)];
-  const tools = [
-    daemonTool(ctx, client, localTools[0], (args) => ({ type: "list", root: String(args.root ?? "") })),
-    daemonTool(ctx, client, localTools[1], (args) => ({ type: "read", root: String(args.root ?? ""), ...typeof args.name === "string" ? { board: args.name } : {} })),
-    daemonTool(ctx, client, localTools[2], (args) => {
-      const { root, ...input } = args;
-      return { type: "create", root: String(root ?? ""), input };
-    }),
-    daemonTool(ctx, client, localTools[3], (args) => ({
-      type: "update",
-      root: String(args.root ?? ""),
-      ops: Array.isArray(args.ops) ? args.ops : [],
-      ...typeof args.name === "string" ? { board: args.name } : {},
-      ...typeof args.force === "boolean" ? { force: args.force } : {},
-      ...typeof args.safeMode === "boolean" ? { safeMode: args.safeMode } : {}
-    })),
-    daemonTool(ctx, client, localTools[4], (args) => {
-      const { root, ...input } = args;
-      return { type: "generate", root: String(root ?? ""), input };
-    })
-  ];
-  ctx.effect(() => {
-    const disposers = routes.map((route) => ctx.webServer.register(route));
-    return () => {
-      for (const dispose of disposers) dispose();
-    };
-  }, "dsh-draw2code: routes");
-  ctx.effect(() => {
-    const disposers = tools.map((tool) => ctx.tools.register(tool));
-    return () => {
-      for (const dispose of disposers) dispose();
-    };
-  }, "dsh-draw2code: tools");
-  ctx.effect(() => ctx.systemPrompt.section({
-    name: "plugin:draw2code",
-    order: SECTION_ORDER,
-    text: DRAW2CODE_GUIDANCE
-  }), "dsh-draw2code: prompt section");
-}
 export {
   Draw2CodeRuntimeImpl,
-  ProjectStore,
-  SceneStore,
-  apply,
   choosePresentation,
   createDaemonDescriptor,
-  draw2codeCreateTool,
-  draw2codeGenerateTool,
-  draw2codeListTool,
-  draw2codeReadTool,
-  draw2codeUpdateTool,
-  emptyScene,
-  formatLayoutIssues,
-  inject,
-  inspectPrototypeLayout,
-  isPathInside,
-  makeRoutes,
-  name,
-  normalizeElement,
   validateDaemonDescriptor
 };

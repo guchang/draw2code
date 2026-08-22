@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-Draw2Code is a human-AI collaborative prototyping plugin for [DeepSeek Harness (DSH)](https://github.com/DeepSeek-AI/DeepSeek-Harness). It helps users clarify a product idea, co-edit a semantic low-fidelity prototype on an Excalidraw canvas, and generate frontend pages only after the prototype has been reviewed.
+Draw2Code is a human-AI collaborative prototyping tool for DSH, Codex, and other MCP agents. It helps users clarify a product idea, co-edit a semantic low-fidelity prototype on a shared Excalidraw canvas, and generate frontend pages only after the prototype has been reviewed.
 
 ## Product flow
 
@@ -26,7 +26,19 @@ Draw2Code is a human-AI collaborative prototyping plugin for [DeepSeek Harness (
 
 - DeepSeek Harness with a working `dsh web` profile;
 - Node.js 22 or newer;
-- `dsh-better-sidebar` 0.12.3 or newer.
+- `dsh-better-sidebar` 0.12.3 or newer for the DSH host. Codex runs independently and does not require DSH.
+
+## Use from Codex
+
+The first release is installed from a local personal marketplace and is not submitted to the public Plugin Directory:
+
+```bash
+codex plugin add draw2code@personal
+```
+
+Start a new Codex task after installation. Users invoke it with natural language such as “Use Draw2Code to design a habit tracker”, “Open Draw2Code”, or an explicit request to draw a prototype. A generic app coding request does not activate Draw2Code.
+
+The bundled Skill drives six stable MCP tools. `draw2code_open` prefers MCP UI, falls back to one local browser canvas per workspace, and returns a link in headless environments. DSH and Codex connect to the same on-demand loopback daemon and edit the same in-place workspace files.
 
 Draw2Code registers its board inside the right sidebar provided by `dsh-better-sidebar`. DSH currently activates only bundles installed as direct profile dependencies, not another plugin's transitive dependencies, so both install commands below are required.
 
@@ -71,7 +83,7 @@ dsh plugin --profile web add link:$(pwd)
 
 ## Workspace data
 
-Draw2Code writes only to the current registered DSH workspace:
+Draw2Code writes only to the current host-registered workspace:
 
 - `draw2code/*.excalidraw.json` — editable boards;
 - `draw2code/.projects/` — product briefs and revisions;
@@ -79,7 +91,7 @@ Draw2Code writes only to the current registered DSH workspace:
 - `draw2code/.generate-settings/` — project visual direction;
 - `draw2code-pages/<board>/index.html` — generated frontend demos.
 
-Workspace access is gated by the DSH workspace registry. The HTTP API is loopback/same-origin only, risky overwrites require confirmation, and board updates use atomic writes plus read-back verification.
+Workspace roots are canonicalized and gated by HostContext. The daemon listens only on loopback, uses a private `0600` descriptor and random bearer token, and gives canvases short-lived scoped tokens. Risky overwrites require confirmation, while board updates use atomic writes plus read-back verification.
 
 ## Development
 

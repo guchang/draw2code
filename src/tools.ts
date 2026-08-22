@@ -922,10 +922,13 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements)
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`)
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements })
-      const selected = await store.setActiveBoard(args.root, target.name)
+      const targetIsVisible = target.activeBoard === undefined || target.activeBoard === target.name || args.name === undefined
+      const selected = targetIsVisible
+        ? await store.setActiveBoard(args.root, target.name)
+        : { ok: true as const, value: { name: target.activeBoard } }
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`)
-      const revealed = await store.publishBoardReveal(args.root, target.name)
-      if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`)
+      const revealed = targetIsVisible ? await store.publishBoardReveal(args.root, target.name) : null
+      if (revealed !== null && !revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`)
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements)
       return {
         rev: result.value.rev,
@@ -934,7 +937,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
         elementCount: result.value.elementCount,
         applied: result.value.applied,
         verified: true,
-        revealRequestId: revealed.value.id,
+        ...(revealed?.ok === true ? { revealRequestId: revealed.value.id } : {}),
         layoutWarnings: qualityWarnings,
         requiresConfirmation: false,
         pending: false,

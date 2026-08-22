@@ -1,7 +1,7 @@
 {
   "name": "dsh-draw2code",
-  "version": "0.3.0",
-  "description": "Human-AI collaborative prototyping for DeepSeek Harness, from product clarification to editable Excalidraw wireframes and verified frontend generation.",
+  "version": "0.4.0",
+  "description": "Human-AI collaborative prototyping for DSH, Codex and MCP agents, from product clarification to editable Excalidraw wireframes and verified frontend generation.",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -10,6 +10,9 @@
     },
     "./client": {
       "default": "./lib/client.js"
+    },
+    "./runtime": {
+      "default": "./dist/runtime.js"
     },
     "./package.json": "./package.json"
   },
@@ -26,8 +29,12 @@
     }
   },
   "files": [
+    ".codex-plugin",
+    ".mcp.json",
     "dist",
     "lib",
+    "skills",
+    "references",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
@@ -41,7 +48,9 @@
     "build": "node build.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "watch": "node build.mjs --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "mcp": "node dist/draw2code-mcp.js",
+    "daemon": "node dist/draw2code-daemon.js"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -69,6 +78,7 @@
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.18.1",
     "dsh-better-sidebar": "^0.12.3",
     "esbuild": "^0.25.0",
     "react": "^18.3.1",
@@ -91,5 +101,10 @@
     "wireframe",
     "vibe-coding"
   ],
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.18.3",
+    "zod": "^3.25.76"
+  }
 }

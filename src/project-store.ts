@@ -10,8 +10,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { realpath } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
 import { isPathInside, SCENE_DIR } from './scene-store.ts'
+import type { Draw2CodeStoreContext } from './store-context.ts'
 
 export const PROJECTS_DIR = `${SCENE_DIR}/.projects`
 
@@ -90,23 +90,25 @@ export function newProjectId(): string {
   return `project-${randomUUID()}`
 }
 
-export class ProjectStore {
-  private readonly mutationQueues = new Map<string, Promise<void>>()
+// Runtime and route adapters construct independent store objects inside one
+// daemon. Keep project mutations coordinated across all of those instances.
+const PROJECT_MUTATION_QUEUES = new Map<string, Promise<void>>()
 
-  constructor(private readonly ctx: Context) {}
+export class ProjectStore {
+  constructor(private readonly ctx: Draw2CodeStoreContext) {}
 
   private async withMutationLock<T>(path: string, task: () => Promise<T>): Promise<T> {
-    const previous = this.mutationQueues.get(path) ?? Promise.resolve()
+    const previous = PROJECT_MUTATION_QUEUES.get(path) ?? Promise.resolve()
     let release = (): void => undefined
     const current = new Promise<void>((resolve) => { release = resolve })
     const tail = previous.catch(() => undefined).then(() => current)
-    this.mutationQueues.set(path, tail)
+    PROJECT_MUTATION_QUEUES.set(path, tail)
     await previous.catch(() => undefined)
     try {
       return await task()
     } finally {
       release()
-      if (this.mutationQueues.get(path) === tail) this.mutationQueues.delete(path)
+      if (PROJECT_MUTATION_QUEUES.get(path) === tail) PROJECT_MUTATION_QUEUES.delete(path)
     }
   }
 

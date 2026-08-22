@@ -30,6 +30,7 @@ const hostOptions = {
   outfile: 'dist/index.js',
   sourcemap: false,
   logLevel: 'info',
+  loader: { '.md': 'text' },
 }
 
 /** Plugin hook: wrap the client CJS body in the module-loader envelope. */
@@ -38,7 +39,7 @@ const envelopePlugin = {
   setup(build) {
     build.onEnd((result) => {
       if (result.outputFiles !== undefined && result.outputFiles.length > 0) {
-        writeFileSync('lib/client.js', envelope('dsh-draw2code', result.outputFiles[0].text))
+        writeFileSync('lib/client.js', envelope('dsh-draw2code', result.outputFiles[0].text).replace(/[ \t]+$/gm, ''))
         process.stdout.write('[dsh-draw2code] lib/client.js written (module-loader envelope)\n')
       }
     })
@@ -88,6 +89,68 @@ function envelope(moduleId, code) {
 async function main() {
   // Both halves: the host to dist/, the client through the envelope plugin.
   await esbuild.build(hostOptions)
+  await esbuild.build({
+    entryPoints: ['src/runtime.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    packages: 'external',
+    outfile: 'dist/runtime.js',
+    sourcemap: false,
+    logLevel: 'info',
+    loader: { '.md': 'text' },
+  })
+  await esbuild.build({
+    entryPoints: ['src/daemon-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    outfile: 'dist/draw2code-daemon.js',
+    banner: { js: '#!/usr/bin/env node\nimport { createRequire as __d2cCreateRequire } from "node:module"; const require = __d2cCreateRequire(import.meta.url);' },
+    sourcemap: false,
+    logLevel: 'info',
+    loader: { '.md': 'text' },
+  })
+  await esbuild.build({
+    entryPoints: ['src/daemon-client.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    packages: 'external',
+    outfile: 'dist/daemon-client.js',
+    sourcemap: false,
+    logLevel: 'info',
+  })
+  await esbuild.build({
+    entryPoints: ['src/mcp.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    outfile: 'dist/draw2code-mcp.js',
+    banner: { js: '#!/usr/bin/env node\nimport { createRequire as __d2cCreateRequire } from "node:module"; const require = __d2cCreateRequire(import.meta.url);' },
+    sourcemap: false,
+    logLevel: 'info',
+    loader: { '.md': 'text' },
+  })
+  const canvas = await esbuild.build({
+    entryPoints: ['src/canvas.tsx'],
+    bundle: true,
+    platform: 'browser',
+    format: 'iife',
+    define: {
+      'process.env.NODE_ENV': '"production"',
+      'process.env.IS_PREACT': 'false',
+      global: 'window',
+    },
+    conditions: ['production'],
+    loader: { '.css': 'text' },
+    jsx: 'automatic',
+    minify: true,
+    write: false,
+    logLevel: 'info',
+  })
+  const canvasCode = canvas.outputFiles[0].text.replace(/[ \t]+$/gm, '')
+  writeFileSync('lib/canvas.html', `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Draw2Code / 画码</title></head><body><div id="draw2code-root"></div><script>${canvasCode}</script></body></html>`)
   await esbuild.build(clientOptions)
 }
 

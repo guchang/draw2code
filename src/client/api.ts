@@ -131,20 +131,23 @@ async function fileSystemExport(scene: ScenePayload, filename: string): Promise<
   }
 }
 
-async function get<T>(path: string): Promise<D2cResult<T>> {
+async function get<T>(path: string, token?: string): Promise<D2cResult<T>> {
   try {
-    const response = await fetch(path, { method: 'GET' })
+    const response = await fetch(path, { method: 'GET', headers: token === undefined ? undefined : { authorization: `Bearer ${token}` } })
     return await response.json() as D2cResult<T>
   } catch {
     return { ok: false, error: { code: 'internal', message: 'route unavailable' } }
   }
 }
 
-async function send<T>(path: string, method: string, body?: unknown): Promise<D2cResult<T>> {
+async function send<T>(path: string, method: string, body?: unknown, token?: string): Promise<D2cResult<T>> {
   try {
     const response = await fetch(path, {
       method,
-      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      headers: {
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
     return await response.json() as D2cResult<T>
@@ -155,44 +158,83 @@ async function send<T>(path: string, method: string, body?: unknown): Promise<D2
 
 /** The host route client. */
 export class D2cApi {
+  constructor(private readonly options: { baseUrl?: string; token?: string } = {}) {}
+
+  private path(path: string): string {
+    return `${this.options.baseUrl?.replace(/\/$/, '') ?? ''}${path}`
+  }
+
+  /** WebSocket-first scene notifications; callers keep polling as fallback. */
+  subscribe(root: string, listener: (event: Record<string, unknown>) => void): () => void {
+    if (typeof WebSocket === 'undefined') return () => undefined
+    let socket: WebSocket | null = null
+    let cancelled = false
+    const connect = async (): Promise<void> => {
+      let url: URL
+      if (this.options.baseUrl === undefined) {
+        const response = await get<{ url: string }>(`/api/draw2code/events-config?root=${encodeURIComponent(root)}`)
+        if (!response.ok) return
+        url = new URL(response.url)
+      } else {
+        url = new URL(this.path('/events'))
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+        url.searchParams.set('root', root)
+        if (this.options.token !== undefined) url.searchParams.set('token', this.options.token)
+      }
+      if (cancelled) return
+      socket = new WebSocket(url)
+      socket.addEventListener('message', (message) => {
+        try {
+          const event = JSON.parse(String(message.data)) as Record<string, unknown>
+          if (event.root === undefined || event.root === root) listener(event)
+        } catch { /* ignore malformed notifications; polling remains active */ }
+      })
+    }
+    void connect().catch(() => undefined)
+    return () => {
+      cancelled = true
+      socket?.close()
+    }
+  }
+
   list(root: string): Promise<D2cResult<{ scenes: SceneMetaRow[] }>> {
-    return get(`/api/draw2code/scenes?root=${encodeURIComponent(root)}`)
+    return get(this.path(`/api/draw2code/scenes?root=${encodeURIComponent(root)}`), this.options.token)
   }
 
   getActiveBoard(root: string): Promise<D2cResult<{ name: string | null }>> {
-    return get(`/api/draw2code/active-board?root=${encodeURIComponent(root)}`)
+    return get(this.path(`/api/draw2code/active-board?root=${encodeURIComponent(root)}`), this.options.token)
   }
 
   setActiveBoard(root: string, name: string): Promise<D2cResult<{ name: string }>> {
-    return send('/api/draw2code/active-board', 'PUT', { root, name })
+    return send(this.path('/api/draw2code/active-board'), 'PUT', { root, name }, this.options.token)
   }
 
   getBoardReveal(root: string): Promise<D2cResult<{ request: BoardRevealRequest | null }>> {
-    return get(`/api/draw2code/reveal-request?root=${encodeURIComponent(root)}`)
+    return get(this.path(`/api/draw2code/reveal-request?root=${encodeURIComponent(root)}`), this.options.token)
   }
 
   read(root: string, name: string): Promise<D2cResult<{ rev: number; scene: ScenePayload }>> {
-    return get(`/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`)
+    return get(this.path(`/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`), this.options.token)
   }
 
   create(root: string, name: string): Promise<D2cResult<{ rev: number; elementCount: number }>> {
-    return send('/api/draw2code/scene', 'POST', { root, name })
+    return send(this.path('/api/draw2code/scene'), 'POST', { root, name }, this.options.token)
   }
 
   write(root: string, name: string, scene: ScenePayload, baseRev?: number): Promise<D2cResult<{ rev: number; elementCount: number }>> {
-    return send('/api/draw2code/scene/write', 'PUT', { root, name, scene, baseRev })
+    return send(this.path('/api/draw2code/scene/write'), 'PUT', { root, name, scene, baseRev }, this.options.token)
   }
 
   remove(root: string, name: string): Promise<D2cResult<{ deleted: true }>> {
-    return send(`/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`, 'DELETE')
+    return send(this.path(`/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`), 'DELETE', undefined, this.options.token)
   }
 
   listVersions(root: string, name: string): Promise<D2cResult<{ versions: VersionRow[] }>> {
-    return get(`/api/draw2code/versions?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`)
+    return get(this.path(`/api/draw2code/versions?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`), this.options.token)
   }
 
   restoreVersion(root: string, name: string, id: string): Promise<D2cResult<{ rev: number; elementCount: number }>> {
-    return send('/api/draw2code/restore', 'POST', { root, name, id })
+    return send(this.path('/api/draw2code/restore'), 'POST', { root, name, id }, this.options.token)
   }
 
   async exportScene(scene: ScenePayload, filename = 'prototype.excalidraw'): Promise<D2cResult<ExportPayload>> {
@@ -202,6 +244,6 @@ export class D2cApi {
     if (nativeResult !== null) return nativeResult
     const filePickerResult = await fileSystemExport(scene, filename)
     if (filePickerResult !== null) return filePickerResult
-    return send('/api/draw2code/export', 'POST', { scene, filename })
+    return send(this.path('/api/draw2code/export'), 'POST', { scene, filename }, this.options.token)
   }
 }

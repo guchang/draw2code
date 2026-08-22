@@ -362,6 +362,20 @@ test('concurrent creates of the same board allow only one winner', async () => {
   assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'exists').length, 11)
 })
 
+test('a stale save cannot resurrect a deleted board', async () => {
+  const { root, store } = await makeStore()
+  const created = await store.write(root, 'deleted-board', { elements: [{ id: 'old', type: 'text', text: '旧内容' }] }, 0)
+  assert.equal(created.ok, true)
+  assert.equal((await store.remove(root, 'deleted-board')).ok, true)
+
+  const stale = await store.write(root, 'deleted-board', { elements: [{ id: 'late', type: 'text', text: '晚到保存' }] }, created.value.rev)
+  assert.equal(stale.ok, false)
+  assert.equal(stale.error.code, 'conflict')
+  const read = await store.read(root, 'deleted-board')
+  assert.equal(read.ok, false)
+  assert.equal(read.error.code, 'not-found')
+})
+
 test('concurrent first updates do not overwrite each other silently', async () => {
   const { root, store } = await makeStore()
   const attempts = await Promise.all(Array.from({ length: 12 }, (_, index) => store.applyOps(
@@ -455,7 +469,7 @@ test('draw2code_update without a board name targets the active visible board', a
   assert.equal(prototype.error.code, 'not-found')
 })
 
-test('a successful update selects its target board and publishes one reveal request', async () => {
+test('an explicit non-active update stays disk-only and preserves the visible board', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
   assert.equal((await store.setActiveBoard(root, '顾客端')).ok, true)
@@ -468,16 +482,16 @@ test('a successful update selects its target board and publishes one reveal requ
 
   assert.equal(result.verified, true)
   assert.equal(result.targetBoard, 'prototype')
-  assert.equal(result.activeBoard, 'prototype')
+  assert.equal(result.activeBoard, '顾客端')
+  assert.equal(result.revealRequestId, undefined)
 
   const active = await store.getActiveBoard(root)
   assert.equal(active.ok, true)
-  assert.equal(active.value.name, 'prototype')
+  assert.equal(active.value.name, '顾客端')
 
   const reveal = await store.getBoardReveal(root)
   assert.equal(reveal.ok, true)
-  assert.equal(reveal.value.request.board, 'prototype')
-  assert.match(reveal.value.request.id, /^reveal-/)
+  assert.equal(reveal.value.request, null)
 })
 
 test('a pending update does not replace the last successful reveal request', async () => {

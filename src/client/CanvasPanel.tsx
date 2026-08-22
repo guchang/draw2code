@@ -84,6 +84,10 @@ interface Props {
   cwd: string
   /** Whether this tab is the active one AND the panel is open. */
   visible: boolean
+  /** Optional transport for standalone/MCP-hosted canvases. */
+  api?: D2cApi
+  /** Board requested by draw2code_open. */
+  initialBoard?: string | null
 }
 
 interface LooseExcalidrawApi {
@@ -170,8 +174,8 @@ function formatUpdatedAt(ts: number): string {
 /**
  * The board component.
  */
-export function CanvasPanel({ cwd, visible }: Props): JSX.Element {
-  const apiRef = useRef<D2cApi>(new D2cApi())
+export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Element {
+  const apiRef = useRef<D2cApi>(api ?? new D2cApi())
   const excalidrawRef = useRef<LooseExcalidrawApi | null>(null)
   const lastLocalEditRef = useRef(0)
   const revRef = useRef(0)
@@ -203,7 +207,7 @@ export function CanvasPanel({ cwd, visible }: Props): JSX.Element {
   const deletingBoardsRef = useRef(new Set<string>())
 
   const [dark, setDark] = useState(false)
-  const [boardName, setBoardName] = useState(() => rememberedBoard(cwd))
+  const [boardName, setBoardName] = useState(() => initialBoard ?? rememberedBoard(cwd))
   const [boards, setBoards] = useState<SceneMetaRow[]>([])
   const [menuOpen, setMenuOpen] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -212,6 +216,8 @@ export function CanvasPanel({ cwd, visible }: Props): JSX.Element {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [versions, setVersions] = useState<VersionRow[]>([])
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null)
+  const [remoteEpoch, setRemoteEpoch] = useState(0)
+  const [activeBoardEpoch, setActiveBoardEpoch] = useState(0)
   /** Fixed position of the combined menu portal (anchored to the button). */
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const menuAnchorRef = useRef<HTMLDivElement | null>(null)
@@ -420,7 +426,16 @@ export function CanvasPanel({ cwd, visible }: Props): JSX.Element {
       cancelled = true
       clearInterval(timer)
     }
-  }, [cwd, boardName, visible, applyRemoteScene])
+  }, [cwd, boardName, visible, applyRemoteScene, remoteEpoch])
+
+  useEffect(() => apiRef.current.subscribe(cwd, (event) => {
+    if (event.type === 'scene.updated' || event.type === 'active-board.changed' || event.type === 'board.deleted') {
+      setRemoteEpoch((value) => value + 1)
+    }
+    if (event.type === 'active-board.changed' || event.type === 'board.deleted') {
+      setActiveBoardEpoch((value) => value + 1)
+    }
+  }), [cwd])
 
   // ---- poll the board list (while visible) ------------------------------
   useEffect(() => {
@@ -500,20 +515,29 @@ export function CanvasPanel({ cwd, visible }: Props): JSX.Element {
   const switchBoard = useCallback((name: string, force = false): void => {
     if (!force && name === boardRef.current) return
     lastLocalBoardChangeRef.current = Date.now()
-    void flushPendingSave()
-    // Reset per-board sync state so the pull effect reloads from disk.
-    revRef.current = 0
-    readyRef.current = false
-    lastPulledJsonRef.current = null
-    staleEchoJsonRef.current = null
-    serverElementsRef.current = []
-    elementsRef.current = []
-    lastLocalEditRef.current = 0
-    boardRef.current = name
-    setBoardName(name)
-    rememberBoard(cwd, name)
-    if (cwd !== '') void apiRef.current.setActiveBoard(cwd, name)
-    setMenuOpen(false)
+    void (async () => {
+      await flushPendingSave()
+      if (cwd !== '') {
+        const selected = await apiRef.current.setActiveBoard(cwd, name)
+        if (!selected.ok) {
+          console.warn('[dsh-draw2code] select board failed:', selected.error.message)
+          return
+        }
+      }
+      // The active-board request also advances a scoped Canvas token before
+      // the first read of the newly selected board.
+      revRef.current = 0
+      readyRef.current = false
+      lastPulledJsonRef.current = null
+      staleEchoJsonRef.current = null
+      serverElementsRef.current = []
+      elementsRef.current = []
+      lastLocalEditRef.current = 0
+      boardRef.current = name
+      setBoardName(name)
+      rememberBoard(cwd, name)
+      setMenuOpen(false)
+    })()
   }, [cwd, flushPendingSave])
 
   // The host can create and select an isolated board during
@@ -536,7 +560,7 @@ export function CanvasPanel({ cwd, visible }: Props): JSX.Element {
       cancelled = true
       clearInterval(timer)
     }
-  }, [cwd, visible, switchBoard])
+  }, [cwd, visible, switchBoard, activeBoardEpoch])
 
   const createBoard = useCallback(async (): Promise<void> => {
     const name = newName.trim()

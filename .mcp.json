@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "draw2code": {
+      "command": "node",
+      "args": ["dist/draw2code-mcp.js"],
+      "cwd": ".",
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 900
+    }
+  }
+}
