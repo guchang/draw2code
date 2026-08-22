@@ -508,7 +508,7 @@ export function buildBrief(
       rule: '列表、聊天、图表、详情和状态组件必须展示真实示例内容，不能使用空白方框、Lorem ipsum、用户A或无含义占位符代替',
       minimumRecordsPerRepeatedComponent: 3,
       visibility: 'mock 数据必须使用首次渲染即可见的独立 text 元素；列表行需同时体现对象、状态和关键上下文',
-      updateContract: '完整页面 frame 设置 customData.role=prototype-page 和 customData.mockDataMin；每条示例内容的 text 设置 customData.role=mock-data',
+      updateContract: '完整页面使用 rectangle 外框并设置 customData.role=prototype-page、customData.pageName 和 customData.mockDataMin；页面名使用外框上方独立 text，设置 customData.role=prototype-page-label 和 customData.pageId；页面子元素使用画布绝对坐标并保持 frameId=null；每条示例内容的 text 设置 customData.role=mock-data',
     },
     pageMockData: derivePageMockData(idea, pages),
     interactions: ['页面之间用 Arrow 表达核心成功路径', '首轮只验证默认成功路径'],

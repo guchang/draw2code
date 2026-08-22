@@ -71,15 +71,15 @@ var LEFT_MIDDLE_TEXT_ROLES = /* @__PURE__ */ new Set([
 ]);
 var BOTTOM_NAVIGATION_ROLES = /* @__PURE__ */ new Set(["bottom-navigation", "bottom-nav", "tabbar"]);
 var BOTTOM_NAVIGATION_ITEM_ROLES = /* @__PURE__ */ new Set(["bottom-navigation-item", "bottom-nav-item"]);
-function semanticTextAlignment(role) {
-  if (CENTERED_TEXT_ROLES.has(role)) return { textAlign: "center", verticalAlign: "middle" };
-  if (LEFT_MIDDLE_TEXT_ROLES.has(role)) return { textAlign: "left", verticalAlign: "middle" };
+function semanticTextAlignment(role2) {
+  if (CENTERED_TEXT_ROLES.has(role2)) return { textAlign: "center", verticalAlign: "middle" };
+  if (LEFT_MIDDLE_TEXT_ROLES.has(role2)) return { textAlign: "left", verticalAlign: "middle" };
   return null;
 }
 function semanticRole(element) {
   if (typeof element?.customData !== "object" || element.customData === null) return "";
-  const role = element.customData.role;
-  return typeof role === "string" ? role.toLowerCase() : "";
+  const role2 = element.customData.role;
+  return typeof role2 === "string" ? role2.toLowerCase() : "";
 }
 function semanticTextGeometry(element, container, alignment) {
   if (container === void 0 || alignment.verticalAlign !== "middle") return { ...element, ...alignment };
@@ -143,30 +143,30 @@ function normalizeElement(input) {
   }
   const id = typeof el.id === "string" && el.id !== "" ? el.id : null;
   if (id === null || id.length > 64) throw new Error("element.id must be a non-empty string (<=64 chars)");
-  const num3 = (v, d) => typeof v === "number" && Number.isFinite(v) ? v : d;
-  const str3 = (v, d) => typeof v === "string" ? v : d;
-  const text3 = str3(el.text, "").slice(0, MAX_TEXT_CHARS);
+  const num4 = (v, d) => typeof v === "number" && Number.isFinite(v) ? v : d;
+  const str4 = (v, d) => typeof v === "string" ? v : d;
+  const text3 = str4(el.text, "").slice(0, MAX_TEXT_CHARS);
   const now2 = Date.now();
   const authoredCustomData = typeof el.customData === "object" && el.customData !== null ? el.customData : {};
-  const role = str3(authoredCustomData.role, "").toLowerCase();
-  const explicitTone = str3(authoredCustomData.tone, "").toLowerCase();
-  const inferredTone = explicitTone !== "" ? explicitTone : role === "primary-action" || role === "primary-button" ? "primary" : role === "success" || role === "completed" ? "success" : role === "warning" ? "warning" : role === "danger" || role === "error" || role === "overdue" ? "danger" : "";
+  const role2 = str4(authoredCustomData.role, "").toLowerCase();
+  const explicitTone = str4(authoredCustomData.tone, "").toLowerCase();
+  const inferredTone = explicitTone !== "" ? explicitTone : role2 === "primary-action" || role2 === "primary-button" ? "primary" : role2 === "success" || role2 === "completed" ? "success" : role2 === "warning" ? "warning" : role2 === "danger" || role2 === "error" || role2 === "overdue" ? "danger" : "";
   const semanticColor = SEMANTIC_COLOR_TYPES.has(type) ? SEMANTIC_PALETTE[inferredTone] : void 0;
   const out = {
     id,
     type,
-    x: num3(el.x, 0),
-    y: num3(el.y, 0),
-    width: num3(el.width, type === "text" ? 160 : 180),
-    height: num3(el.height, type === "text" ? 80 : type === "frame" ? 320 : 80),
-    angle: num3(el.angle, 0),
-    strokeColor: str3(el.strokeColor, semanticColor?.stroke ?? "#1e1e1e"),
-    backgroundColor: str3(el.backgroundColor, semanticColor?.background ?? "transparent"),
-    fillStyle: str3(el.fillStyle, "solid"),
-    strokeWidth: num3(el.strokeWidth, 1),
-    strokeStyle: str3(el.strokeStyle, "solid"),
-    roughness: num3(el.roughness, 1),
-    opacity: num3(el.opacity, 100),
+    x: num4(el.x, 0),
+    y: num4(el.y, 0),
+    width: num4(el.width, type === "text" ? 160 : 180),
+    height: num4(el.height, type === "text" ? 80 : type === "frame" ? 320 : 80),
+    angle: num4(el.angle, 0),
+    strokeColor: str4(el.strokeColor, semanticColor?.stroke ?? "#1e1e1e"),
+    backgroundColor: str4(el.backgroundColor, semanticColor?.background ?? "transparent"),
+    fillStyle: str4(el.fillStyle, "solid"),
+    strokeWidth: num4(el.strokeWidth, 1),
+    strokeStyle: str4(el.strokeStyle, "solid"),
+    roughness: num4(el.roughness, 1),
+    opacity: num4(el.opacity, 100),
     groupIds: Array.isArray(el.groupIds) ? el.groupIds : [],
     frameId: el.frameId === void 0 || el.frameId === null ? null : el.frameId,
     roundness: el.roundness === void 0 || el.roundness === null ? type === "line" || type === "arrow" ? { type: 2 } : null : el.roundness,
@@ -177,32 +177,32 @@ function normalizeElement(input) {
     // client round-trip through normalizeScene().
     link: typeof el.link === "string" ? el.link : null,
     updated: now2,
-    seed: num3(el.seed, randomSeed()),
-    version: num3(el.version, 1),
-    versionNonce: num3(el.versionNonce, randomSeed()),
+    seed: num4(el.seed, randomSeed()),
+    version: num4(el.version, 1),
+    versionNonce: num4(el.versionNonce, randomSeed()),
     isDeleted: false
   };
   if (type === "text") {
-    const fontSize = num3(el.fontSize, 20);
+    const fontSize = num4(el.fontSize, 20);
     const lines = text3 === "" ? 1 : text3.split("\n").length;
     out.text = text3;
     out.originalText = text3;
     out.fontSize = fontSize;
-    out.fontFamily = num3(el.fontFamily, 1);
-    out.textAlign = str3(el.textAlign, "left");
-    out.verticalAlign = str3(el.verticalAlign, "top");
+    out.fontFamily = num4(el.fontFamily, 1);
+    out.textAlign = str4(el.textAlign, "left");
+    out.verticalAlign = str4(el.verticalAlign, "top");
     out.containerId = el.containerId === void 0 || el.containerId === null ? null : el.containerId;
-    out.lineHeight = num3(el.lineHeight, 1.25);
-    if (el.width === void 0) out.width = num3(el.width, Math.min(360, fontSize * (text3.length || 8) * 0.62 + 16));
-    if (el.height === void 0) out.height = num3(el.height, lines * fontSize * 1.25 + 8);
+    out.lineHeight = num4(el.lineHeight, 1.25);
+    if (el.width === void 0) out.width = num4(el.width, Math.min(360, fontSize * (text3.length || 8) * 0.62 + 16));
+    if (el.height === void 0) out.height = num4(el.height, lines * fontSize * 1.25 + 8);
   }
   if (type === "line" || type === "arrow") {
-    const points = Array.isArray(el.points) && el.points.length > 0 ? el.points : [[0, 0], [num3(el.width, 160) - num3(el.x, 0), 0]];
+    const points = Array.isArray(el.points) && el.points.length > 0 ? el.points : [[0, 0], [num4(el.width, 160) - num4(el.x, 0), 0]];
     out.points = points;
     const xs = points.map((p) => p[0]);
     const ys = points.map((p) => p[1]);
-    out.width = num3(el.width, Math.max(...xs) - Math.min(...xs));
-    out.height = num3(el.height, Math.max(...ys) - Math.min(...ys));
+    out.width = num4(el.width, Math.max(...xs) - Math.min(...xs));
+    out.height = num4(el.height, Math.max(...ys) - Math.min(...ys));
     out.lastCommittedPoint = Array.isArray(el.lastCommittedPoint) ? el.lastCommittedPoint : null;
     out.startBinding = typeof el.startBinding === "object" && el.startBinding !== null ? el.startBinding : null;
     out.endBinding = typeof el.endBinding === "object" && el.endBinding !== null ? el.endBinding : null;
@@ -210,7 +210,7 @@ function normalizeElement(input) {
     out.endArrowhead = el.endArrowhead === null || typeof el.endArrowhead === "string" ? el.endArrowhead : null;
   }
   if (type === "frame") {
-    const frameName = str3(el.name, "").trim();
+    const frameName = str4(el.name, "").trim();
     out.name = frameName !== "" ? frameName : text3;
   }
   for (const [key, value] of Object.entries(el)) {
@@ -261,9 +261,9 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
       const container = typeof element.containerId === "string" ? byId.get(element.containerId) : void 0;
       const elementRole2 = semanticRole(element);
       const containerRole = semanticRole(container);
-      const role = elementRole2 !== "" ? elementRole2 : containerRole;
+      const role2 = elementRole2 !== "" ? elementRole2 : containerRole;
       const isFocused2 = alignmentFocusIds === void 0 || alignmentFocusIds.has(String(element.id ?? "")) || container !== void 0 && alignmentFocusIds.has(String(container.id ?? ""));
-      const alignment = semanticTextAlignment(role);
+      const alignment = semanticTextAlignment(role2);
       if (isFocused2 && alignment !== null) {
         if (detachedNavigationTextIds.has(String(element.id ?? ""))) {
           return {
@@ -272,7 +272,7 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
           };
         }
         if (container !== void 0) return semanticTextGeometry(element, container, alignment);
-        if (BOTTOM_NAVIGATION_ITEM_ROLES.has(role)) {
+        if (BOTTOM_NAVIGATION_ITEM_ROLES.has(role2)) {
           const navigationShell = elements.find((candidate) => {
             if (!SEMANTIC_COLOR_TYPES.has(String(candidate.type ?? "")) || !BOTTOM_NAVIGATION_ROLES.has(semanticRole(candidate))) return false;
             const x = Number(element.x ?? 0);
@@ -1814,7 +1814,7 @@ function buildBrief(idea, answers, deferredStyleNote) {
       rule: "\u5217\u8868\u3001\u804A\u5929\u3001\u56FE\u8868\u3001\u8BE6\u60C5\u548C\u72B6\u6001\u7EC4\u4EF6\u5FC5\u987B\u5C55\u793A\u771F\u5B9E\u793A\u4F8B\u5185\u5BB9\uFF0C\u4E0D\u80FD\u4F7F\u7528\u7A7A\u767D\u65B9\u6846\u3001Lorem ipsum\u3001\u7528\u6237A\u6216\u65E0\u542B\u4E49\u5360\u4F4D\u7B26\u4EE3\u66FF",
       minimumRecordsPerRepeatedComponent: 3,
       visibility: "mock \u6570\u636E\u5FC5\u987B\u4F7F\u7528\u9996\u6B21\u6E32\u67D3\u5373\u53EF\u89C1\u7684\u72EC\u7ACB text \u5143\u7D20\uFF1B\u5217\u8868\u884C\u9700\u540C\u65F6\u4F53\u73B0\u5BF9\u8C61\u3001\u72B6\u6001\u548C\u5173\u952E\u4E0A\u4E0B\u6587",
-      updateContract: "\u5B8C\u6574\u9875\u9762 frame \u8BBE\u7F6E customData.role=prototype-page \u548C customData.mockDataMin\uFF1B\u6BCF\u6761\u793A\u4F8B\u5185\u5BB9\u7684 text \u8BBE\u7F6E customData.role=mock-data"
+      updateContract: "\u5B8C\u6574\u9875\u9762\u4F7F\u7528 rectangle \u5916\u6846\u5E76\u8BBE\u7F6E customData.role=prototype-page\u3001customData.pageName \u548C customData.mockDataMin\uFF1B\u9875\u9762\u540D\u4F7F\u7528\u5916\u6846\u4E0A\u65B9\u72EC\u7ACB text\uFF0C\u8BBE\u7F6E customData.role=prototype-page-label \u548C customData.pageId\uFF1B\u9875\u9762\u5B50\u5143\u7D20\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u5E76\u4FDD\u6301 frameId=null\uFF1B\u6BCF\u6761\u793A\u4F8B\u5185\u5BB9\u7684 text \u8BBE\u7F6E customData.role=mock-data"
     },
     pageMockData: derivePageMockData(idea, pages),
     interactions: ["\u9875\u9762\u4E4B\u95F4\u7528 Arrow \u8868\u8FBE\u6838\u5FC3\u6210\u529F\u8DEF\u5F84", "\u9996\u8F6E\u53EA\u9A8C\u8BC1\u9ED8\u8BA4\u6210\u529F\u8DEF\u5F84"],
@@ -2244,25 +2244,209 @@ import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 import { defineTool as defineTool2 } from "@deepseek-ai/dsh-tools";
 
+// src/prototype-page.ts
+function str(value) {
+  return typeof value === "string" ? value : "";
+}
+function num(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function customData(element) {
+  return typeof element?.customData === "object" && element.customData !== null ? element.customData : {};
+}
+function role(element) {
+  return str(customData(element).role).trim().toLowerCase();
+}
+function containsPoint(page, x, y, tolerance = 0) {
+  return x >= page.bounds.x - tolerance && y >= page.bounds.y - tolerance && x <= page.bounds.x + page.bounds.width + tolerance && y <= page.bounds.y + page.bounds.height + tolerance;
+}
+function pageDistance(page, x, y) {
+  const right = page.bounds.x + page.bounds.width;
+  const bottom = page.bounds.y + page.bounds.height;
+  const dx = x < page.bounds.x ? page.bounds.x - x : x > right ? x - right : 0;
+  const dy = y < page.bounds.y ? page.bounds.y - y : y > bottom ? y - bottom : 0;
+  return Math.hypot(dx, dy);
+}
+function isPrototypePageLabel(element) {
+  return str(element.type) === "text" && role(element) === "prototype-page-label";
+}
+function isPrototypePageShell(element) {
+  return str(element.type) === "rectangle" && role(element) === "prototype-page" && str(customData(element).pageName).trim() !== "";
+}
+function prototypePageName(element) {
+  if (str(element.type) === "frame") return str(element.name).trim();
+  return isPrototypePageShell(element) ? str(customData(element).pageName).trim() : "";
+}
+function prototypePages(elements) {
+  const pages = [];
+  const names = /* @__PURE__ */ new Set();
+  for (const element of elements) {
+    const type = str(element.type);
+    const pageName = prototypePageName(element);
+    if (pageName === "" || names.has(pageName)) continue;
+    names.add(pageName);
+    pages.push({
+      id: str(element.id),
+      name: pageName,
+      kind: type === "frame" ? "legacy-frame" : "page-shell",
+      bounds: {
+        x: num(element.x),
+        y: num(element.y),
+        width: num(element.width),
+        height: num(element.height)
+      },
+      element
+    });
+  }
+  return pages;
+}
+function pageNameWarnings(elements) {
+  const firstByName = /* @__PURE__ */ new Map();
+  const warnings = [];
+  for (const element of elements) {
+    const name2 = prototypePageName(element);
+    if (name2 === "") continue;
+    const firstId = firstByName.get(name2);
+    if (firstId === void 0) {
+      firstByName.set(name2, str(element.id));
+      continue;
+    }
+    warnings.push({
+      code: "page-name-duplicate",
+      id: str(element.id),
+      message: `\u9875\u9762\u300C${name2}\u300D\u540C\u65F6\u7528\u4E8E ${firstId} \u548C ${str(element.id)}\uFF0C\u65E0\u6CD5\u6309\u9875\u9762\u540D\u552F\u4E00\u9009\u62E9\uFF1B\u8BF7\u4E3A\u5176\u4E2D\u4E00\u4E2A\u9875\u9762\u8BBE\u7F6E\u4E0D\u540C\u540D\u79F0`
+    });
+  }
+  return warnings;
+}
+function pageMembershipCandidates(element, pages) {
+  const id = str(element.id);
+  const ownPage = pages.find((page) => page.id === id);
+  if (ownPage !== void 0) return [ownPage];
+  if (isPrototypePageLabel(element)) {
+    const page = pages.find((candidate) => candidate.id === str(customData(element).pageId));
+    return page === void 0 ? [] : [page];
+  }
+  const explicitFrame = str(element.frameId);
+  if (explicitFrame !== "") {
+    const page = pages.find((candidate) => candidate.kind === "legacy-frame" && candidate.id === explicitFrame);
+    if (page !== void 0) return [page];
+  }
+  const centerX = num(element.x) + num(element.width) / 2;
+  const centerY = num(element.y) + num(element.height) / 2;
+  return pages.filter((page) => containsPoint(page, centerX, centerY, 2));
+}
+function pageForElement(element, pages) {
+  const candidates = pageMembershipCandidates(element, pages);
+  return candidates.length === 1 ? candidates[0] : void 0;
+}
+function arrowEndpoint(arrow, atEnd) {
+  const points = Array.isArray(arrow.points) ? arrow.points : [];
+  const point = Array.isArray(atEnd ? points.at(-1) : points[0]) ? atEnd ? points.at(-1) : points[0] : atEnd ? [num(arrow.width), num(arrow.height)] : [0, 0];
+  return { x: num(arrow.x) + num(point[0]), y: num(arrow.y) + num(point[1]) };
+}
+function endpointPage(arrow, bindingKey, pages, elementsById) {
+  const binding = typeof arrow[bindingKey] === "object" && arrow[bindingKey] !== null ? arrow[bindingKey] : {};
+  const target = elementsById.get(str(binding.elementId));
+  if (target !== void 0) {
+    return pageForElement(target, pages);
+  }
+  const endpoint = arrowEndpoint(arrow, bindingKey === "endBinding");
+  const contained = pages.filter((page) => containsPoint(page, endpoint.x, endpoint.y, 2));
+  if (contained.length === 1) return contained[0];
+  if (contained.length > 1) return void 0;
+  return pages.map((page) => ({ page, distance: pageDistance(page, endpoint.x, endpoint.y) })).filter(({ distance }) => distance <= 48).sort((left, right) => left.distance - right.distance)[0]?.page;
+}
+function internalPageForArrow(arrow, pages, elementsById) {
+  const source = endpointPage(arrow, "startBinding", pages, elementsById);
+  const target = endpointPage(arrow, "endBinding", pages, elementsById);
+  return source !== void 0 && target?.id === source.id ? source : void 0;
+}
+function relationForArrow(arrow, pages, elementsById) {
+  if (str(arrow.type) !== "arrow") return void 0;
+  const source = endpointPage(arrow, "startBinding", pages, elementsById);
+  const target = endpointPage(arrow, "endBinding", pages, elementsById);
+  if (source === void 0 || target === void 0 || source.id === target.id) return void 0;
+  const startBinding = typeof arrow.startBinding === "object" && arrow.startBinding !== null ? arrow.startBinding : {};
+  const endBinding = typeof arrow.endBinding === "object" && arrow.endBinding !== null ? arrow.endBinding : {};
+  const label = [...elementsById.values()].find((element) => {
+    return str(element.type) === "text" && str(element.containerId) === str(arrow.id);
+  });
+  return {
+    id: str(arrow.id),
+    sourcePage: source.name,
+    targetPage: target.name,
+    ...str(startBinding.elementId) === "" ? {} : { sourceElementId: str(startBinding.elementId) },
+    ...str(endBinding.elementId) === "" ? {} : { targetElementId: str(endBinding.elementId) },
+    ...str(label?.text).trim() === "" ? {} : { label: str(label?.text).trim() }
+  };
+}
+function prototypePageRelations(elements, pages = prototypePages(elements)) {
+  const elementsById = new Map(elements.map((element) => [str(element.id), element]));
+  return elements.filter((element) => str(element.type) === "arrow").flatMap((arrow) => {
+    const relation = relationForArrow(arrow, pages, elementsById);
+    return relation === void 0 ? [] : [relation];
+  });
+}
+function pageElementIds(page, elements, pages = prototypePages(elements)) {
+  const elementsById = new Map(elements.map((element) => [str(element.id), element]));
+  const crossPageArrowIds = new Set(
+    prototypePageRelations(elements, pages).map((relation) => relation.id)
+  );
+  return elements.flatMap((element) => {
+    if (str(element.id) === page.id || isPrototypePageLabel(element)) return [];
+    if (str(element.type) === "text" && crossPageArrowIds.has(str(element.containerId))) return [];
+    if (str(element.type) === "arrow") {
+      const relation = relationForArrow(element, pages, elementsById);
+      if (relation !== void 0) return [];
+      const internalPage = internalPageForArrow(element, pages, elementsById);
+      if (internalPage !== void 0) return internalPage.id === page.id ? [str(element.id)] : [];
+    }
+    return pageForElement(element, pages)?.id === page.id ? [str(element.id)] : [];
+  });
+}
+function pageMembershipWarnings(elements, pages = prototypePages(elements)) {
+  return elements.flatMap((element) => {
+    if (pages.some((page) => page.id === str(element.id)) || isPrototypePageLabel(element) || str(element.type) === "arrow") return [];
+    const candidates = pageMembershipCandidates(element, pages);
+    if (candidates.length <= 1) return [];
+    return [{
+      code: "page-membership-ambiguous",
+      id: str(element.id),
+      message: `${str(element.id)} \u540C\u65F6\u843D\u5728\u9875\u9762\u300C${candidates.map((page) => page.name).join("\u300D\u300C")}\u300D\u4E2D\uFF0C\u65E0\u6CD5\u552F\u4E00\u5224\u65AD\u9875\u9762\u5F52\u5C5E\uFF1B\u8BF7\u79FB\u52A8\u9875\u9762\u6216\u5143\u7D20\u4EE5\u6D88\u9664\u91CD\u53E0`
+    }];
+  });
+}
+function publicPrototypePages(elements, pages = prototypePages(elements)) {
+  return pages.map((page) => ({
+    id: page.id,
+    name: page.name,
+    kind: page.kind,
+    bounds: page.bounds,
+    elementIds: pageElementIds(page, elements, pages)
+  }));
+}
+
 // src/layout.ts
 var SHAPE_TYPES = /* @__PURE__ */ new Set(["rectangle", "diamond", "ellipse"]);
 var BOTTOM_NAV_MAX_GAP = 96;
 var DEFAULT_MOCK_DATA_MIN = 3;
 var BOTTOM_NAVIGATION_ITEM_ROLES2 = /* @__PURE__ */ new Set(["bottom-navigation-item", "bottom-nav-item"]);
-function str(value) {
+function str2(value) {
   return typeof value === "string" ? value : "";
 }
-function num(value, fallback = 0) {
+function num2(value, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
-function customData(element) {
+function customData2(element) {
   return typeof element.customData === "object" && element.customData !== null ? element.customData : {};
 }
 function isFocused(element, focusIds) {
   if (focusIds === void 0) return true;
-  const id = str(element.id);
-  const frameId = str(element.frameId);
-  return focusIds.has(id) || frameId !== "" && focusIds.has(frameId);
+  const id = str2(element.id);
+  const frameId = str2(element.frameId);
+  const pageId = str2(customData2(element).pageId);
+  return focusIds.has(id) || frameId !== "" && focusIds.has(frameId) || pageId !== "" && focusIds.has(pageId);
 }
 function glyphUnits(value) {
   let units = 0;
@@ -2272,144 +2456,135 @@ function glyphUnits(value) {
   return units;
 }
 function estimatedLineCount(element) {
-  const text3 = str(element.text);
+  const text3 = str2(element.text);
   if (text3 === "") return 1;
-  const width = Math.max(1, num(element.width, 160));
-  const fontSize = Math.max(8, num(element.fontSize, 20));
+  const width = Math.max(1, num2(element.width, 160));
+  const fontSize = Math.max(8, num2(element.fontSize, 20));
   const charsPerLine = Math.max(1, Math.floor(width / (fontSize * 0.62)));
   return text3.split(/\r?\n/u).reduce((count, line) => {
     return count + Math.max(1, Math.ceil(glyphUnits(line) / charsPerLine));
   }, 0);
 }
-function frameFor(element, frames) {
-  const explicit = str(element.frameId);
-  if (explicit !== "") return frames.find((frame) => str(frame.id) === explicit);
-  const x1 = num(element.x);
-  const y1 = num(element.y);
-  const x2 = x1 + num(element.width);
-  const y2 = y1 + num(element.height);
-  return frames.find((frame) => {
-    const fx = num(frame.x);
-    const fy = num(frame.y);
-    return x1 >= fx - 2 && y1 >= fy - 2 && x2 <= fx + num(frame.width) + 2 && y2 <= fy + num(frame.height) + 2;
-  });
+function pageFor(element, pages) {
+  return pageForElement(element, pages);
 }
 function isBottomNavigation(element) {
-  const role = str(customData(element).role).toLowerCase();
-  if (role === "bottom-navigation" || role === "bottom-nav" || role === "tabbar") return true;
-  return /底部导航|底部选项卡|tabbar|bottom[ -]?navigation/iu.test(str(element.text));
-}
-function isPrototypePage(element) {
-  return str(customData(element).role).toLowerCase() === "prototype-page";
+  const role2 = str2(customData2(element).role).toLowerCase();
+  if (role2 === "bottom-navigation" || role2 === "bottom-nav" || role2 === "tabbar") return true;
+  return /底部导航|底部选项卡|tabbar|bottom[ -]?navigation/iu.test(str2(element.text));
 }
 function isVisibleMockData(element) {
-  if (str(element.type) !== "text" || str(customData(element).role).toLowerCase() !== "mock-data") return false;
-  const value = str(element.text).trim();
+  if (str2(element.type) !== "text" || str2(customData2(element).role).toLowerCase() !== "mock-data") return false;
+  const value = str2(element.text).trim();
   if (value.length < 2) return false;
   return !/^(?:lorem ipsum|用户[a-c1-3]?|好友[a-c1-3]?|昵称|标题|内容|消息|示例|item\s*\d*|\.\.\.|…+)$/iu.test(value);
 }
 function issue(code, element, message) {
-  const id = str(element.id);
+  const id = str2(element.id);
   return { code, ...id !== "" ? { id } : {}, message };
 }
 function inspectPrototypeLayout(elements, options = {}) {
-  const frames = elements.filter((element) => str(element.type) === "frame");
-  const elementById = new Map(elements.map((element) => [str(element.id), element]));
-  const bottomNavigationShells = elements.filter((element) => SHAPE_TYPES.has(str(element.type)) && isBottomNavigation(element));
+  const pages = prototypePages(elements);
+  const pageIds = new Set(pages.map((page) => page.id));
+  const elementById = new Map(elements.map((element) => [str2(element.id), element]));
+  const bottomNavigationShells = elements.filter((element) => SHAPE_TYPES.has(str2(element.type)) && isBottomNavigation(element));
   const errors = [];
-  const warnings = [];
+  const warnings = [
+    ...pageNameWarnings(elements),
+    ...pageMembershipWarnings(elements, pages)
+  ];
   for (const element of elements) {
-    const type = str(element.type);
-    if (type === "frame" || !isFocused(element, options.focusIds)) continue;
-    const text3 = str(element.text);
+    const type = str2(element.type);
+    if (pageIds.has(str2(element.id)) || !isFocused(element, options.focusIds)) continue;
+    const text3 = str2(element.text);
     if (SHAPE_TYPES.has(type) && text3.trim() !== "") {
       errors.push(issue(
         "shape-text-not-visible",
         element,
-        `${str(element.id)} is a ${type} with text, but shape text is not a visible label in Excalidraw; add a separate text element and optionally set containerId to ${str(element.id)}`
+        `${str2(element.id)} is a ${type} with text, but shape text is not a visible label in Excalidraw; add a separate text element and optionally set containerId to ${str2(element.id)}`
       ));
     }
     if (type === "text" && text3 !== "") {
-      const containerId = str(element.containerId);
+      const containerId = str2(element.containerId);
       const container = containerId === "" ? void 0 : elementById.get(containerId);
-      const boundToShape = container !== void 0 && SHAPE_TYPES.has(str(container.type));
-      const directlyFocused = options.focusIds === void 0 || options.focusIds.has(str(element.id)) || container !== void 0 && options.focusIds.has(str(container.id));
-      const elementRole2 = str(customData(element).role).toLowerCase();
-      const containerRole = str(customData(container ?? {}).role).toLowerCase();
+      const boundToShape = container !== void 0 && SHAPE_TYPES.has(str2(container.type));
+      const directlyFocused = options.focusIds === void 0 || options.focusIds.has(str2(element.id)) || container !== void 0 && options.focusIds.has(str2(container.id));
+      const elementRole2 = str2(customData2(element).role).toLowerCase();
+      const containerRole = str2(customData2(container ?? {}).role).toLowerCase();
       const componentRole = elementRole2 || containerRole;
       if (containerId !== "" && container === void 0 && directlyFocused) {
         errors.push(issue(
           "container-target-missing",
           element,
-          `${str(element.id)} points to missing container ${containerId}; add the target shape or clear containerId so the label remains visible`
+          `${str2(element.id)} points to missing container ${containerId}; add the target shape or clear containerId so the label remains visible`
         ));
       }
       if (boundToShape && directlyFocused && componentRole === "") {
         errors.push(issue(
           "component-role-missing",
           element,
-          `${str(element.id)} is bound to ${containerId} without a semantic customData.role; mark the component as button, primary-action, select, input, chip, card, or another explicit product role so draw2code_update can apply the correct text alignment`
+          `${str2(element.id)} is bound to ${containerId} without a semantic customData.role; mark the component as button, primary-action, select, input, chip, card, or another explicit product role so draw2code_update can apply the correct text alignment`
         ));
       }
       const bottomNavigationShell = bottomNavigationShells.find((shell) => {
-        return num(element.x) >= num(shell.x) - 2 && num(element.y) >= num(shell.y) - 2 && num(element.x) + num(element.width) <= num(shell.x) + num(shell.width) + 2 && num(element.y) + num(element.height) <= num(shell.y) + num(shell.height) + 2;
+        return num2(element.x) >= num2(shell.x) - 2 && num2(element.y) >= num2(shell.y) - 2 && num2(element.x) + num2(element.width) <= num2(shell.x) + num2(shell.width) + 2 && num2(element.y) + num2(element.height) <= num2(shell.y) + num2(shell.height) + 2;
       });
-      const navigationItemFocused = options.focusIds === void 0 || options.focusIds.has(str(element.id)) || bottomNavigationShell !== void 0 && options.focusIds.has(str(bottomNavigationShell.id));
+      const navigationItemFocused = options.focusIds === void 0 || options.focusIds.has(str2(element.id)) || bottomNavigationShell !== void 0 && options.focusIds.has(str2(bottomNavigationShell.id));
       if (bottomNavigationShell !== void 0 && navigationItemFocused && !BOTTOM_NAVIGATION_ITEM_ROLES2.has(elementRole2)) {
         errors.push(issue(
           "bottom-navigation-item-role-missing",
           element,
-          `${str(element.id)} is inside bottom navigation ${str(bottomNavigationShell.id)} without customData.role=bottom-navigation-item; add the item role so its label is centered within its navigation slot`
+          `${str2(element.id)} is inside bottom navigation ${str2(bottomNavigationShell.id)} without customData.role=bottom-navigation-item; add the item role so its label is centered within its navigation slot`
         ));
       }
       const lines = estimatedLineCount(element);
-      const fontSize = Math.max(8, num(element.fontSize, 20));
-      const lineHeight = Math.max(1, num(element.lineHeight, 1.25));
+      const fontSize = Math.max(8, num2(element.fontSize, 20));
+      const lineHeight = Math.max(1, num2(element.lineHeight, 1.25));
       const requiredHeight = Math.ceil(lines * fontSize * lineHeight + 8);
       const explicitHeight = typeof element.height === "number" && Number.isFinite(element.height);
-      if (lines > 1 && explicitHeight && num(element.height) + 2 < requiredHeight) {
+      if (lines > 1 && explicitHeight && num2(element.height) + 2 < requiredHeight) {
         errors.push(issue(
           "text-height-overflow",
           element,
-          `${str(element.id)} text height ${Math.round(num(element.height))} cannot contain approximately ${lines} lines; use height >= ${requiredHeight} or split the component into separate text elements`
+          `${str2(element.id)} text height ${Math.round(num2(element.height))} cannot contain approximately ${lines} lines; use height >= ${requiredHeight} or split the component into separate text elements`
         ));
       }
     }
-    const frame = frameFor(element, frames);
-    if (frame !== void 0 && type !== "arrow" && type !== "line") {
-      const x1 = num(element.x);
-      const y1 = num(element.y);
-      const x2 = x1 + num(element.width);
-      const y2 = y1 + num(element.height);
-      const fx = num(frame.x);
-      const fy = num(frame.y);
-      const right = fx + num(frame.width);
-      const bottom = fy + num(frame.height);
+    const page = pageFor(element, pages);
+    if (page !== void 0 && !isPrototypePageLabel(element) && type !== "arrow" && type !== "line") {
+      const x1 = num2(element.x);
+      const y1 = num2(element.y);
+      const x2 = x1 + num2(element.width);
+      const y2 = y1 + num2(element.height);
+      const fx = page.bounds.x;
+      const fy = page.bounds.y;
+      const right = fx + page.bounds.width;
+      const bottom = fy + page.bounds.height;
       if (x1 < fx - 2 || y1 < fy - 2 || x2 > right + 2 || y2 > bottom + 2) {
         errors.push(issue(
-          "frame-overflow",
+          page.kind === "legacy-frame" ? "frame-overflow" : "page-overflow",
           element,
-          `${str(element.id)} extends outside frame ${str(frame.name) || str(frame.id)}; keep the complete component inside its page frame`
+          `${str2(element.id)} extends outside page ${page.name || page.id}; keep the complete component inside its page boundary`
         ));
       }
     }
     if (isBottomNavigation(element)) {
-      const navFrame = frameFor(element, frames);
-      if (navFrame === void 0) {
+      const navPage = pageFor(element, pages);
+      if (navPage === void 0) {
         warnings.push(issue(
-          "bottom-navigation-unframed",
+          "bottom-navigation-unpaged",
           element,
-          `${str(element.id)} is marked as bottom navigation but is not inside a page frame`
+          `${str2(element.id)} is marked as bottom navigation but is not inside a prototype page`
         ));
       } else {
-        const frameBottom = num(navFrame.y) + num(navFrame.height);
-        const navBottom = num(element.y) + num(element.height);
-        const gap = frameBottom - navBottom;
+        const pageBottom = navPage.bounds.y + navPage.bounds.height;
+        const navBottom = num2(element.y) + num2(element.height);
+        const gap = pageBottom - navBottom;
         if (gap > BOTTOM_NAV_MAX_GAP) {
           errors.push(issue(
             "bottom-navigation-offset",
             element,
-            `${str(element.id)} is ${Math.round(gap)}px above the frame bottom; place the bottom navigation in the bottom safe area (gap <= ${BOTTOM_NAV_MAX_GAP}px)`
+            `${str2(element.id)} is ${Math.round(gap)}px above the page bottom; place the bottom navigation in the bottom safe area (gap <= ${BOTTOM_NAV_MAX_GAP}px)`
           ));
         }
       }
@@ -2417,15 +2592,15 @@ function inspectPrototypeLayout(elements, options = {}) {
         errors.push(issue(
           "bottom-navigation-needs-shell",
           element,
-          `${str(element.id)} is a text-only bottom navigation; add a rectangle shell plus separate text labels so the component has a visible boundary and stable geometry`
+          `${str2(element.id)} is a text-only bottom navigation; add a rectangle shell plus separate text labels so the component has a visible boundary and stable geometry`
         ));
       }
     }
   }
   for (const shell of bottomNavigationShells) {
     const items = elements.filter((element) => {
-      if (str(element.type) !== "text" || !BOTTOM_NAVIGATION_ITEM_ROLES2.has(str(customData(element).role).toLowerCase())) return false;
-      return num(element.x) >= num(shell.x) - 2 && num(element.y) >= num(shell.y) - 2 && num(element.x) + num(element.width) <= num(shell.x) + num(shell.width) + 2 && num(element.y) + num(element.height) <= num(shell.y) + num(shell.height) + 2;
+      if (str2(element.type) !== "text" || !BOTTOM_NAVIGATION_ITEM_ROLES2.has(str2(customData2(element).role).toLowerCase())) return false;
+      return num2(element.x) >= num2(shell.x) - 2 && num2(element.y) >= num2(shell.y) - 2 && num2(element.x) + num2(element.width) <= num2(shell.x) + num2(shell.width) + 2 && num2(element.y) + num2(element.height) <= num2(shell.y) + num2(shell.height) + 2;
     });
     const shellFocused = isFocused(shell, options.focusIds) || items.some((item) => isFocused(item, options.focusIds));
     if (!shellFocused) continue;
@@ -2433,7 +2608,7 @@ function inspectPrototypeLayout(elements, options = {}) {
       errors.push(issue(
         "bottom-navigation-items-missing",
         shell,
-        `${str(shell.id)} has no visible bottom-navigation-item labels; add separate text items inside the navigation shell`
+        `${str2(shell.id)} has no visible bottom-navigation-item labels; add separate text items inside the navigation shell`
       ));
       continue;
     }
@@ -2441,28 +2616,29 @@ function inspectPrototypeLayout(elements, options = {}) {
       for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
         const left = items[leftIndex];
         const right = items[rightIndex];
-        const overlaps = num(left.x) < num(right.x) + num(right.width) && num(left.x) + num(left.width) > num(right.x) && num(left.y) < num(right.y) + num(right.height) && num(left.y) + num(left.height) > num(right.y);
+        const overlaps = num2(left.x) < num2(right.x) + num2(right.width) && num2(left.x) + num2(left.width) > num2(right.x) && num2(left.y) < num2(right.y) + num2(right.height) && num2(left.y) + num2(left.height) > num2(right.y);
         if (!overlaps) continue;
         errors.push(issue(
           "bottom-navigation-item-overlap",
           shell,
-          `${str(left.id)} overlaps ${str(right.id)} inside ${str(shell.id)}; give each navigation item its own non-overlapping slot`
+          `${str2(left.id)} overlaps ${str2(right.id)} inside ${str2(shell.id)}; give each navigation item its own non-overlapping slot`
         ));
       }
     }
   }
-  for (const frame of frames) {
-    if (!isPrototypePage(frame) || !isFocused(frame, options.focusIds)) continue;
-    const configuredMinimum = num(customData(frame).mockDataMin, DEFAULT_MOCK_DATA_MIN);
+  for (const page of pages) {
+    const pageElement = page.element;
+    if (str2(customData2(pageElement).role).toLowerCase() !== "prototype-page" || !isFocused(pageElement, options.focusIds)) continue;
+    const configuredMinimum = num2(customData2(pageElement).mockDataMin, DEFAULT_MOCK_DATA_MIN);
     const minimum = Math.max(1, Math.floor(configuredMinimum));
     const records = new Set(
-      elements.filter((element) => frameFor(element, frames) === frame && isVisibleMockData(element)).map((element) => str(element.text).trim())
+      elements.filter((element) => pageFor(element, pages)?.id === page.id && isVisibleMockData(element)).map((element) => str2(element.text).trim())
     );
     if (records.size < minimum) {
       errors.push(issue(
         "mock-data-insufficient",
-        frame,
-        `${str(frame.name) || str(frame.id)} requires ${minimum} visible mock-data text records; found ${records.size}. Add realistic example names, values, statuses or messages instead of empty boxes and mark each text with customData.role=mock-data`
+        pageElement,
+        `${page.name || page.id} requires ${minimum} visible mock-data text records; found ${records.size}. Add realistic example names, values, statuses or messages instead of empty boxes and mark each text with customData.role=mock-data`
       ));
     }
   }
@@ -2471,9 +2647,9 @@ function inspectPrototypeLayout(elements, options = {}) {
 function formatLayoutIssues(issues) {
   return issues.map((item) => {
     const value = typeof item === "object" && item !== null ? item : {};
-    const code = str(value.code) || "layout-warning";
-    const id = str(value.id);
-    const message = str(value.message) || JSON.stringify(item);
+    const code = str2(value.code) || "layout-warning";
+    const id = str2(value.id);
+    const message = str2(value.message) || JSON.stringify(item);
     return `- ${code}${id === "" ? "" : ` [${id}]`}: ${message}`;
   }).join("\n");
 }
@@ -2485,11 +2661,14 @@ function text2(value) {
 var MAX_ELEMENTS_JSON = 120 * 1024;
 var SNAPSHOT_CACHE_MAX = 40;
 var DEFAULT_BOARD = "prototype";
-function str2(value) {
+function str3(value) {
   return typeof value === "string" ? value : "";
 }
-function num2(value) {
+function num3(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function customData3(value) {
+  return typeof value?.customData === "object" && value.customData !== null ? value.customData : {};
 }
 var boardCache = /* @__PURE__ */ new Map();
 async function resolveBoard(store, root, requested) {
@@ -2524,33 +2703,33 @@ function parseUpdateOps(input) {
     const where = `ops[${index}]`;
     if (typeof raw !== "object" || raw === null) throw new Error(`${where} must be an object, got ${typeName2(raw)}`);
     const op = raw;
-    const kind = str2(op.op);
+    const kind = str3(op.op);
     if (kind === "" && typeof op.element === "object" && op.element !== null) {
       const element = op.element;
-      const elementId = str2(element.id);
+      const elementId = str3(element.id);
       if (elementId === "") throw new Error(`${where}.element.id missing or not a string: every element needs a unique non-empty id`);
       return { op: "upsert", elementId, element };
     }
-    if (kind === "" && str2(op.id) !== "" && str2(op.type) !== "") {
-      return { op: "upsert", elementId: str2(op.id), element: op };
+    if (kind === "" && str3(op.id) !== "" && str3(op.type) !== "") {
+      return { op: "upsert", elementId: str3(op.id), element: op };
     }
     if (kind === "upsert") {
-      if ((op.element === void 0 || op.element === null) && str2(op.id) !== "" && str2(op.type) !== "") {
+      if ((op.element === void 0 || op.element === null) && str3(op.id) !== "" && str3(op.type) !== "") {
         const element2 = { ...op };
         delete element2.op;
-        return { op: "upsert", elementId: str2(element2.id), element: element2 };
+        return { op: "upsert", elementId: str3(element2.id), element: element2 };
       }
       if (typeof op.element !== "object" || op.element === null) {
         throw new Error(`${where} is "upsert" but missing its element: use {"op":"upsert","element":{"id":"x","type":"rectangle",...}}`);
       }
       const element = op.element;
-      const elementId = str2(element.id);
+      const elementId = str3(element.id);
       if (elementId === "") throw new Error(`${where}.element.id missing or not a string: every element needs a unique non-empty id`);
       return { op: "upsert", elementId, element };
     }
     if (kind === "delete") {
       const nestedElement = typeof op.element === "object" && op.element !== null ? op.element : void 0;
-      const elementId = str2(op.id) || str2(op.elementId) || str2(nestedElement?.id);
+      const elementId = str3(op.id) || str3(op.elementId) || str3(nestedElement?.id);
       if (elementId === "") throw new Error(`${where} is "delete" but missing its id: use {"op":"delete","id":"<element id>"}`);
       return { op: "delete", elementId };
     }
@@ -2563,6 +2742,22 @@ function parseUpdateOps(input) {
     }
     throw new Error(`${where}.op = "${kind}" is invalid: must be one of upsert | delete | clear | replace. The most common mistake is forgetting the op field entirely`);
   });
+}
+function rejectNewPrototypeFrames(currentElements, ops) {
+  const existingIds = new Set(currentElements.map((element) => str3(element.id)));
+  const candidates = ops.flatMap((op) => {
+    if (op.op === "upsert" && op.element !== void 0) return [op.element];
+    if (op.op === "replace" && Array.isArray(op.scene?.elements)) {
+      return op.scene.elements.filter((item) => typeof item === "object" && item !== null);
+    }
+    return [];
+  });
+  const invalid = candidates.find((element) => {
+    return str3(element.type) === "frame" && str3(customData3(element).role).trim().toLowerCase() === "prototype-page" && !existingIds.has(str3(element.id));
+  });
+  if (invalid !== void 0) {
+    throw new Error(`prototype-page-frame-deprecated: ${str3(invalid.id)} is a new prototype page using type=frame; use a rectangle with customData.role=prototype-page, customData.pageName, and an external prototype-page-label text instead`);
+  }
 }
 function previewElements(currentElements, ops) {
   let elements = currentElements.slice();
@@ -2577,11 +2772,11 @@ function previewElements(currentElements, ops) {
       continue;
     }
     if (op.op === "delete" && op.elementId !== void 0) {
-      elements = elements.filter((element) => str2(element.id) !== op.elementId);
+      elements = elements.filter((element) => str3(element.id) !== op.elementId);
       continue;
     }
     if (op.op === "upsert" && op.elementId !== void 0 && op.element !== void 0) {
-      const index = elements.findIndex((element) => str2(element.id) === op.elementId);
+      const index = elements.findIndex((element) => str3(element.id) === op.elementId);
       if (index === -1) elements.push(op.element);
       else elements[index] = op.element;
     }
@@ -2590,33 +2785,33 @@ function previewElements(currentElements, ops) {
 }
 function fitsInsideFrame(element, frame) {
   const tolerance = 2;
-  const left = num2(element.x);
-  const top = num2(element.y);
-  const right = left + num2(element.width);
-  const bottom = top + num2(element.height);
-  const frameLeft = num2(frame.x);
-  const frameTop = num2(frame.y);
-  const frameRight = frameLeft + num2(frame.width);
-  const frameBottom = frameTop + num2(frame.height);
+  const left = num3(element.x);
+  const top = num3(element.y);
+  const right = left + num3(element.width);
+  const bottom = top + num3(element.height);
+  const frameLeft = num3(frame.x);
+  const frameTop = num3(frame.y);
+  const frameRight = frameLeft + num3(frame.width);
+  const frameBottom = frameTop + num3(frame.height);
   return left >= frameLeft - tolerance && top >= frameTop - tolerance && right <= frameRight + tolerance && bottom <= frameBottom + tolerance;
 }
 function normalizeFrameLocalCoordinates(currentElements, ops) {
   const prospectiveElements = previewElements(currentElements, ops);
   const frames = /* @__PURE__ */ new Map();
   for (const candidate of prospectiveElements) {
-    if (str2(candidate.type) !== "frame" || str2(candidate.id) === "") continue;
-    frames.set(str2(candidate.id), normalizeElement(candidate));
+    if (str3(candidate.type) !== "frame" || str3(candidate.id) === "") continue;
+    frames.set(str3(candidate.id), normalizeElement(candidate));
   }
   return ops.map((op) => {
-    if (op.op !== "upsert" || op.element === void 0 || str2(op.element.type) === "frame") return op;
-    const frame = frames.get(str2(op.element.frameId));
+    if (op.op !== "upsert" || op.element === void 0 || str3(op.element.type) === "frame") return op;
+    const frame = frames.get(str3(op.element.frameId));
     if (frame === void 0) return op;
     const element = normalizeElement(op.element);
     if (fitsInsideFrame(element, frame)) return op;
     const shifted = normalizeElement({
       ...op.element,
-      x: num2(element.x) + num2(frame.x),
-      y: num2(element.y) + num2(frame.y)
+      x: num3(element.x) + num3(frame.x),
+      y: num3(element.y) + num3(frame.y)
     });
     if (!fitsInsideFrame(shifted, frame)) return op;
     return { ...op, element: shifted };
@@ -2631,17 +2826,89 @@ function layoutFocusIds(ops) {
   }
   return ids.size > 0 ? ids : void 0;
 }
+function layoutFocusIdsWithPages(ops, currentElements, prospectiveElements) {
+  const focusIds = layoutFocusIds(ops);
+  if (focusIds === void 0) return void 0;
+  for (const elements of [currentElements, prospectiveElements]) {
+    const pages = prototypePages(elements);
+    for (const element of elements) {
+      if (!focusIds.has(str3(element.id))) continue;
+      const page = pageForElement(element, pages);
+      if (page !== void 0) focusIds.add(page.id);
+    }
+  }
+  return focusIds;
+}
 function normalizeSemanticUpserts(currentElements, ops) {
   const reconciled = reconcileBoundTextBindings(
     previewElements(currentElements, ops),
     layoutFocusIds(ops)
   );
-  const byId = new Map(reconciled.map((element) => [str2(element.id), element]));
+  const byId = new Map(reconciled.map((element) => [str3(element.id), element]));
   return ops.map((op) => {
     if (op.op !== "upsert" || op.elementId === void 0) return op;
     const element = byId.get(op.elementId);
     return element === void 0 ? op : { ...op, element };
   });
+}
+function normalizePageShellUpserts(currentElements, ops) {
+  const prospective = previewElements(currentElements, ops);
+  const pages = prototypePages(prospective);
+  const pageShellById = new Map(pages.filter((page) => page.kind === "page-shell").map((page) => [page.id, page]));
+  const byId = new Map(prospective.map((element) => [str3(element.id), element]));
+  const normalizeElementMembership = (element) => {
+    const referencedPageShell = pageShellById.get(str3(element.frameId));
+    const withoutFrame = { ...element, frameId: null };
+    if (referencedPageShell !== void 0 && pageForElement(withoutFrame, pages)?.id !== referencedPageShell.id) {
+      throw new Error(`layout-invalid:
+- page-shell-child-coordinates-invalid [${str3(element.id)}]: children of ${referencedPageShell.name} must use canvas-absolute x/y inside the rectangle page shell; frame-local coordinates are supported only for legacy Frames`);
+    }
+    const page = pageForElement(element, pages);
+    return referencedPageShell !== void 0 || page?.kind === "page-shell" ? withoutFrame : element;
+  };
+  return ops.map((op) => {
+    if (op.op === "replace" && Array.isArray(op.scene?.elements)) {
+      return {
+        ...op,
+        scene: {
+          ...op.scene,
+          elements: op.scene.elements.map((element2) => {
+            return typeof element2 === "object" && element2 !== null ? normalizeElementMembership(element2) : element2;
+          })
+        }
+      };
+    }
+    if (op.op !== "upsert" || op.elementId === void 0) return op;
+    const element = byId.get(op.elementId);
+    if (element === void 0) return op;
+    return { ...op, element: normalizeElementMembership(element) };
+  });
+}
+function validateNewPrototypePageContracts(currentElements, prospectiveElements) {
+  const existingIds = new Set(currentElements.map((element) => str3(element.id)));
+  const newPages = prototypePages(prospectiveElements).filter((page) => {
+    return page.kind === "page-shell" && !existingIds.has(page.id);
+  });
+  const errors = [];
+  for (const page of newPages) {
+    const minimum = customData3(page.element).mockDataMin;
+    if (typeof minimum !== "number" || !Number.isFinite(minimum) || minimum < 1) {
+      errors.push(`prototype-page-mock-min-missing [${page.id}]: ${page.name} must set customData.mockDataMin to a positive number`);
+    }
+    const labels = prospectiveElements.filter((element) => {
+      return str3(element.type) === "text" && str3(customData3(element).role).trim().toLowerCase() === "prototype-page-label" && str3(customData3(element).pageId) === page.id;
+    });
+    if (labels.length !== 1) {
+      errors.push(`prototype-page-label-${labels.length === 0 ? "missing" : "ambiguous"} [${page.id}]: ${page.name} needs exactly one external prototype-page-label text with customData.pageId=${page.id}`);
+      continue;
+    }
+    const label = labels[0];
+    if (str3(label.text).trim() === "" || num3(label.y) + num3(label.height) > page.bounds.y + 2) {
+      errors.push(`prototype-page-label-invalid [${str3(label.id)}]: ${page.name} label must contain readable text and sit above the rectangle page shell`);
+    }
+  }
+  if (errors.length > 0) throw new Error(`layout-invalid:
+${errors.map((error2) => `- ${error2}`).join("\n")}`);
 }
 function layoutWarnings(elements) {
   const report = inspectPrototypeLayout(elements);
@@ -2657,7 +2924,7 @@ function makeKey(root, name2) {
 function snapshotElementsById(elements) {
   const map = /* @__PURE__ */ new Map();
   for (const element of elements) {
-    const id = str2(element.id);
+    const id = str3(element.id);
     if (id !== "") map.set(id, element);
   }
   return map;
@@ -2760,12 +3027,12 @@ function buildPlanMessage(userChanges, plannedChanges, conflicts) {
   return lines.join("\n");
 }
 function elementSummary(element) {
-  const type = str2(element.type);
+  const type = str3(element.type);
   if (type === "text") {
-    const text3 = str2(element.text);
-    return `${type}#${str2(element.id)} ${text3.slice(0, 48)}`;
+    const text3 = str3(element.text);
+    return `${type}#${str3(element.id)} ${text3.slice(0, 48)}`;
   }
-  return `${type}#${str2(element.id)}`;
+  return `${type}#${str3(element.id)}`;
 }
 function touchedByManualChange(userChanges) {
   if (userChanges === null) return /* @__PURE__ */ new Set();
@@ -2780,16 +3047,16 @@ function stableJson(value) {
 }
 function elementRole(element) {
   if (typeof element.customData !== "object" || element.customData === null) return "";
-  return str2(element.customData.role).toLowerCase();
+  return str3(element.customData.role).toLowerCase();
 }
 function authoredElementMatches(expected, actual, elementsById) {
   const volatile = /* @__PURE__ */ new Set(["updated", "seed", "versionNonce"]);
   for (const [key, value] of Object.entries(expected)) {
     if (volatile.has(key)) continue;
     if (expected.type === "text" && (key === "textAlign" || key === "verticalAlign")) {
-      const container = elementsById.get(str2(actual.containerId));
-      const role = container === void 0 || elementRole(container) === "" ? elementRole(actual) : elementRole(container);
-      const alignment = semanticTextAlignment(role);
+      const container = elementsById.get(str3(actual.containerId));
+      const role2 = container === void 0 || elementRole(container) === "" ? elementRole(actual) : elementRole(container);
+      const alignment = semanticTextAlignment(role2);
       if (alignment !== null && actual.textAlign === alignment.textAlign && actual.verticalAlign === alignment.verticalAlign) continue;
     }
     if (expected.type === "text" && key === "containerId" && typeof value === "string" && actual.containerId === null && actual.frameId === value) {
@@ -2811,7 +3078,7 @@ function authoredElementMatches(expected, actual, elementsById) {
   return true;
 }
 function verifyAppliedOps(ops, elements) {
-  const byId = new Map(elements.map((element) => [str2(element.id), element]));
+  const byId = new Map(elements.map((element) => [str3(element.id), element]));
   const finalOpById = /* @__PURE__ */ new Map();
   for (const op of ops) {
     if (op.op === "clear" || op.op === "replace") {
@@ -2837,7 +3104,7 @@ function verifyAppliedOps(ops, elements) {
 function buildUpdatePlan(currentElements, ops, safeMode, touchedManualIds, hasSnapshot) {
   const currentById = /* @__PURE__ */ new Map();
   for (const el of currentElements) {
-    const id = str2(el.id);
+    const id = str3(el.id);
     if (id !== "") currentById.set(id, el);
   }
   const conflicts = [];
@@ -2884,14 +3151,14 @@ function rememberSnapshot(key, snapshot) {
   }
 }
 function describeElement(el) {
-  const type = str2(el.type);
-  const id = str2(el.id);
-  const geom = `@${Math.round(num2(el.x))},${Math.round(num2(el.y))} ${Math.round(num2(el.width))}x${Math.round(num2(el.height))}`;
+  const type = str3(el.type);
+  const id = str3(el.id);
+  const geom = `@${Math.round(num3(el.x))},${Math.round(num3(el.y))} ${Math.round(num3(el.width))}x${Math.round(num3(el.height))}`;
   if (type === "text") {
-    const body = str2(el.text).replace(/\n/g, "\\n").slice(0, 60);
+    const body = str3(el.text).replace(/\n/g, "\\n").slice(0, 60);
     return `${id} text ${geom} "${body}"`;
   }
-  if (type === "frame") return `${id} frame ${geom} "${str2(el.name)}"`;
+  if (type === "frame") return `${id} frame ${geom} "${str3(el.name)}"`;
   return `${id} ${type} ${geom}`;
 }
 function draw2codeListTool(store) {
@@ -2959,6 +3226,10 @@ function draw2codeReadTool(store) {
           elementCount: { type: "integer", required: true },
           summary: { type: "string", required: true },
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
+          pageNames: { type: "array", items: { type: "string" }, required: true },
+          pages: { type: "array", items: { type: "json" }, required: true },
+          pageRelations: { type: "array", items: { type: "json" }, required: true },
+          frameNames: { type: "array", items: { type: "string" }, required: true },
           file: { type: "string", required: true },
           elements: { type: "json", required: true }
         }
@@ -2966,6 +3237,7 @@ function draw2codeReadTool(store) {
       render: (_args, value) => text2(
         [
           `board: ${value.board ?? ""} \xB7 ${value.elementCount ?? 0} elements`,
+          `pages: ${(value.pageNames ?? []).join("\u3001") || "\uFF08\u672A\u8BC6\u522B\uFF09"} \xB7 relations: ${value.pageRelations?.length ?? 0}`,
           value.activeBoard !== void 0 && value.activeBoard !== value.board ? `\u5F53\u524D\u753B\u677F: ${value.activeBoard}\uFF08\u4E0E\u8BFB\u53D6\u76EE\u6807\u4E0D\u540C\uFF09` : "",
           (value.layoutWarnings ?? []).length > 0 ? `\u539F\u578B\u8D28\u91CF\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
@@ -2979,6 +3251,12 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
       const result = await store.read(args.root, target.name);
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
       const { rev, scene } = result.value;
+      const pages = prototypePages(scene.elements);
+      const relations = prototypePageRelations(scene.elements, pages);
+      const qualityWarnings = [
+        ...layoutWarnings(scene.elements),
+        ...pageMembershipWarnings(scene.elements, pages)
+      ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
       const summary = scene.elements.map(describeElement).join("\n");
       const elementsJson = JSON.stringify(scene.elements);
       const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
@@ -2988,8 +3266,12 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         board: target.name,
         ...target.activeBoard !== void 0 ? { activeBoard: target.activeBoard } : {},
         elementCount: scene.elements.length,
+        pageNames: pages.map((page) => page.name),
+        pages: publicPrototypePages(scene.elements, pages),
+        pageRelations: relations,
+        frameNames: pages.map((page) => page.name),
         summary,
-        layoutWarnings: layoutWarnings(scene.elements),
+        layoutWarnings: qualityWarnings,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload
       };
@@ -2999,11 +3281,11 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
 function draw2codeUpdateTool(store) {
   return defineTool2({
     name: "draw2code_update",
-    description: `Draw on / edit one \u753B\u7801 prototype board with ops \u2014 this is how you turn the user's idea into a visible prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, {op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. When an element has frameId and its box only fits after adding the frame x/y, frame-local coordinates are safely converted; ambiguous coordinates remain layout-invalid. The board is auto-created when absent. Triggers: \u753B\u539F\u578B / \u753B\u4E00\u4E0B / \u5728\u753B\u677F\u4E0A\u2026 / draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the frame bottom safe area. A completed page from draw2code_create must set frame customData.role=prototype-page plus customData.mockDataMin (normally 3), and mark each visible realistic example text with customData.role=mock-data; empty boxes and placeholder labels do not satisfy the content gate. Put page children in a frame with frameId; never use containerId for page membership. If a text containerId mistakenly points to a frame, the store repairs it to frameId so the text stays visible. For a one-label shape, set the text containerId to the rectangle/diamond/ellipse id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw's reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the \u753B\u7801 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.`,
+    description: `Draw on / edit one \u753B\u7801 prototype board with ops \u2014 this is how you turn the user's idea into a visible prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, {op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when absent. Triggers: \u753B\u539F\u578B / \u753B\u4E00\u4E0B / \u5728\u753B\u677F\u4E0A\u2026 / draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw's reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the \u753B\u7801 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.`,
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       name: { type: "string", description: "Board name. Omit to target the board currently selected in the \u753B\u7801 UI." },
-      ops: { type: "json", required: true, description: 'Ops array (or a JSON string encoding it). Prefer [{"op":"upsert","element":{"id":"title","type":"text","frameId":"page","x":20,"y":80,"text":"\u6807\u9898"}}]. Direct elements, {element:{...}} without op, and flat upserts are also accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Canvas-absolute x/y are canonical; unambiguous frame-local child coordinates are converted automatically.' },
+      ops: { type: "json", required: true, description: 'Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"\u9996\u9875",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
       force: { type: "boolean", description: "\u5DF2\u8BFB\u5230\u51B2\u7A81\u5E76\u4E14\u7528\u6237\u786E\u8BA4\u540E\u53EF\u8BBE\u7F6E\u4E3A true\uFF0C\u5F3A\u5236\u6267\u884C\u3002\u9ED8\u8BA4 false\u3002" },
       safeMode: { type: "boolean", description: "\u662F\u5426\u5728\u6709\u98CE\u9669\u6539\u52A8\u65F6\u8981\u6C42\u786E\u8BA4\uFF08\u9ED8\u8BA4 true\uFF09\u3002\u8BBE\u4E3A false \u4F1A\u76F4\u63A5\u6267\u884C\uFF0C\u53EF\u80FD\u8986\u76D6\u7528\u6237\u624B\u5DE5\u6539\u52A8\u3002" }
     },
@@ -3052,10 +3334,15 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const key = makeKey(args.root, target.name);
       const cache = boardCache.get(key);
       const currentElements = board.ok ? board.value.scene.elements : [];
+      rejectNewPrototypeFrames(currentElements, parsedOps);
       const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
-      const ops = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
+      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
+      const ops = normalizePageShellUpserts(currentElements, semanticOps);
       const prospectiveElements = previewElements(currentElements, ops);
-      const layoutReport = inspectPrototypeLayout(prospectiveElements, { focusIds: layoutFocusIds(ops) });
+      validateNewPrototypePageContracts(currentElements, prospectiveElements);
+      const layoutReport = inspectPrototypeLayout(prospectiveElements, {
+        focusIds: layoutFocusIdsWithPages(ops, currentElements, prospectiveElements)
+      });
       if (layoutReport.errors.length > 0) {
         throw new Error(`layout-invalid:
 ${formatLayoutIssues(layoutReport.errors)}
@@ -3181,14 +3468,11 @@ function generateError(code, message, draft) {
     }
   };
 }
-function namedFrames(elements) {
-  return elements.filter((element) => str2(element.type) === "frame" && str2(element.name).trim() !== "");
-}
-function pageScopeQuestion(frames, recommended, recommendationReasons = /* @__PURE__ */ new Map()) {
+function pageScopeQuestion(pages, recommended, recommendationReasons = /* @__PURE__ */ new Map()) {
   const recommendedSet = new Set(recommended);
-  const orderedFrames = [...frames].sort((left, right) => {
-    const leftRecommended = recommendedSet.has(str2(left.name).trim()) ? 0 : 1;
-    const rightRecommended = recommendedSet.has(str2(right.name).trim()) ? 0 : 1;
+  const orderedPages = [...pages].sort((left, right) => {
+    const leftRecommended = recommendedSet.has(left.name) ? 0 : 1;
+    const rightRecommended = recommendedSet.has(right.name) ? 0 : 1;
     return leftRecommended - rightRecommended;
   });
   return {
@@ -3197,8 +3481,8 @@ function pageScopeQuestion(frames, recommended, recommendationReasons = /* @__PU
     selectionMode: "multiple",
     minSelections: 1,
     allowOther: false,
-    options: orderedFrames.map((frame) => {
-      const name2 = str2(frame.name).trim();
+    options: orderedPages.map((page) => {
+      const name2 = page.name;
       const isRecommended = recommendedSet.has(name2);
       const displayLabel = `${name2}${isRecommended ? "\uFF08\u63A8\u8350\uFF09" : ""}`;
       return {
@@ -3212,55 +3496,22 @@ function pageScopeQuestion(frames, recommended, recommendationReasons = /* @__PU
     recommendedValues: recommended.map((name2) => `${name2}\uFF08\u63A8\u8350\uFF09`)
   };
 }
-function directlyConnectedFrames(elements, requested) {
+function directlyConnectedPages(elements, requested) {
   if (requested.length === 0) return [];
-  const frames = namedFrames(elements);
-  const frameById = new Map(frames.map((frame) => [str2(frame.id), frame]));
-  const elementById = new Map(elements.map((element) => [str2(element.id), element]));
-  const ownerFrame = (element) => {
-    if (element === void 0) return void 0;
-    if (str2(element.type) === "frame") return element;
-    const explicit = frameById.get(str2(element.frameId));
-    if (explicit !== void 0) return explicit;
-    const cx = num2(element.x) + num2(element.width) / 2;
-    const cy = num2(element.y) + num2(element.height) / 2;
-    return frames.find((frame) => cx >= num2(frame.x) && cx <= num2(frame.x) + num2(frame.width) && cy >= num2(frame.y) && cy <= num2(frame.y) + num2(frame.height));
-  };
-  const nearestFrame = (x, y) => frames.map((frame) => {
-    const left = num2(frame.x);
-    const top = num2(frame.y);
-    const right = left + num2(frame.width);
-    const bottom = top + num2(frame.height);
-    const dx = x < left ? left - x : x > right ? x - right : 0;
-    const dy = y < top ? top - y : y > bottom ? y - bottom : 0;
-    return { frame, distance: Math.hypot(dx, dy) };
-  }).filter(({ distance }) => distance <= 48).sort((left, right) => left.distance - right.distance)[0]?.frame;
-  const bindingFrame = (arrow, key) => {
-    const binding = typeof arrow[key] === "object" && arrow[key] !== null ? arrow[key] : {};
-    return ownerFrame(elementById.get(str2(binding.elementId)));
-  };
+  const relations = prototypePageRelations(elements);
   const connected = /* @__PURE__ */ new Set();
-  for (const arrow of elements.filter((element) => str2(element.type) === "arrow")) {
-    const points = Array.isArray(arrow.points) ? arrow.points : [];
-    const first = Array.isArray(points[0]) ? points[0] : [0, 0];
-    const last = Array.isArray(points.at(-1)) ? points.at(-1) : [num2(arrow.width), num2(arrow.height)];
-    const start = bindingFrame(arrow, "startBinding") ?? nearestFrame(num2(arrow.x) + num2(first[0]), num2(arrow.y) + num2(first[1]));
-    const end = bindingFrame(arrow, "endBinding") ?? nearestFrame(num2(arrow.x) + num2(last[0]), num2(arrow.y) + num2(last[1]));
-    const startName = str2(start?.name).trim();
-    const endName = str2(end?.name).trim();
-    if (startName !== "" && endName !== "" && startName !== endName) {
-      if (requested.includes(startName) && !requested.includes(endName)) connected.add(endName);
-      if (requested.includes(endName) && !requested.includes(startName)) connected.add(startName);
-    }
+  for (const relation of relations) {
+    if (requested.includes(relation.sourcePage) && !requested.includes(relation.targetPage)) connected.add(relation.targetPage);
+    if (requested.includes(relation.targetPage) && !requested.includes(relation.sourcePage)) connected.add(relation.sourcePage);
   }
   return [...connected];
 }
-function inferDevice(frames) {
+function inferDevice(pages) {
   let mobile = 0;
   let desktop = 0;
-  for (const frame of frames) {
-    const width = num2(frame.width);
-    const height = num2(frame.height);
+  for (const page of pages) {
+    const width = page.bounds.width;
+    const height = page.bounds.height;
     if (width <= 600 && height > width) mobile += 1;
     else if (width >= 760 || width > height * 1.15) desktop += 1;
   }
@@ -3285,7 +3536,7 @@ function deviceQuestion() {
   };
 }
 function visualQuestion(elements) {
-  const corpus = elements.map((element) => `${str2(element.name)} ${str2(element.text)}`).join(" ");
+  const corpus = elements.map((element) => `${str3(element.name)} ${str3(element.text)}`).join(" ");
   const social = /社交|雷达|好友|聊天|附近|碰一碰/u.test(corpus);
   const dataTool = /统计|日历|万年历|图表|清单|任务|管理/u.test(corpus);
   const options = social ? [
@@ -3317,69 +3568,63 @@ function visualQuestion(elements) {
     recommendedValues: [options.find((option) => option.recommended)?.id ?? options[0].id]
   };
 }
-function elementsInFrames(elements, frameNames) {
-  const selected = namedFrames(elements).filter((frame) => frameNames.includes(str2(frame.name).trim()));
-  const ids = new Set(selected.map((frame) => str2(frame.id)));
-  const inRect = (element, frame) => {
-    const cx = num2(element.x) + num2(element.width) / 2;
-    const cy = num2(element.y) + num2(element.height) / 2;
-    return cx >= num2(frame.x) && cx <= num2(frame.x) + num2(frame.width) && cy >= num2(frame.y) && cy <= num2(frame.y) + num2(frame.height);
-  };
-  const scoped = [...selected];
-  const claimed = new Set(ids);
-  let unframedElementCount = 0;
-  for (const element of elements) {
-    if (claimed.has(str2(element.id))) continue;
-    const frameId = str2(element.frameId);
-    const owned = frameId !== "" && ids.has(frameId) || selected.some((frame) => inRect(element, frame));
-    if (owned) {
-      scoped.push(element);
-      claimed.add(str2(element.id));
-    } else if (str2(element.type) !== "frame" && frameId === "") {
-      unframedElementCount += 1;
-    }
-  }
-  return { frames: selected, elements: scoped, unframedElementCount };
+function elementsInPages(elements, pageNames) {
+  const allPages = prototypePages(elements);
+  const selected = allPages.filter((page) => pageNames.includes(page.name));
+  const selectedIds = new Set(selected.map((page) => page.id));
+  const elementIds = new Set(selected.flatMap((page) => pageElementIds(page, elements, allPages)));
+  const scoped = elements.filter((element) => selectedIds.has(str3(element.id)) || elementIds.has(str3(element.id)));
+  const assigned = new Set(allPages.flatMap((page) => [page.id, ...pageElementIds(page, elements, allPages)]));
+  const allRelations = prototypePageRelations(elements, allPages);
+  const relations = allRelations.filter((relation) => {
+    return pageNames.includes(relation.sourcePage) || pageNames.includes(relation.targetPage);
+  });
+  const relationIds = new Set(allRelations.map((relation) => relation.id));
+  const relationLabelIds = new Set(elements.flatMap((element) => {
+    return str3(element.type) === "text" && relationIds.has(str3(element.containerId)) ? [str3(element.id)] : [];
+  }));
+  const pageLabelIds = new Set(elements.flatMap((element) => {
+    return str3(customData3(element).role).toLowerCase() === "prototype-page-label" ? [str3(element.id)] : [];
+  }));
+  const unassignedElementCount = elements.filter((element) => {
+    const id = str3(element.id);
+    return !assigned.has(id) && !relationIds.has(id) && !relationLabelIds.has(id) && !pageLabelIds.has(id);
+  }).length;
+  return { pages: selected, elements: scoped, unassignedElementCount, relations };
 }
-function emptyFrameIssues(frames, elements) {
-  return frames.flatMap((frame) => {
-    const id = str2(frame.id);
+function emptyPageIssues(pages, elements) {
+  const allPages = prototypePages(elements);
+  return pages.flatMap((page) => {
     const meaningful = elements.some((element) => {
-      if (element === frame || str2(element.type) !== "text" || str2(element.text).trim() === "") return false;
-      if (str2(element.frameId) === id) return true;
-      const cx = num2(element.x) + num2(element.width) / 2;
-      const cy = num2(element.y) + num2(element.height) / 2;
-      return cx >= num2(frame.x) && cx <= num2(frame.x) + num2(frame.width) && cy >= num2(frame.y) && cy <= num2(frame.y) + num2(frame.height);
+      if (element === page.element || str3(element.type) !== "text" || str3(element.text).trim() === "") return false;
+      return pageForElement(element, allPages)?.id === page.id;
     });
-    return meaningful ? [] : [{ code: "page-content-missing", id, message: `${str2(frame.name)} \u53EA\u6709\u7A7A\u6846\uFF0C\u65E0\u6CD5\u5224\u65AD\u9875\u9762\u5185\u5BB9\u548C\u7528\u9014` }];
+    return meaningful ? [] : [{ code: "page-content-missing", id: page.id, message: `${page.name} \u53EA\u6709\u7A7A\u6846\uFF0C\u65E0\u6CD5\u5224\u65AD\u9875\u9762\u5185\u5BB9\u548C\u7528\u9014` }];
   });
 }
-function elementBelongsToFrame(element, frame) {
-  if (str2(element.frameId) === str2(frame.id)) return true;
-  const cx = num2(element.x) + num2(element.width) / 2;
-  const cy = num2(element.y) + num2(element.height) / 2;
-  return cx >= num2(frame.x) && cx <= num2(frame.x) + num2(frame.width) && cy >= num2(frame.y) && cy <= num2(frame.y) + num2(frame.height);
+function elementBelongsToPage(element, page, pages) {
+  return pageForElement(element, pages)?.id === page.id;
 }
-function semanticMockDataIssues(frames, elements) {
+function semanticMockDataIssues(pages, elements) {
   const repeatedContentPage = /列表|好友|聊天|消息|清单|统计|图表|日历|万年历|雷达|推荐|记录|详情/u;
   const genericUiText = /^(?:首页|列表|好友|聊天|消息|清单|统计|日历|雷达|推荐|详情|返回|保存|提交|确认|取消|搜索|筛选|新增|添加|我的|设置|发送|请输入.*)$/u;
-  return frames.flatMap((frame) => {
-    const name2 = str2(frame.name).trim();
+  return pages.flatMap((page) => {
+    const name2 = page.name;
     if (!repeatedContentPage.test(name2)) return [];
-    const texts = elements.filter((element) => element !== frame && str2(element.type) === "text" && elementBelongsToFrame(element, frame));
+    const texts = elements.filter((element) => element !== page.element && str3(element.type) === "text" && elementBelongsToPage(element, page, pages));
     let records = 0;
     for (const element of texts) {
-      const value = str2(element.text).trim();
+      const value = str3(element.text).trim();
       if (value === "" || value === name2 || genericUiText.test(value)) continue;
-      const role = str2((typeof element.customData === "object" && element.customData !== null ? element.customData : {}).role).toLowerCase();
+      const role2 = str3((typeof element.customData === "object" && element.customData !== null ? element.customData : {}).role).toLowerCase();
       const lines = value.split(/\r?\n/u).filter((line) => line.trim().length >= 2).length;
-      if (role === "mock-data" || /\d|·|：|:|公里|km|米|m\b|已|待|完成|进行中|昨天|今天|刚刚/u.test(value) || value.length >= 8) {
+      if (role2 === "mock-data" || /\d|·|：|:|公里|km|米|m\b|已|待|完成|进行中|昨天|今天|刚刚/u.test(value) || value.length >= 8) {
         records += Math.max(1, Math.min(3, lines));
       }
     }
     return records >= 3 ? [] : [{
       code: "mock-data-insufficient",
-      id: str2(frame.id),
+      id: page.id,
       message: `${name2} \u9700\u8981\u81F3\u5C11 3 \u6761\u53EF\u8BFB mock \u6570\u636E\u5E2E\u52A9\u7406\u89E3\u9875\u9762\uFF1B\u5F53\u524D\u8BC6\u522B\u5230 ${records} \u6761`
     }];
   });
@@ -3398,7 +3643,7 @@ function pathIsInside(root, candidate) {
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 async function workspaceFile(root, source) {
-  const sourceText = str2(source).trim();
+  const sourceText = str3(source).trim();
   if (sourceText === "") return { ok: false, reason: "source" };
   try {
     const canonicalRoot = await realpath3(root);
@@ -3421,7 +3666,7 @@ async function workspaceFile(root, source) {
   }
 }
 async function workspaceArtifact(root, source, expectedHash) {
-  const hashText = str2(expectedHash).trim().toLowerCase();
+  const hashText = str3(expectedHash).trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/u.test(hashText)) return { ok: false, reason: "sha256" };
   const file = await workspaceFile(root, source);
   if (!file.ok) return file;
@@ -3511,10 +3756,10 @@ async function previewHtml(root, previewUrl) {
 function normalizedVisibleText(value) {
   return value.replace(/\s+/gu, " ").trim();
 }
-function expectedPageTexts(frames, elements) {
-  return Object.fromEntries(frames.map((frame) => {
-    const name2 = str2(frame.name).trim();
-    const texts = elements.filter((element) => str2(element.type) === "text" && elementBelongsToFrame(element, frame)).flatMap((element) => str2(element.text).split(/\r?\n/gu)).map(normalizedVisibleText).filter((value) => value !== "");
+function expectedPageTexts(pages, elements) {
+  return Object.fromEntries(pages.map((page) => {
+    const name2 = page.name;
+    const texts = elements.filter((element) => str3(element.type) === "text" && elementBelongsToPage(element, page, pages)).flatMap((element) => str3(element.text).split(/\r?\n/gu)).map(normalizedVisibleText).filter((value) => value !== "");
     return [name2, [...new Set(texts)]];
   }));
 }
@@ -3562,10 +3807,10 @@ async function verificationEvidenceFor(root, raw, draft, outputHash) {
   }
   const missing = [];
   const failures = [];
-  const captureId = str2(evidence.captureId).trim();
+  const captureId = str3(evidence.captureId).trim();
   if (captureId === "") missing.push("captureId");
-  if (str2(evidence.outputSha256).trim().toLowerCase() !== outputHash) failures.push("outputSha256");
-  const previewUrl = str2(evidence.previewUrl).trim();
+  if (str3(evidence.outputSha256).trim().toLowerCase() !== outputHash) failures.push("outputSha256");
+  const previewUrl = str3(evidence.previewUrl).trim();
   if (!/^(?:https?|file):\/\//iu.test(previewUrl)) {
     missing.push("previewUrl");
   } else {
@@ -3578,18 +3823,18 @@ async function verificationEvidenceFor(root, raw, draft, outputHash) {
   if (viewports === null || viewports.length === 0) {
     missing.push("viewports");
   } else {
-    const validViewports = viewports.filter((viewport) => num2(viewport.width) > 0 && num2(viewport.height) > 0);
-    for (const viewport of validViewports) viewportKeys.add(num2(viewport.width) + "x" + num2(viewport.height));
+    const validViewports = viewports.filter((viewport) => num3(viewport.width) > 0 && num3(viewport.height) > 0);
+    for (const viewport of validViewports) viewportKeys.add(num3(viewport.width) + "x" + num3(viewport.height));
     if (validViewports.length !== viewports.length) missing.push("viewports.width/height");
-    if ((draft.device === "mobile" || draft.device === "\u79FB\u52A8\u7AEF H5") && !validViewports.some((viewport) => num2(viewport.width) >= 320 && num2(viewport.width) <= 430 && num2(viewport.height) > num2(viewport.width))) {
+    if ((draft.device === "mobile" || draft.device === "\u79FB\u52A8\u7AEF H5") && !validViewports.some((viewport) => num3(viewport.width) >= 320 && num3(viewport.width) <= 430 && num3(viewport.height) > num3(viewport.width))) {
       missing.push("320-430px mobile viewport");
     }
-    if (draft.device === "desktop" && !validViewports.some((viewport) => num2(viewport.width) >= 1024)) {
+    if (draft.device === "desktop" && !validViewports.some((viewport) => num3(viewport.width) >= 1024)) {
       missing.push("desktop viewport >= 1024px");
     }
     if (draft.device === "separate") {
-      if (!validViewports.some((viewport) => num2(viewport.width) >= 320 && num2(viewport.width) <= 430)) missing.push("mobile viewport");
-      if (!validViewports.some((viewport) => num2(viewport.width) >= 1024)) missing.push("desktop viewport");
+      if (!validViewports.some((viewport) => num3(viewport.width) >= 320 && num3(viewport.width) <= 430)) missing.push("mobile viewport");
+      if (!validViewports.some((viewport) => num3(viewport.width) >= 1024)) missing.push("desktop viewport");
     }
   }
   const unselectedEvidencePages = draft.hadExistingIndex ? draft.unselectedFrames ?? [] : [];
@@ -3599,13 +3844,13 @@ async function verificationEvidenceFor(root, raw, draft, outputHash) {
     missing.push("screenshots");
   } else {
     for (const page of evidencePages) {
-      const shot = screenshots.find((candidate) => str2(candidate.page).trim() === page);
+      const shot = screenshots.find((candidate) => str3(candidate.page).trim() === page);
       if (shot === void 0) {
         missing.push("screenshot:" + page);
         continue;
       }
-      if (str2(shot.captureId).trim() !== captureId) failures.push("screenshot:" + page + ":captureId");
-      const viewport = str2(shot.viewport).trim();
+      if (str3(shot.captureId).trim() !== captureId) failures.push("screenshot:" + page + ":captureId");
+      const viewport = str3(shot.viewport).trim();
       if (!viewportKeys.has(viewport)) missing.push("screenshot-viewport:" + page);
       const artifact = await workspaceArtifact(root, shot.source, shot.sha256);
       if (!artifact.ok) {
@@ -3624,12 +3869,12 @@ async function verificationEvidenceFor(root, raw, draft, outputHash) {
     missing.push("domSnapshots");
   } else {
     for (const page of evidencePages) {
-      const snapshot = domSnapshots.find((candidate) => str2(candidate.page).trim() === page);
+      const snapshot = domSnapshots.find((candidate) => str3(candidate.page).trim() === page);
       if (snapshot === void 0) {
         missing.push("domSnapshot:" + page);
         continue;
       }
-      if (str2(snapshot.captureId).trim() !== captureId) failures.push("domSnapshot:" + page + ":captureId");
+      if (str3(snapshot.captureId).trim() !== captureId) failures.push("domSnapshot:" + page + ":captureId");
       const artifact = await workspaceArtifact(root, snapshot.source, snapshot.sha256);
       if (!artifact.ok) {
         failures.push("domSnapshot:" + page + ":" + artifact.reason);
@@ -3665,12 +3910,12 @@ async function verificationEvidenceFor(root, raw, draft, outputHash) {
       continue;
     }
     for (const requiredName of requiredNames) {
-      const check = checks.find((item) => str2(item.name) === requiredName);
-      if (check === void 0 || str2(check.details).trim() === "") missing.push(field + ":" + requiredName);
+      const check = checks.find((item) => str3(item.name) === requiredName);
+      if (check === void 0 || str3(check.details).trim() === "") missing.push(field + ":" + requiredName);
       else if (check.passed !== true) failures.push(field + ":" + requiredName);
     }
     for (const check of checks) {
-      if (check.passed !== true) failures.push(field + ":" + (str2(check.name) || "unnamed"));
+      if (check.passed !== true) failures.push(field + ":" + (str3(check.name) || "unnamed"));
     }
   }
   if (missing.length > 0) {
@@ -3775,23 +4020,26 @@ async function loadGeneration(store, root, sessionId) {
 async function runGeneratePreflight(store, root, draft) {
   const board = await store.read(root, draft.board);
   if (!board.ok) return generateError(board.error.code, board.error.message, draft);
-  const allFrames = namedFrames(board.value.scene.elements);
-  draft.allFrames = allFrames.map((frame) => str2(frame.name).trim());
+  const allPages = prototypePages(board.value.scene.elements);
+  draft.allFrames = allPages.map((page) => page.name);
   draft.unselectedFrames = draft.allFrames.filter((name2) => !draft.selectedFrames.includes(name2));
-  draft.expectedPageTexts = expectedPageTexts(allFrames, board.value.scene.elements);
-  const scope = elementsInFrames(board.value.scene.elements, draft.selectedFrames);
-  if (scope.frames.length !== draft.selectedFrames.length) {
-    const found = new Set(scope.frames.map((frame) => str2(frame.name)));
+  draft.expectedPageTexts = expectedPageTexts(allPages, board.value.scene.elements);
+  const scope = elementsInPages(board.value.scene.elements, draft.selectedFrames);
+  if (scope.pages.length !== draft.selectedFrames.length) {
+    const found = new Set(scope.pages.map((page) => page.name));
     const missing = draft.selectedFrames.filter((name2) => !found.has(name2));
-    draft.blockers = [{ code: "frame-not-found", message: `\u6240\u9009\u9875\u9762\u5DF2\u4E0D\u5728\u753B\u677F\u4E0A\uFF1A${missing.join("\u3001")}` }];
+    draft.blockers = [{ code: "page-not-found", message: `\u6240\u9009\u9875\u9762\u5DF2\u4E0D\u5728\u753B\u677F\u4E0A\uFF1A${missing.join("\u3001")}` }];
   } else {
     const report = inspectPrototypeLayout(scope.elements);
     draft.blockers = [
       ...report.errors,
-      ...emptyFrameIssues(scope.frames, scope.elements),
-      ...semanticMockDataIssues(scope.frames, scope.elements)
+      ...emptyPageIssues(scope.pages, scope.elements),
+      ...semanticMockDataIssues(scope.pages, scope.elements)
     ];
-    draft.warnings = report.warnings;
+    draft.warnings = [
+      ...report.warnings,
+      ...pageMembershipWarnings(board.value.scene.elements, allPages)
+    ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
   }
   const existing = await store.existingPages(root, draft.board);
   if (!existing.ok) return generateError(existing.error.code, existing.error.message, draft);
@@ -3805,7 +4053,7 @@ async function runGeneratePreflight(store, root, draft) {
 async function generationPayload(store, root, draft) {
   const board = await store.read(root, draft.board);
   if (!board.ok) return generateError(board.error.code, board.error.message, draft);
-  const scope = elementsInFrames(board.value.scene.elements, draft.selectedFrames);
+  const scope = elementsInPages(board.value.scene.elements, draft.selectedFrames);
   const existing = await store.existingPages(root, draft.board);
   if (!existing.ok) return generateError(existing.error.code, existing.error.message, draft);
   const summary = scope.elements.map(describeElement).join("\n");
@@ -3820,11 +4068,14 @@ async function generationPayload(store, root, draft) {
 ${formatLayoutIssues(layoutIssues)}` : "");
   return responseFromDraft(draft, {
     nextAction: "write-html-then-preview-and-validate",
-    scope: "frames",
+    scope: "pages",
+    pageNames: draft.selectedFrames,
     frameNames: draft.selectedFrames,
     summary,
     elements: payload,
-    unframedElementCount: scope.unframedElementCount,
+    pageRelations: scope.relations,
+    unassignedElementCount: scope.unassignedElementCount,
+    unframedElementCount: scope.unassignedElementCount,
     layoutWarnings: layoutIssues,
     existingPages: existing.value,
     outputDir: `draw2code-pages/${draft.board}/`,
@@ -3834,12 +4085,13 @@ ${formatLayoutIssues(layoutIssues)}` : "");
 function draw2codeGenerateTool(store, projects) {
   return defineTool2({
     name: "draw2code_generate",
-    description: "Turn selected \u753B\u7801 frames into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. On any explicit \u201C\u751F\u6210\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u91CD\u65B0\u751F\u6210\u201D request, call action=start immediately. The first result always asks the user to select pages from every frame; pass user-mentioned frames only as recommendations, never skip the choice. Use the host choice UI with all returned options. Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type \u201C\u786E\u8BA4\u201D. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.",
+    description: "Turn selected \u753B\u7801 prototype pages into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. New pages use ordinary rectangle page shells; named Excalidraw Frames remain supported as legacy pages. On any explicit \u201C\u751F\u6210\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u91CD\u65B0\u751F\u6210\u201D request, call action=start immediately. The first result always asks the user to select pages from every recognized page boundary; pass user-mentioned pages only as recommendations, never skip the choice. Use the host choice UI with all returned options. Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type \u201C\u786E\u8BA4\u201D. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       action: { type: "string", enum: ["start", "answer", "revise", "resume", "recheck", "confirm", "complete", "abandon"], description: "Generate state-machine action. Omit only for legacy callers; omission behaves as start." },
       name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." },
-      frames: { type: "array", items: { type: "string" }, description: "User-mentioned frame names, used only as recommended defaults on action=start." },
+      pages: { type: "array", items: { type: "string" }, description: "User-mentioned prototype page names, used only as recommended defaults on action=start." },
+      frames: { type: "array", items: { type: "string" }, description: "Deprecated compatibility alias for pages. If both are supplied they must contain the same names." },
       styleNote: { type: "string", description: "An explicit overall visual request; skips the first-time visual choice." },
       sessionId: { type: "string", description: "Generation session ID from a prior result." },
       revision: { type: "integer", description: "Expected generation revision for mutation actions." },
@@ -3874,9 +4126,12 @@ function draw2codeGenerateTool(store, projects) {
           nextAction: { type: "string" },
           error: { type: "json" },
           scope: { type: "string" },
+          pageNames: { type: "array", items: { type: "string" } },
           frameNames: { type: "array", items: { type: "string" } },
           summary: { type: "string" },
           elements: { type: "json" },
+          pageRelations: { type: "json" },
+          unassignedElementCount: { type: "integer" },
           unframedElementCount: { type: "integer" },
           layoutWarnings: { type: "json" },
           existingPages: { type: "array", items: { type: "string" } },
@@ -3913,21 +4168,30 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         const target = await resolveBoard(store, args.root, args.name);
         const board = await store.read(args.root, target.name);
         if (!board.ok) return generateError(board.error.code, board.error.message);
-        const frames = namedFrames(board.value.scene.elements);
-        if (frames.length === 0) return generateError("no-pages", `\u753B\u677F\u300C${target.name}\u300D\u6CA1\u6709\u5E26\u540D\u79F0\u7684 frame\uFF0C\u65E0\u6CD5\u9009\u62E9\u751F\u6210\u9875\u9762`);
-        const allNames = frames.map((frame) => str2(frame.name).trim());
-        const requested = [...new Set((args.frames ?? []).map((name2) => name2.trim()).filter((name2) => name2 !== ""))];
+        const duplicatePageNames = pageNameWarnings(board.value.scene.elements);
+        if (duplicatePageNames.length > 0) {
+          return generateError("page-name-duplicate", duplicatePageNames.map((warning) => warning.message).join("\uFF1B"));
+        }
+        const pages = prototypePages(board.value.scene.elements);
+        if (pages.length === 0) return generateError("no-pages", `\u753B\u677F\u300C${target.name}\u300D\u6CA1\u6709\u53EF\u8BC6\u522B\u7684\u539F\u578B\u9875\u9762\uFF1B\u65B0\u9875\u9762\u5E94\u4F7F\u7528 rectangle + customData.role=prototype-page + customData.pageName\uFF0C\u65E7\u547D\u540D Frame \u4ECD\u517C\u5BB9`);
+        const allNames = pages.map((page) => page.name);
+        const requestedPages = [...new Set((args.pages ?? []).map((name2) => name2.trim()).filter((name2) => name2 !== ""))];
+        const requestedFrames = [...new Set((args.frames ?? []).map((name2) => name2.trim()).filter((name2) => name2 !== ""))];
+        if (requestedPages.length > 0 && requestedFrames.length > 0 && JSON.stringify([...requestedPages].sort()) !== JSON.stringify([...requestedFrames].sort())) {
+          return generateError("page-scope-conflict", "pages \u4E0E deprecated frames \u6307\u5B9A\u4E86\u4E0D\u540C\u9875\u9762\uFF1B\u8BF7\u53EA\u4F20 pages\uFF0C\u6216\u786E\u4FDD\u4E24\u8005\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4");
+        }
+        const requested = requestedPages.length > 0 ? requestedPages : requestedFrames;
         const missing = requested.filter((name2) => !allNames.includes(name2));
-        if (missing.length > 0) return generateError("frame-not-found", `\u753B\u677F\u4E0A\u6CA1\u6709\u8FD9\u4E9B\u9875\u9762\uFF1A${missing.join("\u3001")}\u3002\u73B0\u6709\u9875\u9762\uFF1A${allNames.join("\u3001")}`);
+        if (missing.length > 0) return generateError("page-not-found", `\u753B\u677F\u4E0A\u6CA1\u6709\u8FD9\u4E9B\u9875\u9762\uFF1A${missing.join("\u3001")}\u3002\u73B0\u6709\u9875\u9762\uFF1A${allNames.join("\u3001")}`);
         const settings = await store.readGenerateSettings(args.root, target.name);
         if (!settings.ok) return generateError(settings.error.code, settings.error.message);
-        const inherited = settings.value === null ? null : str2(settings.value.visualDirection).trim() || null;
+        const inherited = settings.value === null ? null : str3(settings.value.visualDirection).trim() || null;
         const projectList = projects === void 0 ? null : await projects.list(args.root);
         const project = projectList?.ok === true ? projectList.value.find((candidate) => candidate.boardName === target.name) : void 0;
         const projectBrief = project?.brief;
         const briefPages = Array.isArray(projectBrief?.pages) ? projectBrief.pages.filter((value) => typeof value === "string" && allNames.includes(value)) : [];
-        const deferredStyle = str2(project?.deferredStyleNote).trim();
-        const connected = directlyConnectedFrames(board.value.scene.elements, requested);
+        const deferredStyle = str3(project?.deferredStyleNote).trim();
+        const connected = directlyConnectedPages(board.value.scene.elements, requested);
         const recommended = requested.length > 0 ? [...requested, ...connected] : briefPages.length > 0 ? briefPages : allNames.slice(0, Math.min(3, allNames.length));
         const recommendationReasons = /* @__PURE__ */ new Map();
         for (const name2 of requested) recommendationReasons.set(name2, "\u7528\u6237\u672C\u6B21\u660E\u786E\u70B9\u540D");
@@ -3947,7 +4211,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
           revision: 1,
           createdAt: now2,
           updatedAt: now2,
-          currentQuestion: pageScopeQuestion(frames, recommended, recommendationReasons),
+          currentQuestion: pageScopeQuestion(pages, recommended, recommendationReasons),
           selectedFrames: [],
           allFrames: allNames,
           unselectedFrames: [],
@@ -3981,7 +4245,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
       if (action === "revise") {
         const board = await store.read(args.root, draft.board);
         if (!board.ok) return generateError(board.error.code, board.error.message, draft);
-        if (args.questionId === "page-scope") draft.currentQuestion = pageScopeQuestion(namedFrames(board.value.scene.elements), draft.selectedFrames);
+        if (args.questionId === "page-scope") draft.currentQuestion = pageScopeQuestion(prototypePages(board.value.scene.elements), draft.selectedFrames);
         else if (args.questionId === "visual-direction") draft.currentQuestion = visualQuestion(board.value.scene.elements);
         else return generateError("invalid-question", "\u53EA\u80FD\u4FEE\u6539 page-scope \u6216 visual-direction", draft);
         draft.status = "question";
@@ -4004,8 +4268,8 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         if (question.id === "page-scope") {
           const selectedFrames = values.map((value) => optionFor(value)?.valueLabel ?? value);
           draft.selectedFrames = selectedFrames;
-          const scope = elementsInFrames(board.value.scene.elements, selectedFrames);
-          const inferred = inferDevice(scope.frames);
+          const scope = elementsInPages(board.value.scene.elements, selectedFrames);
+          const inferred = inferDevice(scope.pages);
           if (inferred === "mixed" || inferred === "ambiguous") {
             draft.currentQuestion = deviceQuestion();
             draft.status = "question";
@@ -4081,11 +4345,11 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 var SECTION_ORDER = 220;
 var DRAW2CODE_GUIDANCE = [
   "\u65B0\u9879\u76EE\u547D\u540D\u5951\u7EA6\uFF1A\u8C03\u7528 draw2code_create action=start \u524D\uFF0CAgent \u5FC5\u987B\u7406\u89E3\u5B8C\u6574 idea\uFF0C\u5E76\u76F4\u63A5\u6982\u62EC\u4E00\u4E2A\u901A\u5E38\u4E3A 4\u201312 \u4E2A\u4E2D\u6587\u5B57\u7B26\u7684\u8BED\u4E49\u5316 projectName\uFF1B\u540D\u79F0\u5E94\u8BA9\u7528\u6237\u4E00\u773C\u77E5\u9053\u4EA7\u54C1\u662F\u4EC0\u4E48\uFF0C\u4E0D\u80FD\u590D\u5236\u539F\u8BDD\u3001\u622A\u53D6\u524D N \u4E2A\u5B57\u7B26\u6216\u4F9D\u8D56\u5173\u952E\u8BCD\u62FC\u63A5\u89C4\u5219\u3002idea \u4ECD\u5B8C\u6574\u4FDD\u7559\uFF0CprojectName \u5FC5\u987B\u4F5C\u4E3A\u72EC\u7ACB\u53C2\u6570\u663E\u5F0F\u4F20\u5165\u3002\u5DE5\u5177\u53EA\u6821\u9A8C\u540D\u79F0\u662F\u5426\u5408\u6CD5\uFF0C\u4E0D\u8D1F\u8D23\u4ECE idea \u751F\u6210\u540D\u79F0\uFF1B\u786E\u8BA4\u540E\u753B\u677F\u540D\u76F4\u63A5\u4F7F\u7528 projectName\uFF0C\u4E0D\u8FFD\u52A0\u201C\u539F\u578B\u201D\u201C\u8349\u7A3F\u201D\u7B49\u6D41\u7A0B\u540E\u7F00\u3002",
-  'draw2code_update \u8C03\u7528\u5951\u7EA6\uFF1A\u63A8\u8350\u628A\u6BCF\u4E2A\u5143\u7D20\u5199\u6210 {op:"upsert",element:{id,type,x,y,...}}\uFF1B\u5DE5\u5177\u4E5F\u517C\u5BB9\u4E09\u79CD\u65E0\u6B67\u4E49 upsert \u7B80\u5199\u2014\u2014\u76F4\u63A5\u5143\u7D20 {id,type,...}\u3001\u7701\u7565 op \u7684 {element:{...}}\u3001\u4EE5\u53CA {op:"upsert",id,type,...}\u3002delete \u63A8\u8350 {op:"delete",id}\uFF0C\u540C\u65F6\u517C\u5BB9 id \u5199\u5728 elementId \u6216 element.id\u3002\u9875\u9762 frame \u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\uFF1B\u5E26 frameId \u7684\u9875\u9762\u5B50\u5143\u7D20\u4F18\u5148\u4E5F\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u3002\u82E5\u5B50\u5143\u7D20\u539F\u5750\u6807\u65E0\u6CD5\u653E\u8FDB frame\u3001\u4F46\u6309 frame \u5DE6\u4E0A\u89D2\u5E73\u79FB\u540E\u80FD\u5B8C\u6574\u653E\u5165\uFF0C\u5DE5\u5177\u4F1A\u628A\u5B83\u89C6\u4E3A frame \u5C40\u90E8\u5750\u6807\u5E76\u5B89\u5168\u6362\u7B97\uFF1B\u4E24\u79CD\u89E3\u91CA\u90FD\u4E0D\u6210\u7ACB\u65F6\u4ECD\u8FD4\u56DE layout-invalid\uFF0C\u4E0D\u8981\u731C\u6D4B\u6216\u53CD\u590D\u6539\u5199\u6574\u6279\u53C2\u6570\u3002',
+  'draw2code_update \u8C03\u7528\u5951\u7EA6\uFF1A\u63A8\u8350\u628A\u6BCF\u4E2A\u5143\u7D20\u5199\u6210 {op:"upsert",element:{id,type,x,y,...}}\uFF1B\u5DE5\u5177\u4E5F\u517C\u5BB9\u4E09\u79CD\u65E0\u6B67\u4E49 upsert \u7B80\u5199\u2014\u2014\u76F4\u63A5\u5143\u7D20 {id,type,...}\u3001\u7701\u7565 op \u7684 {element:{...}}\u3001\u4EE5\u53CA {op:"upsert",id,type,...}\u3002delete \u63A8\u8350 {op:"delete",id}\uFF0C\u540C\u65F6\u517C\u5BB9 id \u5199\u5728 elementId \u6216 element.id\u3002\u65B0\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u666E\u901A rectangle \u5916\u6846\uFF0C\u8BBE\u7F6E customData.role=prototype-page\u3001customData.pageName \u548C customData.mockDataMin\uFF1B\u9875\u9762\u540D\u7528\u5916\u6846\u4E0A\u65B9\u72EC\u7ACB text\uFF0C\u8BBE\u7F6E role=prototype-page-label \u4E0E pageId\u3002\u9875\u9762\u5B50\u5143\u7D20\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u5E76\u4FDD\u6301 frameId=null\uFF0C\u9875\u9762\u5F52\u5C5E\u7531\u51E0\u4F55\u4F4D\u7F6E\u5224\u65AD\u3002\u5DF2\u6709\u547D\u540D Frame \u7EE7\u7EED\u517C\u5BB9\uFF1B\u5176 frameId \u5B50\u5143\u7D20\u4ECD\u652F\u6301\u5B89\u5168\u7684\u5C40\u90E8\u5750\u6807\u6362\u7B97\uFF0C\u4F46\u4E0D\u4F1A\u81EA\u52A8\u8FC1\u79FB\u3002',
   '\u672C\u673A\u5DF2\u5B89\u88C5 dsh-draw2code \u63D2\u4EF6\uFF08\u753B\u7801 \xB7 Draw2Code\uFF09\uFF1ADSH Web GUI \u53F3\u4FA7 better-sidebar \u8FB9\u680F\u91CC\u7684\u300C\u753B\u7801\u300D\u6807\u7B7E\u9875\uFF08Excalidraw \u753B\u677F\uFF0C\u4ECE + \u83DC\u5355\u6216\u6807\u7B7E\u680F\u6253\u5F00\uFF09\u3002\u65B0\u9879\u76EE\u5DE5\u4F5C\u6D41\uFF1A\u7528\u6237\u8868\u8FBE\u201C\u6211\u60F3\u505A/\u521B\u5EFA/\u5F00\u53D1\u4E00\u4E2A\u65B0\u7684\u2026\u2026\u201D\u65F6\uFF0C\u5148\u8C03\u7528 draw2code_create action=start \u8FDB\u5165 choice-first grilling\uFF0C\u4E0D\u80FD\u76F4\u63A5\u8C03\u7528 draw2code_update\uFF1Bidea \u5FC5\u987B\u5FE0\u5B9E\u4F20\u5165\u7528\u6237\u539F\u8BDD\uFF0C\u4E0D\u8981\u5148\u66FF\u7528\u6237\u6269\u5199\u9700\u6C42\u3002\u6BCF\u6B21\u8FD4\u56DE question \u65F6\uFF0C\u4F18\u5148\u8C03\u7528\u5BBF\u4E3B ask_user_question\uFF0C\u4EE5\u4E00\u4E2A\u95EE\u9898\u548C\u5168\u90E8\u7ED3\u6784\u5316 options \u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\uFF0C\u5FC5\u987B\u4FDD\u7559\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u548C\u201C\u5176\u4ED6\u201D\u7B49\u9009\u9879\uFF0C\u7981\u6B62\u622A\u65AD\u9009\u9879\u6216\u53EA\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\uFF1B\u6536\u5230\u9009\u62E9\u540E\u628A label \u6620\u5C04\u56DE option id\uFF0C\u518D\u8C03\u7528 draw2code_create action=answer\u3002\u53EA\u6709\u5BBF\u4E3B\u6CA1\u6709 ask_user_question \u65F6\uFF0C\u624D\u9000\u5316\u4E3A\u7F16\u53F7\u6587\u672C\u3002\u7528\u6237\u8BF4\u201C\u7EE7\u7EED\u4E4B\u524D\u7684\u9879\u76EE\u201D\u4F46\u6CA1\u6709\u660E\u786E\u9879\u76EE\u65F6\uFF0C\u5148\u8C03\u7528 draw2code_create action=list\uFF0C\u8BA9\u7528\u6237\u9009\u62E9\u8349\u7A3F\uFF1B\u660E\u786E\u9879\u76EE\u540E\u7528 action=resume\u3002\u7528\u6237\u786E\u8BA4 ready \u7684\u9879\u76EE\u7B80\u62A5\u540E\uFF0C\u8C03\u7528 draw2code_create action=confirm\uFF1B\u53EA\u6709\u62FF\u5230 nextAction=draw2code_update \u548C boardName \u540E\uFF0C\u624D\u8C03\u7528 draw2code_update \u628A\u7B2C\u4E00\u8F6E\u6838\u5FC3\u539F\u578B\u753B\u5230\u8FD9\u4E2A\u65B0\u753B\u677F\u3002\u5DF2\u6709\u9879\u76EE\u5DE5\u4F5C\u6D41\uFF1A\u7528\u6237\u76F4\u63A5\u5728\u753B\u677F\u4E0A\u62D6\u6539\u3001\u5220\u6A21\u5757\u3001\u52A0\u6587\u6848\uFF1B\u4F60\u5148\u7528 draw2code_read \u8BFB\u53D6\u6700\u65B0\u753B\u677F\uFF0C\u518D\u7EE7\u7EED draw2code_update \u8FED\u4EE3\uFF1B\u6253\u78E8\u597D\u540E\u7528\u6237\u8BF4"\u6839\u636E\u753B\u677F\u751F\u6210\u9875\u9762"\uFF0C\u4F60\u8C03\u7528 draw2code_generate \u62FF\u5230\u8303\u56F4\u4E0E\u7EA6\u675F\u540E\u751F\u6210\u524D\u7AEF\u9875\u9762\u3002',
-  "draw2code_create \u7684 grilling SOP\uFF1A\u4F9D\u6B21\u8865\u9F50\u76EE\u6807\u7AEF\u3001\u6838\u5FC3\u7528\u6237\u3001\u6838\u5FC3\u76EE\u6807\u3001\u6700\u91CD\u8981\u7684\u7528\u6237\u6D41\u7A0B\u3001\u9996\u7248\u6838\u5FC3\u6A21\u5757\u3001\u9996\u8F6E\u6838\u5FC3\u9875\u9762\uFF1B\u7528\u6237\u539F\u8BDD\u5DF2\u7ECF\u660E\u786E App/Web/\u5C0F\u7A0B\u5E8F\u65F6\u5DE5\u5177\u4F1A\u9884\u586B\u5E76\u8DF3\u8FC7\u76EE\u6807\u7AEF\uFF0C\u7981\u6B62\u91CD\u590D\u8FFD\u95EE\u3002\u5E73\u53F0/\u7528\u6237/\u76EE\u6807/\u6D41\u7A0B\u9ED8\u8BA4\u5355\u9009\uFF0C\u6A21\u5757\u548C\u9875\u9762\u53EF\u591A\u9009\u3002\u5019\u9009\u9009\u9879\u662F\u5E2E\u52A9\u601D\u8003\u7684\u811A\u624B\u67B6\uFF0C\u4E0D\u9650\u5236\u7528\u6237\uFF1A\u7528\u6237\u53EF\u4EE5\u9009\u201C\u5176\u4ED6\u201D\u5E76\u8865\u5145\u6587\u5B57\uFF1B\u81EA\u7531\u6587\u5B57\u7531\u5DE5\u5177\u76F4\u63A5\u8BB0\u5F55\uFF0Cready \u7B80\u62A5\u662F\u552F\u4E00\u7EDF\u4E00\u786E\u8BA4\u70B9\uFF0C\u4E0D\u8981\u9010\u9879\u590D\u8FF0\u539F\u8BDD\u518D\u95EE\u201C\u8FD9\u6837\u7406\u89E3\u5BF9\u5417\u201D\u3002\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u53EF\u4EE5\u8DF3\u8FC7\uFF0C\u4F46\u8981\u4F5C\u4E3A\u663E\u5F0F\u5F85\u5B9A\u9879\u6216\u9ED8\u8BA4\u5047\u8BBE\u8BB0\u5F55\u3002\u9879\u76EE\u540D\u53EA\u4FDD\u7559\u6838\u5FC3\u4EA7\u54C1\u540D\uFF0C\u4E0D\u8981\u628A\u201C\u7C7B\u4F3C\u3001\u98CE\u683C\u3001\u901A\u8FC7\u3001\u529F\u80FD\u63CF\u8FF0\u201D\u7B49\u6574\u53E5\u585E\u8FDB\u9879\u76EE\u540D\u6216\u753B\u677F\u540D\uFF1BAPP/Web/\u5C0F\u7A0B\u5E8F/\u5E73\u53F0/\u7CFB\u7EDF\u7B49\u5B8C\u6574\u4EA7\u54C1\u7C7B\u578B\u4E0D\u80FD\u518D\u8FFD\u52A0\u201C\u5DE5\u5177\u201D\u3002draw2code_update \u7ED8\u5236\u65F6\uFF0C\u9875\u9762\u5FC5\u987B\u4F7F\u7528 frame\uFF0C\u7EC4\u4EF6\u5FC5\u987B\u6709\u6E05\u6670\u7684 text \u6807\u7B7E\u6216\u8BED\u4E49 customData\uFF1B\u4E0D\u8981\u628A\u6240\u6709\u63A7\u4EF6\u753B\u6210\u65E0\u6807\u7B7E\u7684\u65B9\u6846\u3002\u5FC5\u987B\u9010\u9875\u843D\u5B9E brief.pageMockData\uFF1A\u5217\u8868\u3001\u96F7\u8FBE\u3001\u804A\u5929\u3001\u56FE\u8868\u3001\u8BE6\u60C5\u548C\u72B6\u6001\u7EC4\u4EF6\u81F3\u5C11\u653E\u5165 3 \u6761\u5177\u6709\u771F\u5B9E\u8BED\u4E49\u7684\u793A\u4F8B\u5185\u5BB9\uFF0C\u5305\u542B\u7406\u89E3\u4EA7\u54C1\u6240\u9700\u7684\u5BF9\u8C61\u3001\u6570\u503C\u3001\u72B6\u6001\u3001\u65F6\u95F4\u6216\u6D88\u606F\uFF1B\u7981\u6B62\u7528\u7A7A\u767D\u65B9\u6846\u3001Lorem ipsum\u3001\u201C\u7528\u6237A\u201D\u201C\u6807\u9898\u201D\u201C\u5185\u5BB9\u201D\u7B49\u65E0\u610F\u4E49\u5360\u4F4D\u7B26\u4EE3\u66FF\u3002\u5B8C\u6574\u9875\u9762 frame \u8BBE\u7F6E customData.role=prototype-page \u548C customData.mockDataMin\uFF08\u901A\u5E38\u4E3A 3\uFF09\uFF0C\u6BCF\u6761\u627F\u8F7D mock \u6570\u636E\u7684\u53EF\u89C1 text \u8BBE\u7F6E customData.role=mock-data\uFF1Bdraw2code_update \u4F1A\u636E\u6B64\u6267\u884C\u5185\u5BB9\u53EF\u8BFB\u6027\u95E8\u7981\u3002\u4F18\u5148\u8868\u8FBE\u6309\u94AE\u3001\u8F93\u5165\u6846\u3001Tab\u3001\u5217\u8868\u3001\u5361\u7247\u3001\u5BFC\u822A\u548C\u7BAD\u5934\u7B49\u4EA7\u54C1\u8BED\u4E49\uFF0C\u4F4E\u4FDD\u771F\u53EA\u964D\u4F4E\u89C6\u89C9\u7CBE\u5EA6\uFF0C\u4E0D\u964D\u4F4E\u4FE1\u606F\u53EF\u8BFB\u6027\u3002\u5177\u4F53\u51E0\u4F55\u89C4\u5219\uFF1A\u9875\u9762\u5185\u5143\u7D20\u7528 frameId \u6307\u5411\u9875\u9762 frame\uFF0C\u7EDD\u4E0D\u80FD\u7528 containerId \u8868\u793A\u9875\u9762\u5F52\u5C5E\uFF1BcontainerId \u53EA\u7528\u4E8E\u7ED1\u5B9A rectangle/diamond/ellipse \u7684\u552F\u4E00\u6587\u5B57\u6807\u7B7E\u3002\u82E5 Agent \u8BEF\u628A text.containerId \u6307\u5411 frame\uFF0Cdraw2code_update \u4F1A\u81EA\u52A8\u4FEE\u590D\u4E3A frameId\uFF0C\u907F\u514D mock \u6570\u636E\u5199\u8FDB JSON \u5374\u5728\u753B\u5E03\u4E0A\u4E0D\u53EF\u89C1\u3002\u591A\u884C\u6216\u9884\u8BA1\u6362\u884C\u7684 text \u5FC5\u987B\u7ED9\u8DB3 height\uFF1B\u6309\u94AE\u3001\u5361\u7247\u548C\u8F93\u5165\u6846\u7684\u5916\u6846\u4E0D\u80FD\u643A\u5E26 text\uFF0C\u5FC5\u987B\u7528\u72EC\u7ACB text \u5B50\u5143\u7D20\uFF1B\u4E00\u4E2A\u5916\u6846\u53EA\u6709\u4E00\u4E2A\u6807\u7B7E\u65F6\u7ED9 text \u8BBE\u7F6E containerId\uFF0C\u5E76\u5728\u5916\u6846\u6216\u6587\u5B57\u7684 customData.role \u58F0\u660E button/primary-action/select/input/chip/card \u7B49\u7EC4\u4EF6\u8BED\u4E49\uFF0C\u7F3A\u5931 role \u4F1A\u88AB\u62D2\u7EDD\u3002draw2code_update \u4F1A\u8865\u9F50\u5916\u6846\u7684 boundElements\uFF1Bbutton/primary-action/chip/tab \u6587\u6848\u4F1A\u89C4\u8303\u4E3A center/middle\uFF0C\u5E76\u628A\u6587\u5B57\u76D2\u7F29\u81F3\u771F\u5B9E\u884C\u9AD8\u540E\u6309\u5916\u6846\u51E0\u4F55\u5782\u76F4\u5C45\u4E2D\uFF1Binput/select/dropdown/search-field \u6587\u6848\u89C4\u8303\u4E3A left/middle\u3002\u4E00\u4E2A\u5916\u6846\u6709\u591A\u4E2A\u6807\u7B7E\uFF08\u4F8B\u5982\u5E95\u90E8\u5BFC\u822A\uFF09\u65F6\u4E0D\u8981\u628A\u591A\u4E2A text \u7ED1\u5B9A\u5230\u540C\u4E00 containerId\uFF0C\u53EF\u7528\u76F8\u540C groupIds \u8868\u8FBE\u5206\u7EC4\u3002\u79FB\u52A8\u7AEF frame \u5148\u9884\u7559\u5E95\u90E8\u5B89\u5168\u533A\uFF0C\u5E95\u90E8\u5BFC\u822A\u7528 customData.role=bottom-navigation \u7684\u77E9\u5F62 shell \u52A0\u72EC\u7ACB\u6807\u7B7E\uFF0C\u6BCF\u4E2A\u6807\u7B7E\u8BBE\u7F6E customData.role=bottom-navigation-item\uFF1B\u5373\u4F7F\u8BEF\u7ED1 shell\uFF0C\u5DE5\u5177\u4E5F\u4F1A\u62C6\u4E3A\u72EC\u7ACB\u680F\u76EE\u5E76\u5C45\u4E2D\u3002\u5BFC\u822A\u8D34\u8FD1 frame \u5E95\u90E8\uFF0C\u680F\u76EE\u69FD\u4F4D\u4E0D\u5F97\u91CD\u53E0\uFF0C\u4E0D\u80FD\u53EA\u6709\u7A7A shell\uFF0C\u4E5F\u4E0D\u8981\u7528\u4E00\u884C\u666E\u901A\u6587\u5B57\u4EE3\u66FF\u3002\u7EC4\u4EF6\u4E0D\u8981\u88AB frame \u8FB9\u754C\u622A\u65AD\u3002draw2code_update \u4F1A\u5728\u5199\u76D8\u524D\u6267\u884C layout-invalid \u9884\u68C0\uFF0C\u5931\u8D25\u65F6\u6309\u9519\u8BEF\u4FE1\u606F\u4FEE\u6B63\u5E76\u91CD\u8BD5\uFF0C\u4E0D\u8981\u628A\u5931\u8D25\u7ED3\u679C\u62A5\u544A\u4E3A\u5DF2\u753B\u597D\u3002\u539F\u578B\u9636\u6BB5\u4E0D\u8BE2\u95EE\u54C1\u724C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u3001\u9634\u5F71\u30013D/2D\u3001\u6241\u5E73/\u62DF\u7269\u7B49\u89C6\u89C9\u98CE\u683C\uFF1B\u4F46\u539F\u578B\u4E5F\u4E0D\u80FD\u53EA\u6709\u9ED1\u767D\u7A7A\u6846\uFF0C\u5E94\u4F7F\u7528\u514B\u5236\u7684\u8BED\u4E49\u8272\u5E2E\u52A9\u626B\u8BFB\uFF1A\u4E3B\u8981\u64CD\u4F5C/\u9009\u4E2D\u6001\u7528 primary\uFF0C\u5B8C\u6210/\u6B63\u5411\u72B6\u6001\u7528 success\uFF0C\u63D0\u9192\u7528 warning\uFF0C\u903E\u671F/\u9519\u8BEF\u7528 danger\uFF0C\u6B21\u7EA7\u5206\u7C7B\u53EF\u7528 info\uFF0C\u5F31\u4FE1\u606F\u7528 neutral\u3002\u901A\u8FC7\u5F62\u72B6 customData.tone=primary|success|warning|danger|info|neutral \u83B7\u53D6\u6D45\u5E95\u8272\u548C\u5BF9\u5E94\u63CF\u8FB9\uFF1B\u6BCF\u9875\u53EA\u5728\u7C7B\u522B\u3001\u72B6\u6001\u3001\u4E3B\u8981\u64CD\u4F5C\u7B49\u6709\u610F\u4E49\u7684\u4F4D\u7F6E\u4F7F\u7528\uFF0C\u6B63\u6587\u548C\u5927\u9762\u79EF\u5BB9\u5668\u4FDD\u6301\u4E2D\u6027\u3002\u7528\u6237\u4E3B\u52A8\u63D0\u5230\u7684\u54C1\u724C\u6216\u89C6\u89C9\u98CE\u683C\u53EA\u4F5C\u4E3A styleNote \u5EF6\u8FDF\u7ED9 draw2code_generate\u3002\u4E13\u4E1A\u7528\u6237\u56DE\u7B54\u5177\u4F53\u65F6\u51CF\u5C11\u8FFD\u95EE\uFF0C\u975E\u4E13\u4E1A\u7528\u6237\u6A21\u7CCA\u65F6\u7528\u4F8B\u5B50\u548C\u9009\u9879\u5F15\u5BFC\u3002",
-  "\u8981\u70B9\uFF1A\u753B\u677F\u6587\u4EF6\u662F\u5DE5\u4F5C\u533A\u91CC\u7684 draw2code/<name>.excalidraw.json\uFF08\u7528\u6237\u53EF\u5728\u753B\u677F\u5DE5\u5177\u680F\u5207\u6362/\u65B0\u5EFA\u591A\u5757\u753B\u677F\uFF0C\u5982 prototype / \u987E\u5BA2\u7AEF / \u5E97\u5BB6\u7AEF\uFF09\uFF1B\u753B\u677F\u4F1A\u628A\u5F53\u524D\u9009\u4E2D\u7684\u540D\u5B57\u540C\u6B65\u5230\u5DE5\u4F5C\u533A\uFF0CAgent \u5DE5\u5177\u7701\u7565 name \u65F6\u5FC5\u987B\u66F4\u65B0\u7528\u6237\u5F53\u524D\u6B63\u5728\u770B\u7684\u753B\u677F\uFF0C\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u4F20 name\u3002draw2code_list \u4F1A\u8FD4\u56DE\u5F53\u524D\u753B\u677F\u3002\u5DE5\u5177 root \u53C2\u6570\u586B\u4F1A\u8BDD\u5DE5\u4F5C\u76EE\u5F55\u3002draw2code_update \u7528 ops \u6279\u91CF upsert/delete\uFF08\u6309 id \u5E42\u7B49\uFF09\uFF0C\u5143\u7D20\u5750\u6807\u4E3A\u753B\u5E03\u50CF\u7D20\uFF08y \u5411\u4E0B\uFF09\uFF0Ctext \u5143\u7D20\u9700\u7ED9 text \u5B57\u6BB5\uFF0C\u6A21\u5757\u5206\u7EC4\u7528 frame\uFF0C\u6D41\u7A0B\u7528 arrow\uFF08points \u76F8\u5BF9\u5750\u6807 [[0,0],[dx,dy]]\uFF09\u3002\u4E25\u7981\u7528 Bash\u3001\u811A\u672C\u6216\u76F4\u63A5\u6587\u4EF6\u5199\u5165\u4FEE\u6539 .excalidraw.json\uFF0C\u5FC5\u987B\u8D70 draw2code_update\uFF0C\u5426\u5219\u65E0\u6CD5\u8FDB\u884C\u51B2\u7A81\u548C\u5199\u5165\u9A8C\u8BC1\u3002\u753B\u5B8C\u539F\u578B\u4E3B\u52A8\u63D0\u793A\u7528\u6237\uFF1A\u53EF\u4EE5\u5728\u53F3\u4FA7\u753B\u677F\u4E0A\u76F4\u63A5\u62D6\u6539\u3001\u5220\u6539\u6216\u8865\u5145\u6587\u6848\u3002",
-  "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002frames \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684 frame\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1B\u5DE5\u5177\u59CB\u7EC8\u8FD4\u56DE\u753B\u677F\u5168\u90E8 frame\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\uFF1B\u5DE5\u5177\u4F1A\u628A\u8FD9\u4E00\u9009\u62E9\u5C55\u5F00\u4E3A\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u4E0D\u8981\u518D\u5411\u7528\u6237\u9010\u9879\u786E\u8BA4\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u753B\u677F\u662F\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\u7684\u4E8B\u5B9E\u6765\u6E90\uFF0C\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u6700\u7EC8\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u65B0\u6392\u7248\uFF0C\u7981\u6B62\u7167\u642C Excalidraw \u7EDD\u5BF9\u5750\u6807\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u76EE\u6807\u89C6\u53E3\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u6A2A\u5411\u6EA2\u51FA\u3001\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u548C\u5E95\u90E8\u5BFC\u822A\uFF0C\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u5B9E\u73B0\u95EE\u9898\u81EA\u52A8\u4FEE\u590D\u5E76\u91CD\u9A8C\u3002\u5168\u90E8\u901A\u8FC7\u540E\u63D0\u4EA4\u5305\u542B previewUrl\u3001viewports\u3001\u9010\u9875 screenshots\u3001consoleErrors\u3001domChecks\u3001layoutChecks \u548C interactionChecks \u7684 verificationEvidence\uFF0C\u518D\u8C03\u7528 action=complete\uFF1B\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4E0D\u80FD\u66FF\u4EE3\u8BC1\u636E\u3002\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
+  "draw2code_create \u7684 grilling SOP\uFF1A\u4F9D\u6B21\u8865\u9F50\u76EE\u6807\u7AEF\u3001\u6838\u5FC3\u7528\u6237\u3001\u6838\u5FC3\u76EE\u6807\u3001\u6700\u91CD\u8981\u7684\u7528\u6237\u6D41\u7A0B\u3001\u9996\u7248\u6838\u5FC3\u6A21\u5757\u3001\u9996\u8F6E\u6838\u5FC3\u9875\u9762\uFF1B\u7528\u6237\u539F\u8BDD\u5DF2\u7ECF\u660E\u786E App/Web/\u5C0F\u7A0B\u5E8F\u65F6\u5DE5\u5177\u4F1A\u9884\u586B\u5E76\u8DF3\u8FC7\u76EE\u6807\u7AEF\uFF0C\u7981\u6B62\u91CD\u590D\u8FFD\u95EE\u3002\u5E73\u53F0/\u7528\u6237/\u76EE\u6807/\u6D41\u7A0B\u9ED8\u8BA4\u5355\u9009\uFF0C\u6A21\u5757\u548C\u9875\u9762\u53EF\u591A\u9009\u3002\u5019\u9009\u9009\u9879\u662F\u5E2E\u52A9\u601D\u8003\u7684\u811A\u624B\u67B6\uFF0C\u4E0D\u9650\u5236\u7528\u6237\uFF1A\u7528\u6237\u53EF\u4EE5\u9009\u201C\u5176\u4ED6\u201D\u5E76\u8865\u5145\u6587\u5B57\uFF1B\u81EA\u7531\u6587\u5B57\u7531\u5DE5\u5177\u76F4\u63A5\u8BB0\u5F55\uFF0Cready \u7B80\u62A5\u662F\u552F\u4E00\u7EDF\u4E00\u786E\u8BA4\u70B9\uFF0C\u4E0D\u8981\u9010\u9879\u590D\u8FF0\u539F\u8BDD\u518D\u95EE\u201C\u8FD9\u6837\u7406\u89E3\u5BF9\u5417\u201D\u3002\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u53EF\u4EE5\u8DF3\u8FC7\uFF0C\u4F46\u8981\u4F5C\u4E3A\u663E\u5F0F\u5F85\u5B9A\u9879\u6216\u9ED8\u8BA4\u5047\u8BBE\u8BB0\u5F55\u3002\u9879\u76EE\u540D\u53EA\u4FDD\u7559\u6838\u5FC3\u4EA7\u54C1\u540D\uFF0C\u4E0D\u8981\u628A\u201C\u7C7B\u4F3C\u3001\u98CE\u683C\u3001\u901A\u8FC7\u3001\u529F\u80FD\u63CF\u8FF0\u201D\u7B49\u6574\u53E5\u585E\u8FDB\u9879\u76EE\u540D\u6216\u753B\u677F\u540D\uFF1BAPP/Web/\u5C0F\u7A0B\u5E8F/\u5E73\u53F0/\u7CFB\u7EDF\u7B49\u5B8C\u6574\u4EA7\u54C1\u7C7B\u578B\u4E0D\u80FD\u518D\u8FFD\u52A0\u201C\u5DE5\u5177\u201D\u3002draw2code_update \u7ED8\u5236\u65B0\u9875\u9762\u65F6\u5FC5\u987B\u4F7F\u7528\u666E\u901A rectangle \u5916\u6846\u5E76\u8BBE\u7F6E customData.role=prototype-page\u3001pageName \u548C mockDataMin\uFF1B\u5916\u6846\u4E0A\u65B9\u7528\u72EC\u7ACB prototype-page-label text \u663E\u793A\u9875\u9762\u540D\uFF0C\u9875\u9762\u5B50\u5143\u7D20\u5168\u90E8\u4F7F\u7528\u753B\u5E03\u7EDD\u5BF9\u5750\u6807\u5E76\u4FDD\u6301 frameId=null\u3002\u5DF2\u6709\u547D\u540D Frame \u53EA\u4F5C\u4E3A\u65E7\u753B\u677F\u517C\u5BB9\uFF0C\u4E0D\u7528\u4E8E\u65B0\u9875\u9762\u3002\u7EC4\u4EF6\u5FC5\u987B\u6709\u6E05\u6670 text \u6807\u7B7E\u6216\u8BED\u4E49 customData\uFF0C\u4E0D\u8981\u628A\u6240\u6709\u63A7\u4EF6\u753B\u6210\u65E0\u6807\u7B7E\u65B9\u6846\u3002\u5FC5\u987B\u9010\u9875\u843D\u5B9E brief.pageMockData\uFF1A\u5217\u8868\u3001\u96F7\u8FBE\u3001\u804A\u5929\u3001\u56FE\u8868\u3001\u8BE6\u60C5\u548C\u72B6\u6001\u7EC4\u4EF6\u81F3\u5C11\u653E\u5165 3 \u6761\u5177\u6709\u771F\u5B9E\u8BED\u4E49\u7684\u793A\u4F8B\u5185\u5BB9\uFF0C\u5305\u542B\u5BF9\u8C61\u3001\u6570\u503C\u3001\u72B6\u6001\u3001\u65F6\u95F4\u6216\u6D88\u606F\uFF1B\u6BCF\u6761\u627F\u8F7D mock \u6570\u636E\u7684\u53EF\u89C1 text \u8BBE\u7F6E role=mock-data\uFF0C\u7981\u6B62\u7528\u7A7A\u767D\u65B9\u6846\u3001Lorem ipsum\u3001\u201C\u7528\u6237A\u201D\u201C\u6807\u9898\u201D\u201C\u5185\u5BB9\u201D\u7B49\u65E0\u610F\u4E49\u5360\u4F4D\u7B26\u3002\u4F18\u5148\u8868\u8FBE\u6309\u94AE\u3001\u8F93\u5165\u6846\u3001Tab\u3001\u5217\u8868\u3001\u5361\u7247\u3001\u5BFC\u822A\u548C\u7BAD\u5934\u7B49\u4EA7\u54C1\u8BED\u4E49\uFF0C\u4F4E\u4FDD\u771F\u53EA\u964D\u4F4E\u89C6\u89C9\u7CBE\u5EA6\uFF0C\u4E0D\u964D\u4F4E\u4FE1\u606F\u53EF\u8BFB\u6027\u3002containerId \u53EA\u7528\u4E8E\u7ED1\u5B9A rectangle/diamond/ellipse \u7684\u552F\u4E00\u6587\u5B57\u6807\u7B7E\uFF0C\u4E0D\u80FD\u8868\u793A\u9875\u9762\u5F52\u5C5E\uFF1B\u4E00\u4E2A\u5916\u6846\u53EA\u6709\u4E00\u4E2A\u6807\u7B7E\u65F6\u7ED9 text \u8BBE\u7F6E containerId\uFF0C\u5E76\u5728\u5916\u6846\u6216\u6587\u5B57\u4E0A\u58F0\u660E button/primary-action/select/input/chip/card \u7B49\u7EC4\u4EF6 role\u3002button/primary-action/chip/tab \u6587\u6848\u89C4\u8303\u4E3A center/middle\uFF0Cinput/select/dropdown/search-field \u6587\u6848\u89C4\u8303\u4E3A left/middle\u3002\u5E95\u90E8\u5BFC\u822A\u4F7F\u7528 role=bottom-navigation \u7684\u77E9\u5F62 shell \u52A0\u72EC\u7ACB role=bottom-navigation-item \u6807\u7B7E\uFF0C\u8D34\u8FD1\u9875\u9762\u77E9\u5F62\u5E95\u90E8\u5B89\u5168\u533A\uFF0C\u680F\u76EE\u69FD\u4F4D\u4E0D\u5F97\u91CD\u53E0\u3002\u7EC4\u4EF6\u4E0D\u8981\u8D8A\u51FA\u9875\u9762\u8FB9\u754C\uFF1B\u8DE8\u9875\u7BAD\u5934\u4FDD\u6301\u753B\u5E03\u7EA7\uFF0C\u4E0D\u80FD\u8BBE\u7F6E frameId\u3002draw2code_update \u4F1A\u5728\u5199\u76D8\u524D\u6267\u884C layout-invalid \u9884\u68C0\uFF0C\u5931\u8D25\u65F6\u6309\u9519\u8BEF\u4FE1\u606F\u4FEE\u6B63\u5E76\u91CD\u8BD5\uFF0C\u4E0D\u8981\u628A\u5931\u8D25\u7ED3\u679C\u62A5\u544A\u4E3A\u5DF2\u753B\u597D\u3002\u539F\u578B\u9636\u6BB5\u4E0D\u8BE2\u95EE\u54C1\u724C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u3001\u9634\u5F71\u30013D/2D\u3001\u6241\u5E73/\u62DF\u7269\u7B49\u89C6\u89C9\u98CE\u683C\uFF1B\u4F46\u539F\u578B\u4E5F\u4E0D\u80FD\u53EA\u6709\u9ED1\u767D\u7A7A\u6846\uFF0C\u5E94\u4F7F\u7528\u514B\u5236\u8BED\u4E49\u8272\u5E2E\u52A9\u626B\u8BFB\uFF1Aprimary\u3001success\u3001warning\u3001danger\u3001info\u3001neutral\u3002\u7528\u6237\u4E3B\u52A8\u63D0\u5230\u7684\u54C1\u724C\u6216\u89C6\u89C9\u98CE\u683C\u53EA\u4F5C\u4E3A styleNote \u5EF6\u8FDF\u7ED9 draw2code_generate\u3002\u4E13\u4E1A\u7528\u6237\u56DE\u7B54\u5177\u4F53\u65F6\u51CF\u5C11\u8FFD\u95EE\uFF0C\u975E\u4E13\u4E1A\u7528\u6237\u6A21\u7CCA\u65F6\u7528\u4F8B\u5B50\u548C\u9009\u9879\u5F15\u5BFC\u3002",
+  "\u8981\u70B9\uFF1A\u753B\u677F\u6587\u4EF6\u662F\u5DE5\u4F5C\u533A\u91CC\u7684 draw2code/<name>.excalidraw.json\uFF08\u7528\u6237\u53EF\u5728\u753B\u677F\u5DE5\u5177\u680F\u5207\u6362/\u65B0\u5EFA\u591A\u5757\u753B\u677F\uFF0C\u5982 prototype / \u987E\u5BA2\u7AEF / \u5E97\u5BB6\u7AEF\uFF09\uFF1B\u753B\u677F\u4F1A\u628A\u5F53\u524D\u9009\u4E2D\u7684\u540D\u5B57\u540C\u6B65\u5230\u5DE5\u4F5C\u533A\uFF0CAgent \u5DE5\u5177\u7701\u7565 name \u65F6\u5FC5\u987B\u66F4\u65B0\u7528\u6237\u5F53\u524D\u6B63\u5728\u770B\u7684\u753B\u677F\uFF0C\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u4F20 name\u3002draw2code_list \u4F1A\u8FD4\u56DE\u5F53\u524D\u753B\u677F\u3002\u5DE5\u5177 root \u53C2\u6570\u586B\u4F1A\u8BDD\u5DE5\u4F5C\u76EE\u5F55\u3002draw2code_update \u7528 ops \u6279\u91CF upsert/delete\uFF08\u6309 id \u5E42\u7B49\uFF09\uFF0C\u5143\u7D20\u5750\u6807\u4E3A\u753B\u5E03\u50CF\u7D20\uFF08y \u5411\u4E0B\uFF09\uFF0Ctext \u5143\u7D20\u9700\u7ED9 text \u5B57\u6BB5\uFF1B\u65B0\u9875\u9762\u7528 prototype-page rectangle\uFF0C\u9875\u9762\u5185\u6A21\u5757\u4FDD\u6301\u81EA\u7531\u5143\u7D20\uFF0C\u6D41\u7A0B\u7528 arrow\uFF08points \u76F8\u5BF9\u5750\u6807 [[0,0],[dx,dy]]\uFF09\u3002\u4E0D\u8981\u4E3A\u4E86\u9875\u9762\u5F52\u5C5E\u7ED9\u65B0\u5143\u7D20\u8BBE\u7F6E frameId\uFF0C\u4E5F\u4E0D\u8981\u628A\u6574\u9875\u5F3A\u5236\u6210\u7EC4\uFF1B\u8FD9\u6837\u7528\u6237\u53EF\u4EE5\u81EA\u7531\u7F16\u8F91\uFF0C\u624B\u7ED8\u8DE8\u9875\u7BAD\u5934\u4E5F\u4E0D\u4F1A\u88AB Frame \u88C1\u5207\u3002\u4E25\u7981\u7528 Bash\u3001\u811A\u672C\u6216\u76F4\u63A5\u6587\u4EF6\u5199\u5165\u4FEE\u6539 .excalidraw.json\uFF0C\u5FC5\u987B\u8D70 draw2code_update\uFF0C\u5426\u5219\u65E0\u6CD5\u8FDB\u884C\u51B2\u7A81\u548C\u5199\u5165\u9A8C\u8BC1\u3002\u753B\u5B8C\u539F\u578B\u4E3B\u52A8\u63D0\u793A\u7528\u6237\uFF1A\u53EF\u4EE5\u5728\u53F3\u4FA7\u753B\u677F\u4E0A\u76F4\u63A5\u62D6\u6539\u3001\u5220\u6539\u6216\u8865\u5145\u6587\u6848\u3002",
+  "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002pages \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684\u9875\u9762\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1Bframes \u4EC5\u662F\u65E7\u8C03\u7528\u517C\u5BB9\u522B\u540D\uFF0C\u4E24\u8005\u540C\u65F6\u4F20\u5165\u65F6\u5FC5\u987B\u4E00\u81F4\u3002\u5DE5\u5177\u4F1A\u8BC6\u522B\u65B0 prototype-page rectangle \u548C\u65E7\u547D\u540D Frame\uFF0C\u8FD4\u56DE\u753B\u677F\u5168\u90E8\u9875\u9762\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\uFF1B\u5DE5\u5177\u4F1A\u628A\u8FD9\u4E00\u9009\u62E9\u5C55\u5F00\u4E3A\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u4E0D\u8981\u518D\u5411\u7528\u6237\u9010\u9879\u786E\u8BA4\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements\u3001pageRelations \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u753B\u677F\u662F\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\u7684\u4E8B\u5B9E\u6765\u6E90\uFF0C\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u6700\u7EC8\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u65B0\u6392\u7248\uFF0C\u7981\u6B62\u7167\u642C Excalidraw \u7EDD\u5BF9\u5750\u6807\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u76EE\u6807\u89C6\u53E3\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u6A2A\u5411\u6EA2\u51FA\u3001\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u548C\u5E95\u90E8\u5BFC\u822A\uFF0C\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u5B9E\u73B0\u95EE\u9898\u81EA\u52A8\u4FEE\u590D\u5E76\u91CD\u9A8C\u3002\u5168\u90E8\u901A\u8FC7\u540E\u63D0\u4EA4\u5305\u542B previewUrl\u3001viewports\u3001\u9010\u9875 screenshots\u3001consoleErrors\u3001domChecks\u3001layoutChecks \u548C interactionChecks \u7684 verificationEvidence\uFF0C\u518D\u8C03\u7528 action=complete\uFF1B\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4E0D\u80FD\u66FF\u4EE3\u8BC1\u636E\u3002\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
   "generate \u8BC1\u636E\u4E0E\u9875\u9762\u4FDD\u62A4\u8865\u5145\uFF1A\u6BCF\u4E2A\u9875\u9762\u5FC5\u987B\u7528 <!-- d2c-page:<\u9875\u9762\u539F\u540D>:start/end --> \u6CE8\u91CA\u5305\u4F4F\uFF0C\u91CD\u65B0\u751F\u6210\u65F6\u5DE5\u5177\u4F1A\u76F4\u63A5\u6BD4\u8F83\u672A\u9009\u9875\u9762\u5757\u7684\u54C8\u5E0C\u3002verificationEvidence \u5FC5\u987B\u5E26\u672C\u6B21\u9A8C\u6536\u552F\u4E00 captureId \u548C\u5F53\u524D\u751F\u6210\u5165\u53E3 outputSha256\uFF1BpreviewUrl \u8FD4\u56DE\u5185\u5BB9\u7684\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\u3002screenshots \u548C domSnapshots \u90FD\u5FC5\u987B\u4FDD\u5B58\u4E3A workspace \u5185\u771F\u5B9E\u6587\u4EF6\uFF0C\u643A\u5E26\u540C\u4E00\u4E2A captureId \u4E0E\u5404\u81EA sha256\uFF1B\u622A\u56FE\u5FC5\u987B\u662F\u4E0E viewport \u5C3A\u5BF8\u4E00\u81F4\u7684\u53EF\u89E3\u538B PNG\uFF0CDOM \u5FEB\u7167\u5FC5\u987B\u5305\u542B\u539F\u578B\u4E2D\u7684\u5173\u952E\u6587\u6848\u548C mock \u6570\u636E\u3002consoleErrors \u4E0E consoleWarnings \u90FD\u5FC5\u987B\u662F\u7A7A\u6570\u7EC4\uFF1B\u591A\u9875\u9762\u751F\u6210\u8FD8\u5FC5\u987B\u63D0\u4EA4 page-switching \u68C0\u67E5\u3002\u65E7\u7684 previewOpened\u3001selectedPagesVisible\u3001coreFlowPassed\u3001mockDataVisible \u548C unselectedPagesPreserved \u53EA\u4FDD\u7559\u53C2\u6570\u517C\u5BB9\uFF0C\u4E0D\u518D\u80FD\u5355\u72EC\u5B8C\u6210\u9A8C\u6536\u3002",
   "\u753B\u7F16\u8F91\u534F\u4F5C\u89C4\u5219\uFF1A\u6BCF\u6B21 draw2code_update \u90FD\u5E94\u5148\u8F93\u51FA\u4E00\u6BB5\u201C\u66F4\u65B0\u6458\u8981\u201D\uFF08\u4E0D\u662F\u6A21\u677F\u5316\u63D0\u95EE\uFF09\uFF1A1) \u4E0A\u4E00\u8F6E\u7528\u6237\u624B\u5DE5\u6539\u52A8\uFF1B2) \u8FD9\u4E00\u8F6E\u8BA1\u5212\u6539\u52A8\uFF1B3) \u51B2\u7A81\u68C0\u67E5\uFF08\u662F\u5426\u89E6\u53CA\u624B\u5DE5\u6539\u52A8\u6216\u66FF\u6362/\u6E05\u7A7A\uFF09\u3002\u53EA\u6709\u201C\u51B2\u7A81\u201D\u65F6\u624D\u8981\u6C42\u786E\u8BA4\uFF0C\u8FD4\u56DE pending \u540E\u8BF7\u53EA\u8BE2\u95EE\u76F8\u5173\u53D8\u66F4\u662F\u5426\u8986\u76D6\uFF1B\u6CA1\u51B2\u7A81\u5219\u76F4\u63A5\u6267\u884C\u5E76\u6C47\u62A5\u7ED3\u679C\uFF08\u4E0D\u6253\u65AD\u7528\u6237\uFF09\u3002\u5DE5\u5177\u8FD4\u56DE\u524D\u4F1A\u91CD\u65B0\u8BFB\u53D6\u540C\u4E00\u753B\u677F\u9A8C\u8BC1\u5199\u5165\uFF1B\u53EA\u6709\u8FD4\u56DE verified=true \u4E14 targetBoard \u4E0E activeBoard \u76F8\u540C\uFF0C\u624D\u80FD\u8BF4\u201C\u7528\u6237\u5F53\u524D\u753B\u677F\u5DF2\u753B\u597D\u201D\uFF1B\u82E5 verified=true \u4F46\u4E24\u8005\u4E0D\u540C\uFF0C\u5FC5\u987B\u660E\u786E\u8BF4\u201C\u76EE\u6807\u753B\u677F\u5DF2\u5199\u5165\u3001\u5F53\u524D\u754C\u9762\u4E0D\u53EF\u89C1\u201D\uFF0C\u4E0D\u80FD\u58F0\u79F0\u7528\u6237\u5DF2\u770B\u5230\u3002\u82E5\u68C0\u6D4B\u5230\u624B\u5DE5\u6539\u52A8\u4E0E\u672C\u8F6E upsert/delete \u540C id\u3001\u6216\u6267\u884C clear/replace \u4E14\u9762\u677F\u975E\u7A7A\uFF0C\u5C31\u5E94\u8FDB\u5165\u786E\u8BA4\u6D41\u7A0B\uFF1B\u786E\u8BA4\u540E\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002",
   "\u9650\u5236\uFF1A\u5355\u753B\u677F \u22642000 \u5143\u7D20\u3001\u2264512KB\uFF1B\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u5148 draw2code_read \u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5E26\u81EA\u52A8\u7248\u672C\u5B58\u6863\uFF1A\u4F60\u7684\u6BCF\u6B21 draw2code_update \u90FD\u4F1A\u5148\u5FEB\u7167\u65E7\u72B6\u6001\uFF08\u7528\u6237\u53EF\u5728\u300C\u5386\u53F2\u300D\u83DC\u5355\u56DE\u6EDA\u4EFB\u610F\u7248\u672C\uFF09\uFF0C\u56E0\u6B64\u5927\u6539\u4E0D\u5FC5\u72B9\u8C6B\u3002\u7528\u6237\u63D0\u5230\u300C\u753B\u677F / \u539F\u578B / \u753B\u4E00\u4E0B / draw2code / \u753B\u7801\u300D\u65F6\u5373\u6307\u672C\u63D2\u4EF6\uFF0C\u8BF7\u636E\u6B64\u534F\u4F5C\u3002"

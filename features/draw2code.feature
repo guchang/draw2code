@@ -14,7 +14,22 @@ Feature: 画码原型板的人机协作
     When agent 请求读取 workspace 外的目录
     Then 应拒绝请求并返回 workspace-unknown
 
-  Scenario: agent 批量 upsert 后必须读回验证
+  Scenario: Agent 新建原型页面必须使用普通矩形页面外框
+    When agent 新增 type 为 rectangle 且 customData.role 为 prototype-page 的“任务列表”页面
+    And 页面外框的 customData.pageName 为“任务列表”
+    And agent 在页面外框上方新增 customData.role 为 prototype-page-label 的独立标题
+    Then 页面外框不应是 Excalidraw frame
+    And 页面内部所有控件的 frameId 应为 null
+    And 页面控件不应被统一加入 group
+    And 用户手工绘制的跨页箭头不应被页面边界裁切
+
+  Scenario: Agent 不应把新的 prototype-page 写成 Frame
+    When agent 新增 type 为 frame 且 customData.role 为 prototype-page 的页面
+    Then draw2code_update 应返回 prototype-page-frame-deprecated
+    And 工具应提示改用带 pageName 的 rectangle 页面外框和外部页面标题
+    But 更新已有 legacy Frame 或创建普通非页面 Frame 仍然允许
+
+  Scenario: 兼容旧 Frame 的批量 upsert 仍必须读回验证
     When agent 使用一个 upsert 操作新增 id 为“login-frame”的 frame
     And agent 使用一个 upsert 操作新增位于该 frame 内的 text 元素“用户登录页”
     Then 画板文件中应存在这两个元素
@@ -150,6 +165,38 @@ Feature: 画码原型板的人机协作
     And arrow 的 startBinding 和 endBinding 应保持不变
     And arrow 的 link 应保持不变
 
+  Scenario: 跨页箭头应作为页面关系而不是页面 UI 内容
+    Given 画板中有“任务列表”和“任务详情”两个 rectangle 原型页面
+    And 用户从“任务列表”的按钮手工画出箭头连接“任务详情”
+    When agent 读取画板
+    Then 箭头的 frameId 应保持 null
+    And draw2code_read.pageRelations 应包含“任务列表 → 任务详情”
+    And 箭头及其绑定说明文字不应出现在任一页面的 elementIds 中
+    When agent 再向“任务详情”新增一个普通组件
+    Then 用户手工绘制的箭头、端点绑定和文案应保持不变
+
+  Scenario: 页面区域重叠时不应猜测组件归属
+    Given 两个 rectangle 原型页面的区域发生重叠
+    And 一个普通组件的中心同时落在两个页面中
+    When agent 读取或生成该画板
+    Then 工具应返回 page-membership-ambiguous warning
+    And 工具不应移动该组件或擅自选择其中一个页面
+
+  Scenario: 新页面与旧 Frame 可以在同一画板共存
+    Given 画板中同时存在 rectangle 原型页面和具有名称的 legacy Frame
+    When agent 读取、更新或生成该画板
+    Then 两类页面都应出现在 pageNames 和 pages 中
+    And pages.kind 应分别为 page-shell 和 legacy-frame
+    And 工具不应修改现有元素的类型、ID、坐标或绑定
+
+  Scenario: 重复页面名不应被静默丢弃或猜测
+    Given 两个不同页面都名为“任务详情”
+    When agent 读取画板
+    Then layoutWarnings 应包含 page-name-duplicate
+    When agent 请求生成页面
+    Then draw2code_generate 应返回 page-name-duplicate
+    And 用户应先为页面设置唯一名称
+
   Scenario: 用户删除内容后 agent 新增页面不应复活已删除元素
     Given 用户开始编辑时画板中存在“旧模块”和“保留模块”
     And 用户删除了“旧模块”，但防抖保存尚未完成
@@ -198,7 +245,7 @@ Feature: 画码原型板的人机协作
     And 工具结果的 requiresConfirmation 应为 true
     And “用户刚改过”不应被覆盖
 
-  Scenario: Agent 用 text 描述 frame 时仍能按页面名生成
+  Scenario: Agent 用 text 描述旧 Frame 时仍能按页面名生成
     Given agent 新增一个 type 为 frame 且 text 为“用户登录页”的元素
     When agent 请求只生成“用户登录页”
     Then 工具应把该 text 作为 frame name 使用
@@ -216,10 +263,10 @@ Feature: 画码原型板的人机协作
     And 错误信息应要求使用独立的 text 元素
 
   Scenario: Agent 应把底部导航放在页面底部安全区
-    Given 页面 frame 高度为 860
-    When bottom-navigation shell 距离 frame 底部超过安全区
+    Given 页面边界高度为 860
+    When bottom-navigation shell 距离页面底部超过安全区
     Then draw2code_update 应返回 layout-invalid
-    When bottom-navigation shell 使用矩形外框并贴近 frame 底部
+    When bottom-navigation shell 使用矩形外框并贴近页面底部
     Then draw2code_update 应成功写入并返回空的 layoutWarnings
 
   Scenario: Harness 中打开画码标签页不会用空的挂载回声覆盖已有画板
@@ -236,13 +283,21 @@ Feature: 画码原型板的人机协作
     When 用户再次选择“prototype”
     Then 画板标题应变回“prototype”
 
-  Scenario: 生成页面前返回选定 frame 和已有页面清单
-    Given “prototype”画板包含名为“用户登录页”的 frame
+  Scenario: 生成页面前返回选定页面和已有页面清单
+    Given “prototype”画板包含名为“用户登录页”的 rectangle 原型页面
     And draw2code-pages/prototype/ 中已有 index.html
-    When agent 请求只生成“用户登录页”
-    Then 工具结果的 frameNames 应只包含“用户登录页”
+    When agent 通过 pages 请求只生成“用户登录页”
+    Then 工具结果的 pageNames 应只包含“用户登录页”
+    And deprecated 的 frameNames 应兼容返回“用户登录页”
     And 工具结果的 existingPages 应包含“index.html”
     And instructions 应要求先读取画板并只更新选定范围
+
+  Scenario: pages 与 frames 兼容参数冲突时不猜测优先级
+    Given 当前画板同时包含“任务列表”和“任务详情”
+    When agent 传入 pages 为“任务列表”且 frames 为“任务详情”
+    Then draw2code_generate 应返回 page-scope-conflict
+    When pages 与 frames 表示同一组页面
+    Then draw2code_generate 应正常进入页面范围选择
 
   Scenario: 每次生成前都展示全部页面并提供智能推荐
     Given 当前画板包含“登录页”“注册页”“首页”和“统计页”
@@ -256,10 +311,10 @@ Feature: 画码原型板的人机协作
     And 不应再单独询问用户是否接受推荐范围
 
   Scenario: 没有 create 简报的手绘画板也可以直接生成
-    Given 用户自己画了一个包含三个可理解 frame 的原型
+    Given 用户自己画了一个包含三个可理解页面边界的原型
     And workspace 中没有对应的 draw2code_create 项目简报
     When 用户说“根据画板生成页面”
-    Then generate 应从 frame、文案、组件和流程箭头建立生成简报
+    Then generate 应从页面边界、文案、组件和流程箭头建立生成简报
     And 不应要求用户先完成一遍 draw2code_create
     And 只应补问画板无法回答且会显著改变结果的事项
 
@@ -286,7 +341,7 @@ Feature: 画码原型板的人机协作
     But 不应要求用户重新回答完整视觉问题
 
   Scenario: 设备类型优先从原型尺寸推断
-    Given 用户选择的 frame 都是手机尺寸
+    Given 用户选择的页面边界都是手机尺寸
     When generate 准备生成页面
     Then 应默认生成移动端 H5 页面本体
     And 不应重复询问移动端、桌面端或响应式
@@ -457,7 +512,7 @@ Feature: 画码原型板的人机协作
     Then 画布应切换到新画板
     And agent 用返回的 boardName 调用 draw2code_update 后
     And 工具结果的 targetBoard 与 activeBoard 应相同
-    And 画布应显示新增的核心页面 frame
+    And 画布应显示新增的普通矩形核心页面
 
   Scenario: grilling 中断不能被猜测成取消
     Given 用户已回答部分 create 问题

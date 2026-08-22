@@ -17,7 +17,8 @@ Draw2Code is a human-AI collaborative prototyping plugin for [DeepSeek Harness (
 - structured, resumable Create and Generate flows;
 - conflict-aware human/agent co-editing;
 - automatic reveal of the target board after a verified update;
-- quality gates for text sizing, frame bounds, bottom navigation, bound labels, mock data, and repeated content;
+- frame-free new pages built from semantic rectangle shells, external page labels, freely editable components, and unclipped hand-drawn cross-page arrows, while legacy named Frames remain compatible;
+- quality gates for text sizing, page bounds, bottom navigation, bound labels, mock data, and repeated content;
 - 153 embedded prototyping assets, available offline after installation;
 - no bundled demo projects and no external upload of workspace data.
 

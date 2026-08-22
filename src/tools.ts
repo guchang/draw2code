@@ -19,6 +19,16 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { formatLayoutIssues, inspectPrototypeLayout } from './layout.ts'
 import { type ProjectStore } from './project-store.ts'
+import {
+  pageElementIds,
+  pageForElement,
+  pageMembershipWarnings,
+  pageNameWarnings,
+  prototypePageRelations,
+  prototypePages,
+  publicPrototypePages,
+  type PrototypePage,
+} from './prototype-page.ts'
 import { normalizeElement, reconcileBoundTextBindings, semanticTextAlignment, type SceneStore } from './scene-store.ts'
 
 function text(value: string): ContentBlock[] {
@@ -36,6 +46,12 @@ function str(value: unknown): string {
 
 function num(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function customData(value: Record<string, unknown> | undefined): Record<string, unknown> {
+  return typeof value?.customData === 'object' && value.customData !== null
+    ? value.customData as Record<string, unknown>
+    : {}
 }
 
 interface ParsedOp {
@@ -150,6 +166,28 @@ function parseUpdateOps(input: unknown): ParsedOp[] {
   })
 }
 
+function rejectNewPrototypeFrames(
+  currentElements: Array<Record<string, unknown>>,
+  ops: ParsedOp[],
+): void {
+  const existingIds = new Set(currentElements.map((element) => str(element.id)))
+  const candidates = ops.flatMap((op) => {
+    if (op.op === 'upsert' && op.element !== undefined) return [op.element]
+    if (op.op === 'replace' && Array.isArray(op.scene?.elements)) {
+      return op.scene.elements.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    }
+    return []
+  })
+  const invalid = candidates.find((element) => {
+    return str(element.type) === 'frame'
+      && str(customData(element).role).trim().toLowerCase() === 'prototype-page'
+      && !existingIds.has(str(element.id))
+  })
+  if (invalid !== undefined) {
+    throw new Error(`prototype-page-frame-deprecated: ${str(invalid.id)} is a new prototype page using type=frame; use a rectangle with customData.role=prototype-page, customData.pageName, and an external prototype-page-label text instead`)
+  }
+}
+
 /** Build the post-update element list without touching disk. */
 function previewElements(currentElements: Array<Record<string, unknown>>, ops: ParsedOp[]): Array<Record<string, unknown>> {
   let elements = currentElements.slice()
@@ -234,6 +272,24 @@ function layoutFocusIds(ops: ParsedOp[]): Set<string> | undefined {
   return ids.size > 0 ? ids : undefined
 }
 
+function layoutFocusIdsWithPages(
+  ops: ParsedOp[],
+  currentElements: Array<Record<string, unknown>>,
+  prospectiveElements: Array<Record<string, unknown>>,
+): Set<string> | undefined {
+  const focusIds = layoutFocusIds(ops)
+  if (focusIds === undefined) return undefined
+  for (const elements of [currentElements, prospectiveElements]) {
+    const pages = prototypePages(elements)
+    for (const element of elements) {
+      if (!focusIds.has(str(element.id))) continue
+      const page = pageForElement(element, pages)
+      if (page !== undefined) focusIds.add(page.id)
+    }
+  }
+  return focusIds
+}
+
 function normalizeSemanticUpserts(
   currentElements: Array<Record<string, unknown>>,
   ops: ParsedOp[],
@@ -248,6 +304,77 @@ function normalizeSemanticUpserts(
     const element = byId.get(op.elementId)
     return element === undefined ? op : { ...op, element }
   })
+}
+
+function normalizePageShellUpserts(
+  currentElements: Array<Record<string, unknown>>,
+  ops: ParsedOp[],
+): ParsedOp[] {
+  const prospective = previewElements(currentElements, ops)
+  const pages = prototypePages(prospective)
+  const pageShellById = new Map(pages
+    .filter((page) => page.kind === 'page-shell')
+    .map((page) => [page.id, page]))
+  const byId = new Map(prospective.map((element) => [str(element.id), element]))
+  const normalizeElementMembership = (element: Record<string, unknown>): Record<string, unknown> => {
+    const referencedPageShell = pageShellById.get(str(element.frameId))
+    const withoutFrame = { ...element, frameId: null }
+    if (referencedPageShell !== undefined && pageForElement(withoutFrame, pages)?.id !== referencedPageShell.id) {
+      throw new Error(`layout-invalid:\n- page-shell-child-coordinates-invalid [${str(element.id)}]: children of ${referencedPageShell.name} must use canvas-absolute x/y inside the rectangle page shell; frame-local coordinates are supported only for legacy Frames`)
+    }
+    const page = pageForElement(element, pages)
+    return referencedPageShell !== undefined || page?.kind === 'page-shell' ? withoutFrame : element
+  }
+  return ops.map((op) => {
+    if (op.op === 'replace' && Array.isArray(op.scene?.elements)) {
+      return {
+        ...op,
+        scene: {
+          ...op.scene,
+          elements: op.scene.elements.map((element) => {
+            return typeof element === 'object' && element !== null
+              ? normalizeElementMembership(element as Record<string, unknown>)
+              : element
+          }),
+        },
+      }
+    }
+    if (op.op !== 'upsert' || op.elementId === undefined) return op
+    const element = byId.get(op.elementId)
+    if (element === undefined) return op
+    return { ...op, element: normalizeElementMembership(element) }
+  })
+}
+
+function validateNewPrototypePageContracts(
+  currentElements: Array<Record<string, unknown>>,
+  prospectiveElements: Array<Record<string, unknown>>,
+): void {
+  const existingIds = new Set(currentElements.map((element) => str(element.id)))
+  const newPages = prototypePages(prospectiveElements).filter((page) => {
+    return page.kind === 'page-shell' && !existingIds.has(page.id)
+  })
+  const errors: string[] = []
+  for (const page of newPages) {
+    const minimum = customData(page.element).mockDataMin
+    if (typeof minimum !== 'number' || !Number.isFinite(minimum) || minimum < 1) {
+      errors.push(`prototype-page-mock-min-missing [${page.id}]: ${page.name} must set customData.mockDataMin to a positive number`)
+    }
+    const labels = prospectiveElements.filter((element) => {
+      return str(element.type) === 'text'
+        && str(customData(element).role).trim().toLowerCase() === 'prototype-page-label'
+        && str(customData(element).pageId) === page.id
+    })
+    if (labels.length !== 1) {
+      errors.push(`prototype-page-label-${labels.length === 0 ? 'missing' : 'ambiguous'} [${page.id}]: ${page.name} needs exactly one external prototype-page-label text with customData.pageId=${page.id}`)
+      continue
+    }
+    const label = labels[0]
+    if (str(label.text).trim() === '' || num(label.y) + num(label.height) > page.bounds.y + 2) {
+      errors.push(`prototype-page-label-invalid [${str(label.id)}]: ${page.name} label must contain readable text and sit above the rectangle page shell`)
+    }
+  }
+  if (errors.length > 0) throw new Error(`layout-invalid:\n${errors.map((error) => `- ${error}`).join('\n')}`)
 }
 
 function layoutWarnings(elements: Array<Record<string, unknown>>): JsonValue[] {
@@ -617,13 +744,18 @@ export function draw2codeReadTool(store: SceneStore) {
           elementCount: { type: 'integer', required: true },
           summary: { type: 'string', required: true },
           layoutWarnings: { type: 'array', items: { type: 'json' }, required: true },
+          pageNames: { type: 'array', items: { type: 'string' }, required: true },
+          pages: { type: 'array', items: { type: 'json' }, required: true },
+          pageRelations: { type: 'array', items: { type: 'json' }, required: true },
+          frameNames: { type: 'array', items: { type: 'string' }, required: true },
           file: { type: 'string', required: true },
           elements: { type: 'json', required: true },
         },
       },
-      render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; summary?: string; layoutWarnings?: JsonValue[]; file?: string }) => text(
+      render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; pageNames?: string[]; pageRelations?: JsonValue[]; summary?: string; layoutWarnings?: JsonValue[]; file?: string }) => text(
         [
           `board: ${value.board ?? ''} · ${value.elementCount ?? 0} elements`,
+          `pages: ${(value.pageNames ?? []).join('、') || '（未识别）'} · relations: ${value.pageRelations?.length ?? 0}`,
           value.activeBoard !== undefined && value.activeBoard !== value.board ? `当前画板: ${value.activeBoard}（与读取目标不同）` : '',
           (value.layoutWarnings ?? []).length > 0 ? `原型质量提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : '',
           value.summary ?? '',
@@ -636,6 +768,12 @@ export function draw2codeReadTool(store: SceneStore) {
       const result = await store.read(args.root, target.name)
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       const { rev, scene } = result.value
+      const pages = prototypePages(scene.elements)
+      const relations = prototypePageRelations(scene.elements, pages)
+      const qualityWarnings = [
+        ...layoutWarnings(scene.elements),
+        ...pageMembershipWarnings(scene.elements, pages),
+      ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index)
       const summary = scene.elements.map(describeElement).join('\n')
       const elementsJson = JSON.stringify(scene.elements)
       const elementsBytes = Buffer.byteLength(elementsJson, 'utf8')
@@ -647,8 +785,12 @@ export function draw2codeReadTool(store: SceneStore) {
         board: target.name,
         ...(target.activeBoard !== undefined ? { activeBoard: target.activeBoard } : {}),
         elementCount: scene.elements.length,
+        pageNames: pages.map((page) => page.name),
+        pages: publicPrototypePages(scene.elements, pages) as never,
+        pageRelations: relations as never,
+        frameNames: pages.map((page) => page.name),
         summary,
-        layoutWarnings: layoutWarnings(scene.elements),
+        layoutWarnings: qualityWarnings as unknown as JsonValue[],
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload as never,
       }
@@ -663,13 +805,13 @@ export function draw2codeUpdateTool(store: SceneStore) {
     description: 'Draw on / edit one 画码 prototype board with ops — this is how you turn the user\'s idea into a visible '
       + 'prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, '
       + '{op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|'
-      + 'diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. When an element has frameId and its box only fits after adding the frame x/y, frame-local coordinates are safely converted; ambiguous coordinates remain layout-invalid. The board is auto-created when '
+      + 'diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when '
       + 'absent. Triggers: 画原型 / 画一下 / 在画板上… / '
-      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the frame bottom safe area. A completed page from draw2code_create must set frame customData.role=prototype-page plus customData.mockDataMin (normally 3), and mark each visible realistic example text with customData.role=mock-data; empty boxes and placeholder labels do not satisfy the content gate. Put page children in a frame with frameId; never use containerId for page membership. If a text containerId mistakenly points to a frame, the store repairs it to frameId so the text stays visible. For a one-label shape, set the text containerId to the rectangle/diamond/ellipse id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
+      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       name: { type: 'string', description: 'Board name. Omit to target the board currently selected in the 画码 UI.' },
-      ops: { type: 'json', required: true, description: 'Ops array (or a JSON string encoding it). Prefer [{"op":"upsert","element":{"id":"title","type":"text","frameId":"page","x":20,"y":80,"text":"标题"}}]. Direct elements, {element:{...}} without op, and flat upserts are also accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Canvas-absolute x/y are canonical; unambiguous frame-local child coordinates are converted automatically.' },
+      ops: { type: 'json', required: true, description: 'Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"首页",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
       force: { type: 'boolean', description: '已读到冲突并且用户确认后可设置为 true，强制执行。默认 false。' },
       safeMode: { type: 'boolean', description: '是否在有风险改动时要求确认（默认 true）。设为 false 会直接执行，可能覆盖用户手工改动。' },
     },
@@ -718,10 +860,15 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const key = makeKey(args.root, target.name)
       const cache = boardCache.get(key)
       const currentElements = board.ok ? board.value.scene.elements : []
+      rejectNewPrototypeFrames(currentElements, parsedOps)
       const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps)
-      const ops = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
+      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
+      const ops = normalizePageShellUpserts(currentElements, semanticOps)
       const prospectiveElements = previewElements(currentElements, ops)
-      const layoutReport = inspectPrototypeLayout(prospectiveElements, { focusIds: layoutFocusIds(ops) })
+      validateNewPrototypePageContracts(currentElements, prospectiveElements)
+      const layoutReport = inspectPrototypeLayout(prospectiveElements, {
+        focusIds: layoutFocusIdsWithPages(ops, currentElements, prospectiveElements),
+      })
       if (layoutReport.errors.length > 0) {
         throw new Error(`layout-invalid:\n${formatLayoutIssues(layoutReport.errors)}\n请修正组件几何和内容可读性后再调用 draw2code_update；不要把多行内容压进单行 text、不要把按钮文案写进 rectangle.text，也不要用空白方框代替 mock 数据。`)
       }
@@ -940,6 +1087,7 @@ interface GenerateArgs {
   root: string
   action?: GenerateAction
   name?: string
+  pages?: string[]
   frames?: string[]
   styleNote?: string
   sessionId?: string
@@ -969,9 +1117,12 @@ interface GenerateResponse {
   nextAction?: string
   error?: JsonValue
   scope?: string
+  pageNames?: string[]
   frameNames?: string[]
   summary?: string
   elements?: JsonValue
+  pageRelations?: JsonValue
+  unassignedElementCount?: number
   unframedElementCount?: number
   layoutWarnings?: JsonValue
   existingPages?: string[]
@@ -992,19 +1143,15 @@ function generateError(code: string, message: string, draft?: GenerateDraft): Ge
   }
 }
 
-function namedFrames(elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return elements.filter((element) => str(element.type) === 'frame' && str(element.name).trim() !== '')
-}
-
 function pageScopeQuestion(
-  frames: Array<Record<string, unknown>>,
+  pages: PrototypePage[],
   recommended: string[],
   recommendationReasons: Map<string, string> = new Map(),
 ): GenerateQuestion {
   const recommendedSet = new Set(recommended)
-  const orderedFrames = [...frames].sort((left, right) => {
-    const leftRecommended = recommendedSet.has(str(left.name).trim()) ? 0 : 1
-    const rightRecommended = recommendedSet.has(str(right.name).trim()) ? 0 : 1
+  const orderedPages = [...pages].sort((left, right) => {
+    const leftRecommended = recommendedSet.has(left.name) ? 0 : 1
+    const rightRecommended = recommendedSet.has(right.name) ? 0 : 1
     return leftRecommended - rightRecommended
   })
   return {
@@ -1013,8 +1160,8 @@ function pageScopeQuestion(
     selectionMode: 'multiple',
     minSelections: 1,
     allowOther: false,
-    options: orderedFrames.map((frame) => {
-      const name = str(frame.name).trim()
+    options: orderedPages.map((page) => {
+      const name = page.name
       const isRecommended = recommendedSet.has(name)
       const displayLabel = `${name}${isRecommended ? '（推荐）' : ''}`
       return {
@@ -1029,60 +1176,23 @@ function pageScopeQuestion(
   }
 }
 
-function directlyConnectedFrames(elements: Array<Record<string, unknown>>, requested: string[]): string[] {
+function directlyConnectedPages(elements: Array<Record<string, unknown>>, requested: string[]): string[] {
   if (requested.length === 0) return []
-  const frames = namedFrames(elements)
-  const frameById = new Map(frames.map((frame) => [str(frame.id), frame]))
-  const elementById = new Map(elements.map((element) => [str(element.id), element]))
-  const ownerFrame = (element: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
-    if (element === undefined) return undefined
-    if (str(element.type) === 'frame') return element
-    const explicit = frameById.get(str(element.frameId))
-    if (explicit !== undefined) return explicit
-    const cx = num(element.x) + num(element.width) / 2
-    const cy = num(element.y) + num(element.height) / 2
-    return frames.find((frame) => cx >= num(frame.x) && cx <= num(frame.x) + num(frame.width)
-      && cy >= num(frame.y) && cy <= num(frame.y) + num(frame.height))
-  }
-  const nearestFrame = (x: number, y: number): Record<string, unknown> | undefined => frames
-    .map((frame) => {
-      const left = num(frame.x)
-      const top = num(frame.y)
-      const right = left + num(frame.width)
-      const bottom = top + num(frame.height)
-      const dx = x < left ? left - x : x > right ? x - right : 0
-      const dy = y < top ? top - y : y > bottom ? y - bottom : 0
-      return { frame, distance: Math.hypot(dx, dy) }
-    })
-    .filter(({ distance }) => distance <= 48)
-    .sort((left, right) => left.distance - right.distance)[0]?.frame
-  const bindingFrame = (arrow: Record<string, unknown>, key: 'startBinding' | 'endBinding') => {
-    const binding = typeof arrow[key] === 'object' && arrow[key] !== null ? arrow[key] as Record<string, unknown> : {}
-    return ownerFrame(elementById.get(str(binding.elementId)))
-  }
+  const relations = prototypePageRelations(elements)
   const connected = new Set<string>()
-  for (const arrow of elements.filter((element) => str(element.type) === 'arrow')) {
-    const points = Array.isArray(arrow.points) ? arrow.points as unknown[] : []
-    const first = Array.isArray(points[0]) ? points[0] as unknown[] : [0, 0]
-    const last = Array.isArray(points.at(-1)) ? points.at(-1) as unknown[] : [num(arrow.width), num(arrow.height)]
-    const start = bindingFrame(arrow, 'startBinding') ?? nearestFrame(num(arrow.x) + num(first[0]), num(arrow.y) + num(first[1]))
-    const end = bindingFrame(arrow, 'endBinding') ?? nearestFrame(num(arrow.x) + num(last[0]), num(arrow.y) + num(last[1]))
-    const startName = str(start?.name).trim()
-    const endName = str(end?.name).trim()
-    if (startName !== '' && endName !== '' && startName !== endName) {
-      if (requested.includes(startName) && !requested.includes(endName)) connected.add(endName)
-      if (requested.includes(endName) && !requested.includes(startName)) connected.add(startName)
-    }
+  for (const relation of relations) {
+    if (requested.includes(relation.sourcePage) && !requested.includes(relation.targetPage)) connected.add(relation.targetPage)
+    if (requested.includes(relation.targetPage) && !requested.includes(relation.sourcePage)) connected.add(relation.sourcePage)
   }
   return [...connected]
 }
 
-function inferDevice(frames: Array<Record<string, unknown>>): 'mobile' | 'desktop' | 'mixed' | 'ambiguous' {
+function inferDevice(pages: PrototypePage[]): 'mobile' | 'desktop' | 'mixed' | 'ambiguous' {
   let mobile = 0
   let desktop = 0
-  for (const frame of frames) {
-    const width = num(frame.width)
-    const height = num(frame.height)
+  for (const page of pages) {
+    const width = page.bounds.width
+    const height = page.bounds.height
     if (width <= 600 && height > width) mobile += 1
     else if (width >= 760 || width > height * 1.15) desktop += 1
   }
@@ -1146,69 +1256,60 @@ function visualQuestion(elements: Array<Record<string, unknown>>): GenerateQuest
   }
 }
 
-function elementsInFrames(
+function elementsInPages(
   elements: Array<Record<string, unknown>>,
-  frameNames: string[],
-): { frames: Array<Record<string, unknown>>; elements: Array<Record<string, unknown>>; unframedElementCount: number } {
-  const selected = namedFrames(elements).filter((frame) => frameNames.includes(str(frame.name).trim()))
-  const ids = new Set(selected.map((frame) => str(frame.id)))
-  const inRect = (element: Record<string, unknown>, frame: Record<string, unknown>): boolean => {
-    const cx = num(element.x) + num(element.width) / 2
-    const cy = num(element.y) + num(element.height) / 2
-    return cx >= num(frame.x) && cx <= num(frame.x) + num(frame.width)
-      && cy >= num(frame.y) && cy <= num(frame.y) + num(frame.height)
-  }
-  const scoped = [...selected]
-  const claimed = new Set(ids)
-  let unframedElementCount = 0
-  for (const element of elements) {
-    if (claimed.has(str(element.id))) continue
-    const frameId = str(element.frameId)
-    const owned = (frameId !== '' && ids.has(frameId)) || selected.some((frame) => inRect(element, frame))
-    if (owned) {
-      scoped.push(element)
-      claimed.add(str(element.id))
-    } else if (str(element.type) !== 'frame' && frameId === '') {
-      unframedElementCount += 1
-    }
-  }
-  return { frames: selected, elements: scoped, unframedElementCount }
+  pageNames: string[],
+): { pages: PrototypePage[]; elements: Array<Record<string, unknown>>; unassignedElementCount: number; relations: ReturnType<typeof prototypePageRelations> } {
+  const allPages = prototypePages(elements)
+  const selected = allPages.filter((page) => pageNames.includes(page.name))
+  const selectedIds = new Set(selected.map((page) => page.id))
+  const elementIds = new Set(selected.flatMap((page) => pageElementIds(page, elements, allPages)))
+  const scoped = elements.filter((element) => selectedIds.has(str(element.id)) || elementIds.has(str(element.id)))
+  const assigned = new Set(allPages.flatMap((page) => [page.id, ...pageElementIds(page, elements, allPages)]))
+  const allRelations = prototypePageRelations(elements, allPages)
+  const relations = allRelations.filter((relation) => {
+    return pageNames.includes(relation.sourcePage) || pageNames.includes(relation.targetPage)
+  })
+  const relationIds = new Set(allRelations.map((relation) => relation.id))
+  const relationLabelIds = new Set(elements.flatMap((element) => {
+    return str(element.type) === 'text' && relationIds.has(str(element.containerId)) ? [str(element.id)] : []
+  }))
+  const pageLabelIds = new Set(elements.flatMap((element) => {
+    return str(customData(element).role).toLowerCase() === 'prototype-page-label' ? [str(element.id)] : []
+  }))
+  const unassignedElementCount = elements.filter((element) => {
+    const id = str(element.id)
+    return !assigned.has(id) && !relationIds.has(id) && !relationLabelIds.has(id) && !pageLabelIds.has(id)
+  }).length
+  return { pages: selected, elements: scoped, unassignedElementCount, relations }
 }
 
-function emptyFrameIssues(frames: Array<Record<string, unknown>>, elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return frames.flatMap((frame) => {
-    const id = str(frame.id)
+function emptyPageIssues(pages: PrototypePage[], elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const allPages = prototypePages(elements)
+  return pages.flatMap((page) => {
     const meaningful = elements.some((element) => {
-      if (element === frame || str(element.type) !== 'text' || str(element.text).trim() === '') return false
-      if (str(element.frameId) === id) return true
-      const cx = num(element.x) + num(element.width) / 2
-      const cy = num(element.y) + num(element.height) / 2
-      return cx >= num(frame.x) && cx <= num(frame.x) + num(frame.width)
-        && cy >= num(frame.y) && cy <= num(frame.y) + num(frame.height)
+      if (element === page.element || str(element.type) !== 'text' || str(element.text).trim() === '') return false
+      return pageForElement(element, allPages)?.id === page.id
     })
-    return meaningful ? [] : [{ code: 'page-content-missing', id, message: `${str(frame.name)} 只有空框，无法判断页面内容和用途` }]
+    return meaningful ? [] : [{ code: 'page-content-missing', id: page.id, message: `${page.name} 只有空框，无法判断页面内容和用途` }]
   })
 }
 
-function elementBelongsToFrame(element: Record<string, unknown>, frame: Record<string, unknown>): boolean {
-  if (str(element.frameId) === str(frame.id)) return true
-  const cx = num(element.x) + num(element.width) / 2
-  const cy = num(element.y) + num(element.height) / 2
-  return cx >= num(frame.x) && cx <= num(frame.x) + num(frame.width)
-    && cy >= num(frame.y) && cy <= num(frame.y) + num(frame.height)
+function elementBelongsToPage(element: Record<string, unknown>, page: PrototypePage, pages: PrototypePage[]): boolean {
+  return pageForElement(element, pages)?.id === page.id
 }
 
 /** Imported or hand-drawn boards may not carry prototype-page customData, so
  * generate also performs a conservative semantic mock-data check. */
-function semanticMockDataIssues(frames: Array<Record<string, unknown>>, elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+function semanticMockDataIssues(pages: PrototypePage[], elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const repeatedContentPage = /列表|好友|聊天|消息|清单|统计|图表|日历|万年历|雷达|推荐|记录|详情/u
   const genericUiText = /^(?:首页|列表|好友|聊天|消息|清单|统计|日历|雷达|推荐|详情|返回|保存|提交|确认|取消|搜索|筛选|新增|添加|我的|设置|发送|请输入.*)$/u
-  return frames.flatMap((frame) => {
-    const name = str(frame.name).trim()
+  return pages.flatMap((page) => {
+    const name = page.name
     if (!repeatedContentPage.test(name)) return []
-    const texts = elements.filter((element) => element !== frame
+    const texts = elements.filter((element) => element !== page.element
       && str(element.type) === 'text'
-      && elementBelongsToFrame(element, frame))
+      && elementBelongsToPage(element, page, pages))
     let records = 0
     for (const element of texts) {
       const value = str(element.text).trim()
@@ -1223,7 +1324,7 @@ function semanticMockDataIssues(frames: Array<Record<string, unknown>>, elements
     }
     return records >= 3 ? [] : [{
       code: 'mock-data-insufficient',
-      id: str(frame.id),
+      id: page.id,
       message: `${name} 需要至少 3 条可读 mock 数据帮助理解页面；当前识别到 ${records} 条`,
     }]
   })
@@ -1379,13 +1480,13 @@ function normalizedVisibleText(value: string): string {
 }
 
 function expectedPageTexts(
-  frames: Array<Record<string, unknown>>,
+  pages: PrototypePage[],
   elements: Array<Record<string, unknown>>,
 ): Record<string, string[]> {
-  return Object.fromEntries(frames.map((frame) => {
-    const name = str(frame.name).trim()
+  return Object.fromEntries(pages.map((page) => {
+    const name = page.name
     const texts = elements
-      .filter((element) => str(element.type) === 'text' && elementBelongsToFrame(element, frame))
+      .filter((element) => str(element.type) === 'text' && elementBelongsToPage(element, page, pages))
       .flatMap((element) => str(element.text).split(/\r?\n/gu))
       .map(normalizedVisibleText)
       .filter((value) => value !== '')
@@ -1679,23 +1780,26 @@ async function loadGeneration(store: SceneStore, root: string, sessionId: string
 async function runGeneratePreflight(store: SceneStore, root: string, draft: GenerateDraft): Promise<GenerateResponse> {
   const board = await store.read(root, draft.board)
   if (!board.ok) return generateError(board.error.code, board.error.message, draft)
-  const allFrames = namedFrames(board.value.scene.elements)
-  draft.allFrames = allFrames.map((frame) => str(frame.name).trim())
+  const allPages = prototypePages(board.value.scene.elements)
+  draft.allFrames = allPages.map((page) => page.name)
   draft.unselectedFrames = draft.allFrames.filter((name) => !draft.selectedFrames.includes(name))
-  draft.expectedPageTexts = expectedPageTexts(allFrames, board.value.scene.elements)
-  const scope = elementsInFrames(board.value.scene.elements, draft.selectedFrames)
-  if (scope.frames.length !== draft.selectedFrames.length) {
-    const found = new Set(scope.frames.map((frame) => str(frame.name)))
+  draft.expectedPageTexts = expectedPageTexts(allPages, board.value.scene.elements)
+  const scope = elementsInPages(board.value.scene.elements, draft.selectedFrames)
+  if (scope.pages.length !== draft.selectedFrames.length) {
+    const found = new Set(scope.pages.map((page) => page.name))
     const missing = draft.selectedFrames.filter((name) => !found.has(name))
-    draft.blockers = [{ code: 'frame-not-found', message: `所选页面已不在画板上：${missing.join('、')}` }]
+    draft.blockers = [{ code: 'page-not-found', message: `所选页面已不在画板上：${missing.join('、')}` }]
   } else {
     const report = inspectPrototypeLayout(scope.elements)
     draft.blockers = [
       ...report.errors,
-      ...emptyFrameIssues(scope.frames, scope.elements),
-      ...semanticMockDataIssues(scope.frames, scope.elements),
+      ...emptyPageIssues(scope.pages, scope.elements),
+      ...semanticMockDataIssues(scope.pages, scope.elements),
     ] as unknown as Array<Record<string, unknown>>
-    draft.warnings = report.warnings as unknown as Array<Record<string, unknown>>
+    draft.warnings = [
+      ...report.warnings,
+      ...pageMembershipWarnings(board.value.scene.elements, allPages),
+    ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index) as unknown as Array<Record<string, unknown>>
   }
   const existing = await store.existingPages(root, draft.board)
   if (!existing.ok) return generateError(existing.error.code, existing.error.message, draft)
@@ -1712,7 +1816,7 @@ async function runGeneratePreflight(store: SceneStore, root: string, draft: Gene
 async function generationPayload(store: SceneStore, root: string, draft: GenerateDraft): Promise<GenerateResponse> {
   const board = await store.read(root, draft.board)
   if (!board.ok) return generateError(board.error.code, board.error.message, draft)
-  const scope = elementsInFrames(board.value.scene.elements, draft.selectedFrames)
+  const scope = elementsInPages(board.value.scene.elements, draft.selectedFrames)
   const existing = await store.existingPages(root, draft.board)
   if (!existing.ok) return generateError(existing.error.code, existing.error.message, draft)
   const summary = scope.elements.map(describeElement).join('\n')
@@ -1728,11 +1832,14 @@ async function generationPayload(store: SceneStore, root: string, draft: Generat
     + (layoutIssues.length > 0 ? `\n13. 原型非阻断提醒：\n${formatLayoutIssues(layoutIssues)}` : '')
   return responseFromDraft(draft, {
     nextAction: 'write-html-then-preview-and-validate',
-    scope: 'frames',
+    scope: 'pages',
+    pageNames: draft.selectedFrames,
     frameNames: draft.selectedFrames,
     summary,
     elements: payload as JsonValue,
-    unframedElementCount: scope.unframedElementCount,
+    pageRelations: scope.relations as unknown as JsonValue,
+    unassignedElementCount: scope.unassignedElementCount,
+    unframedElementCount: scope.unassignedElementCount,
     layoutWarnings: layoutIssues as unknown as JsonValue,
     existingPages: existing.value,
     outputDir: `draw2code-pages/${draft.board}/`,
@@ -1744,8 +1851,8 @@ async function generationPayload(store: SceneStore, root: string, draft: Generat
 export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore) {
   return defineTool({
     name: 'draw2code_generate',
-    description: 'Turn selected 画码 frames into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. '
-      + 'On any explicit “生成页面 / 根据画板生成前端 / 重新生成” request, call action=start immediately. The first result always asks the user to select pages from every frame; pass user-mentioned frames only as recommendations, never skip the choice. Use the host choice UI with all returned options. '
+    description: 'Turn selected 画码 prototype pages into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. New pages use ordinary rectangle page shells; named Excalidraw Frames remain supported as legacy pages. '
+      + 'On any explicit “生成页面 / 根据画板生成前端 / 重新生成” request, call action=start immediately. The first result always asks the user to select pages from every recognized page boundary; pass user-mentioned pages only as recommendations, never skip the choice. Use the host choice UI with all returned options. '
       + 'Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type “确认”. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. '
       + 'After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. '
       + 'If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.',
@@ -1753,7 +1860,8 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       action: { type: 'string', enum: ['start', 'answer', 'revise', 'resume', 'recheck', 'confirm', 'complete', 'abandon'], description: 'Generate state-machine action. Omit only for legacy callers; omission behaves as start.' },
       name: { type: 'string', description: 'Board name. Omit to use the board currently selected in the 画码 UI.' },
-      frames: { type: 'array', items: { type: 'string' }, description: 'User-mentioned frame names, used only as recommended defaults on action=start.' },
+      pages: { type: 'array', items: { type: 'string' }, description: 'User-mentioned prototype page names, used only as recommended defaults on action=start.' },
+      frames: { type: 'array', items: { type: 'string' }, description: 'Deprecated compatibility alias for pages. If both are supplied they must contain the same names.' },
       styleNote: { type: 'string', description: 'An explicit overall visual request; skips the first-time visual choice.' },
       sessionId: { type: 'string', description: 'Generation session ID from a prior result.' },
       revision: { type: 'integer', description: 'Expected generation revision for mutation actions.' },
@@ -1788,9 +1896,12 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           nextAction: { type: 'string' },
           error: { type: 'json' },
           scope: { type: 'string' },
+          pageNames: { type: 'array', items: { type: 'string' } },
           frameNames: { type: 'array', items: { type: 'string' } },
           summary: { type: 'string' },
           elements: { type: 'json' },
+          pageRelations: { type: 'json' },
+          unassignedElementCount: { type: 'integer' },
           unframedElementCount: { type: 'integer' },
           layoutWarnings: { type: 'json' },
           existingPages: { type: 'array', items: { type: 'string' } },
@@ -1819,12 +1930,22 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
         const target = await resolveBoard(store, args.root, args.name)
         const board = await store.read(args.root, target.name)
         if (!board.ok) return generateError(board.error.code, board.error.message)
-        const frames = namedFrames(board.value.scene.elements)
-        if (frames.length === 0) return generateError('no-pages', `画板「${target.name}」没有带名称的 frame，无法选择生成页面`)
-        const allNames = frames.map((frame) => str(frame.name).trim())
-        const requested = [...new Set((args.frames ?? []).map((name) => name.trim()).filter((name) => name !== ''))]
+        const duplicatePageNames = pageNameWarnings(board.value.scene.elements)
+        if (duplicatePageNames.length > 0) {
+          return generateError('page-name-duplicate', duplicatePageNames.map((warning) => warning.message).join('；'))
+        }
+        const pages = prototypePages(board.value.scene.elements)
+        if (pages.length === 0) return generateError('no-pages', `画板「${target.name}」没有可识别的原型页面；新页面应使用 rectangle + customData.role=prototype-page + customData.pageName，旧命名 Frame 仍兼容`)
+        const allNames = pages.map((page) => page.name)
+        const requestedPages = [...new Set((args.pages ?? []).map((name) => name.trim()).filter((name) => name !== ''))]
+        const requestedFrames = [...new Set((args.frames ?? []).map((name) => name.trim()).filter((name) => name !== ''))]
+        if (requestedPages.length > 0 && requestedFrames.length > 0
+          && JSON.stringify([...requestedPages].sort()) !== JSON.stringify([...requestedFrames].sort())) {
+          return generateError('page-scope-conflict', 'pages 与 deprecated frames 指定了不同页面；请只传 pages，或确保两者内容完全一致')
+        }
+        const requested = requestedPages.length > 0 ? requestedPages : requestedFrames
         const missing = requested.filter((name) => !allNames.includes(name))
-        if (missing.length > 0) return generateError('frame-not-found', `画板上没有这些页面：${missing.join('、')}。现有页面：${allNames.join('、')}`)
+        if (missing.length > 0) return generateError('page-not-found', `画板上没有这些页面：${missing.join('、')}。现有页面：${allNames.join('、')}`)
         const settings = await store.readGenerateSettings(args.root, target.name)
         if (!settings.ok) return generateError(settings.error.code, settings.error.message)
         const inherited = settings.value === null ? null : str(settings.value.visualDirection).trim() || null
@@ -1837,7 +1958,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           ? projectBrief.pages.filter((value): value is string => typeof value === 'string' && allNames.includes(value))
           : []
         const deferredStyle = str(project?.deferredStyleNote).trim()
-        const connected = directlyConnectedFrames(board.value.scene.elements, requested)
+        const connected = directlyConnectedPages(board.value.scene.elements, requested)
         const recommended = requested.length > 0
           ? [...requested, ...connected]
           : briefPages.length > 0
@@ -1861,7 +1982,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           revision: 1,
           createdAt: now,
           updatedAt: now,
-          currentQuestion: pageScopeQuestion(frames, recommended, recommendationReasons),
+          currentQuestion: pageScopeQuestion(pages, recommended, recommendationReasons),
           selectedFrames: [],
           allFrames: allNames,
           unselectedFrames: [],
@@ -1898,7 +2019,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
       if (action === 'revise') {
         const board = await store.read(args.root, draft.board)
         if (!board.ok) return generateError(board.error.code, board.error.message, draft)
-        if (args.questionId === 'page-scope') draft.currentQuestion = pageScopeQuestion(namedFrames(board.value.scene.elements), draft.selectedFrames)
+        if (args.questionId === 'page-scope') draft.currentQuestion = pageScopeQuestion(prototypePages(board.value.scene.elements), draft.selectedFrames)
         else if (args.questionId === 'visual-direction') draft.currentQuestion = visualQuestion(board.value.scene.elements)
         else return generateError('invalid-question', '只能修改 page-scope 或 visual-direction', draft)
         draft.status = 'question'
@@ -1923,8 +2044,8 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
         if (question.id === 'page-scope') {
           const selectedFrames = values.map((value) => optionFor(value)?.valueLabel ?? value)
           draft.selectedFrames = selectedFrames
-          const scope = elementsInFrames(board.value.scene.elements, selectedFrames)
-          const inferred = inferDevice(scope.frames)
+          const scope = elementsInPages(board.value.scene.elements, selectedFrames)
+          const inferred = inferDevice(scope.pages)
           if (inferred === 'mixed' || inferred === 'ambiguous') {
             draft.currentQuestion = deviceQuestion()
             draft.status = 'question'

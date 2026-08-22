@@ -8,6 +8,15 @@
  * agent write reaches disk.
  */
 
+import {
+  isPrototypePageLabel,
+  pageForElement,
+  pageMembershipWarnings,
+  pageNameWarnings,
+  prototypePages,
+  type PrototypePage,
+} from './prototype-page.ts'
+
 export interface LayoutIssue {
   code: string
   id?: string
@@ -47,7 +56,10 @@ function isFocused(element: Record<string, unknown>, focusIds?: Set<string>): bo
   if (focusIds === undefined) return true
   const id = str(element.id)
   const frameId = str(element.frameId)
-  return focusIds.has(id) || (frameId !== '' && focusIds.has(frameId))
+  const pageId = str(customData(element).pageId)
+  return focusIds.has(id)
+    || (frameId !== '' && focusIds.has(frameId))
+    || (pageId !== '' && focusIds.has(pageId))
 }
 
 function glyphUnits(value: string): number {
@@ -71,34 +83,17 @@ function estimatedLineCount(element: Record<string, unknown>): number {
   }, 0)
 }
 
-function frameFor(
+function pageFor(
   element: Record<string, unknown>,
-  frames: Array<Record<string, unknown>>,
-): Record<string, unknown> | undefined {
-  const explicit = str(element.frameId)
-  if (explicit !== '') return frames.find((frame) => str(frame.id) === explicit)
-
-  const x1 = num(element.x)
-  const y1 = num(element.y)
-  const x2 = x1 + num(element.width)
-  const y2 = y1 + num(element.height)
-  return frames.find((frame) => {
-    const fx = num(frame.x)
-    const fy = num(frame.y)
-    return x1 >= fx - 2 && y1 >= fy - 2
-      && x2 <= fx + num(frame.width) + 2
-      && y2 <= fy + num(frame.height) + 2
-  })
+  pages: PrototypePage[],
+): PrototypePage | undefined {
+  return pageForElement(element, pages)
 }
 
 function isBottomNavigation(element: Record<string, unknown>): boolean {
   const role = str(customData(element).role).toLowerCase()
   if (role === 'bottom-navigation' || role === 'bottom-nav' || role === 'tabbar') return true
   return /底部导航|底部选项卡|tabbar|bottom[ -]?navigation/iu.test(str(element.text))
-}
-
-function isPrototypePage(element: Record<string, unknown>): boolean {
-  return str(customData(element).role).toLowerCase() === 'prototype-page'
 }
 
 function isVisibleMockData(element: Record<string, unknown>): boolean {
@@ -122,15 +117,19 @@ export function inspectPrototypeLayout(
   elements: Array<Record<string, unknown>>,
   options: LayoutOptions = {},
 ): LayoutReport {
-  const frames = elements.filter((element) => str(element.type) === 'frame')
+  const pages = prototypePages(elements)
+  const pageIds = new Set(pages.map((page) => page.id))
   const elementById = new Map(elements.map((element) => [str(element.id), element]))
   const bottomNavigationShells = elements.filter((element) => SHAPE_TYPES.has(str(element.type)) && isBottomNavigation(element))
   const errors: LayoutIssue[] = []
-  const warnings: LayoutIssue[] = []
+  const warnings: LayoutIssue[] = [
+    ...pageNameWarnings(elements),
+    ...pageMembershipWarnings(elements, pages),
+  ]
 
   for (const element of elements) {
     const type = str(element.type)
-    if (type === 'frame' || !isFocused(element, options.focusIds)) continue
+    if (pageIds.has(str(element.id)) || !isFocused(element, options.focusIds)) continue
 
     const text = str(element.text)
     if (SHAPE_TYPES.has(type) && text.trim() !== '') {
@@ -197,42 +196,42 @@ export function inspectPrototypeLayout(
       }
     }
 
-    const frame = frameFor(element, frames)
-    if (frame !== undefined && type !== 'arrow' && type !== 'line') {
+    const page = pageFor(element, pages)
+    if (page !== undefined && !isPrototypePageLabel(element) && type !== 'arrow' && type !== 'line') {
       const x1 = num(element.x)
       const y1 = num(element.y)
       const x2 = x1 + num(element.width)
       const y2 = y1 + num(element.height)
-      const fx = num(frame.x)
-      const fy = num(frame.y)
-      const right = fx + num(frame.width)
-      const bottom = fy + num(frame.height)
+      const fx = page.bounds.x
+      const fy = page.bounds.y
+      const right = fx + page.bounds.width
+      const bottom = fy + page.bounds.height
       if (x1 < fx - 2 || y1 < fy - 2 || x2 > right + 2 || y2 > bottom + 2) {
         errors.push(issue(
-          'frame-overflow',
+          page.kind === 'legacy-frame' ? 'frame-overflow' : 'page-overflow',
           element,
-          `${str(element.id)} extends outside frame ${str(frame.name) || str(frame.id)}; keep the complete component inside its page frame`,
+          `${str(element.id)} extends outside page ${page.name || page.id}; keep the complete component inside its page boundary`,
         ))
       }
     }
 
     if (isBottomNavigation(element)) {
-      const navFrame = frameFor(element, frames)
-      if (navFrame === undefined) {
+      const navPage = pageFor(element, pages)
+      if (navPage === undefined) {
         warnings.push(issue(
-          'bottom-navigation-unframed',
+          'bottom-navigation-unpaged',
           element,
-          `${str(element.id)} is marked as bottom navigation but is not inside a page frame`,
+          `${str(element.id)} is marked as bottom navigation but is not inside a prototype page`,
         ))
       } else {
-        const frameBottom = num(navFrame.y) + num(navFrame.height)
+        const pageBottom = navPage.bounds.y + navPage.bounds.height
         const navBottom = num(element.y) + num(element.height)
-        const gap = frameBottom - navBottom
+        const gap = pageBottom - navBottom
         if (gap > BOTTOM_NAV_MAX_GAP) {
           errors.push(issue(
             'bottom-navigation-offset',
             element,
-            `${str(element.id)} is ${Math.round(gap)}px above the frame bottom; place the bottom navigation in the bottom safe area (gap <= ${BOTTOM_NAV_MAX_GAP}px)`,
+            `${str(element.id)} is ${Math.round(gap)}px above the page bottom; place the bottom navigation in the bottom safe area (gap <= ${BOTTOM_NAV_MAX_GAP}px)`,
           ))
         }
       }
@@ -284,20 +283,22 @@ export function inspectPrototypeLayout(
     }
   }
 
-  for (const frame of frames) {
-    if (!isPrototypePage(frame) || !isFocused(frame, options.focusIds)) continue
-    const configuredMinimum = num(customData(frame).mockDataMin, DEFAULT_MOCK_DATA_MIN)
+  for (const page of pages) {
+    const pageElement = page.element
+    if (str(customData(pageElement).role).toLowerCase() !== 'prototype-page'
+      || !isFocused(pageElement, options.focusIds)) continue
+    const configuredMinimum = num(customData(pageElement).mockDataMin, DEFAULT_MOCK_DATA_MIN)
     const minimum = Math.max(1, Math.floor(configuredMinimum))
     const records = new Set(
       elements
-        .filter((element) => frameFor(element, frames) === frame && isVisibleMockData(element))
+        .filter((element) => pageFor(element, pages)?.id === page.id && isVisibleMockData(element))
         .map((element) => str(element.text).trim()),
     )
     if (records.size < minimum) {
       errors.push(issue(
         'mock-data-insufficient',
-        frame,
-        `${str(frame.name) || str(frame.id)} requires ${minimum} visible mock-data text records; found ${records.size}. Add realistic example names, values, statuses or messages instead of empty boxes and mark each text with customData.role=mock-data`,
+        pageElement,
+        `${page.name || page.id} requires ${minimum} visible mock-data text records; found ${records.size}. Add realistic example names, values, statuses or messages instead of empty boxes and mark each text with customData.role=mock-data`,
       ))
     }
   }

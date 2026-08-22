@@ -2,7 +2,7 @@
 
 `features/draw2code.feature` 面向插件的真实协作契约：workspace 门禁、`draw2code_create` 的 choice-first grilling、项目草稿与版本、确认后独立画板、agent 工具、冲突确认、场景持久化、客户端挂载同步、画板切换，以及 `draw2code_generate` 从页面范围选择到真实预览验收的完整产品流程。它不把 Excalidraw 的坐标或 React 内部 ref 当作用户行为。
 
-## 已实现、待真实宿主验收 — `draw2code_generate` 产品流程
+## 已实现并通过真实宿主验收 — `draw2code_generate` 产品流程
 
 完整决策见 `GENERATE_PRODUCT_FLOW.md`。本节既是产品契约，也是当前实现的验收口径。
 
@@ -10,10 +10,10 @@
 
 - generate 只负责把用户选定的原型页面转换成经过预览验收的单文件 HTML Demo；不搭建正式前端工程，也不接管生成后的长期修改。
 - create 不是强制前置条件：有简报则继承，没有简报则从画板建立生成简报。
-- 每次生成都展示全部 frame 让用户选择；系统智能推荐并将推荐项置顶、显式标记和解释原因。宿主支持预选时可默认勾选；当前 DSH 不支持预选，因此不能伪装成已选择，用户始终拥有最终范围控制权。
+- 每次生成都展示全部可识别页面让用户选择；新页面来自语义化 rectangle 页面外框，旧命名 Frame 继续兼容。系统智能推荐并将推荐项置顶、显式标记和解释原因。宿主支持预选时可默认勾选；当前 DSH 不支持预选，因此不能伪装成已选择，用户始终拥有最终范围控制权。
 - 首次生成选择整体视觉方向，后续默认继承；不把颜色、字体、圆角和阴影拆成参数问卷。
 - 用户只选择一个整体视觉方向，工具在内部把它展开为气质、背景、主操作、语义色、密度、字体层级、布局策略、动效和视觉焦点，不增加额外问答。
-- 移动端或桌面端优先从 frame 推断，只有混合布局等真实歧义才询问。
+- 移动端或桌面端优先从统一页面边界尺寸推断，只有混合布局等真实歧义才询问。
 
 ### 原型门禁与确认
 
@@ -77,17 +77,22 @@
 - 读回校验认可工具自身执行的组件语义对齐修复；例如 Chip 标签从 `left/top` 规范为 `center/middle` 后仍返回 `verified=true`，不会在数据已经落盘后误报失败并诱发重复覆盖。
 - `draw2code_update` 写盘前会检查多行或预计换行的 `text` 是否有足够高度；失败返回 `layout-invalid`，不写入半截组件。
 - `rectangle`、`diamond`、`ellipse` 不再允许携带依赖 Excalidraw 形状文字的 `text`；按钮、卡片和输入框文案必须使用独立的 `text` 元素。
-- `bottom-navigation` 必须使用 `customData.role=bottom-navigation` 的矩形 shell 加独立标签，并位于 page frame 底部安全区；空 shell、互相重叠的栏目和普通一行“底部导航：...”文字都会被拒绝。
-- frame 内组件不得越过页面边界；成功写入后工具仍会返回 `layoutWarnings`，让模型能发现旧画板中已有的视觉问题。
+- `bottom-navigation` 必须使用 `customData.role=bottom-navigation` 的矩形 shell 加独立标签，并位于页面底部安全区；空 shell、互相重叠的栏目和普通一行“底部导航：...”文字都会被拒绝。
+- 页面内组件不得越过页面边界；成功写入后工具仍会返回 `layoutWarnings`，让模型能发现旧画板中已有的视觉问题。
 - 预检只阻塞本次 Agent 更新涉及的元素；用户已有的旧问题会作为提醒返回，不会阻塞用户继续手工编辑。
 - `draw2code_create action=start` 要求 Agent 基于完整需求先概括并显式传入语义化 `projectName`；工具不再用正则、关键词或前 N 字裁剪从原话造名称，只做合法性校验。确认后的画板名直接使用 `projectName`，不追加“原型”后缀；完整 `idea` 仍保存在项目草稿和简报中。
 - `draw2code_update` 会把 text 的 `containerId` 补成 Excalidraw 完整双向绑定；普通读取、打开画板和客户端写回不会借机改写既有故障样本。
 - Agent 新增绑定文字的组件时必须用 `customData.role` 声明按钮、选择框、输入框、Chip、卡片等产品语义；缺失时返回 `component-role-missing`，不再把未知控件静默写成左上对齐。
 - `button`、`primary-action`、`chip`、`tab`、`bottom-navigation-item` 等操作型文案不只规范为 `center/middle`，还会把文字盒缩至真实行高，并按外框几何重新计算垂直中心；`input`、`select`、`dropdown`、`search-field` 等表单值保持 `left/middle`，不会为了修按钮而误改输入内容。
 - 底部导航 shell 内的每个独立标签必须设置 `customData.role=bottom-navigation-item`；缺失时返回 `bottom-navigation-item-role-missing`。即使 Agent 错把多个栏目文字都绑定到 shell，update 也会将其修复为独立文字、保留各自槽位并按 shell 垂直居中；空 shell 返回 `bottom-navigation-items-missing`，栏目重叠返回 `bottom-navigation-item-overlap`。
-- 页面归属必须使用 `frameId`，`containerId` 只用于形状的唯一绑定标签。若 Agent 错把 text 的 `containerId` 指向 frame，update 会原子修复为 `containerId=null` 与对应 `frameId`，避免 mock 数据已经写进 JSON 但画布不显示。
+- 新页面归属通过 prototype-page rectangle 的几何范围判断，页面子元素保持 `frameId=null`；`containerId` 只用于形状的唯一绑定标签。旧 Frame 画板仍保留 `frameId` 兼容，若旧 Agent 错把 text 的 `containerId` 指向 frame，update 仍会原子修复为 `containerId=null` 与对应 `frameId`。
 - 原型不询问品牌视觉，但允许形状用 `customData.tone` 表达 primary、success、warning、danger、info、neutral 六种语义；使用浅底色和对应描边，且不覆盖显式颜色。
-- 完整页面 frame 使用 `customData.role=prototype-page` 和 `customData.mockDataMin` 声明最低 mock 数据数量；承载示例记录的可见 text 使用 `customData.role=mock-data`。数量不足或只写无意义占位符时返回 `mock-data-insufficient`，整批更新不落盘。
+- 完整新页面使用普通 rectangle 外框，设置 `customData.role=prototype-page`、`customData.pageName` 和 `customData.mockDataMin`；外框上方独立 text 使用 `role=prototype-page-label` 与 `pageId`。承载示例记录的可见 text 使用 `role=mock-data`。数量不足或只写无意义占位符时返回 `mock-data-insufficient`，整批更新不落盘。
+- 新页面组件不成组、不设 `frameId`，优先保证用户可以直接点选编辑；移动整页需要用户框选页面内容。用户在两个新页面之间手绘 Arrow 时，箭头保持画布级并完整显示，不受页面矩形裁切。
+- `draw2code_read` 返回规范字段 `pageNames`、`pages` 和 `pageRelations`，跨页箭头不混入任一页面 UI 内容；deprecated `frameNames` 返回相同页面名供旧调用兼容。
+- `draw2code_generate` 使用 `pages` 作为规范范围参数，`frames` 仅作兼容别名；两者同时传入但内容不一致时返回 `page-scope-conflict`。
+- 页面矩形重叠导致普通元素同时落在多个页面时返回 `page-membership-ambiguous` warning，不移动或重写用户元素。
+- 页面名称重复时读取返回 `page-name-duplicate`，generate 拒绝按名称猜测页面；用户需要先把页面改成唯一名称。
 
 ## 当前审查结论
 
@@ -135,13 +140,16 @@ bad-ops: ops[0] is "replace" but missing its scene
 
 - `npm run typecheck` 通过。
 - `npm run build` 通过，并生成 `dist/index.js` 与 `lib/client.js`。
-- `npm test` 通过：当前 68 个 Node 内置回归测试全部通过，覆盖 update 参数容错、同批净结果校验、frame 局部坐标安全换算、按钮文字真实几何居中、底部导航独立栏目/空壳/重叠门禁、语义修复后的读回校验、同步协调、已有画板和首次写入的并发竞争、删除不复活、delete-only 增量布局门禁、UTF-8 容量限制、当前画板目标解析、自动 reveal、项目草稿 revision 竞争、组件语义对齐、用户手工对齐保护、Agent 语义命名、create grilling、原型质量门禁和 generate 关联页推荐/恢复/验收流程。
+- `npm test` 通过：当前 82 个 Node 内置回归测试全部通过，覆盖无 Frame 页面外框与外部标题契约、跨页箭头及绑定文案归类、绑定优先级、同页箭头端点归属、用户手绘箭头保护、mock 数据增量删除门禁、重复页面名拒绝、rectangle/legacy Frame 混合画板、`pages`/`frames` 兼容冲突、update 参数容错、同批净结果校验、legacy Frame 局部坐标安全换算、按钮文字真实几何居中、底部导航门禁、同步协调、删除不复活、UTF-8 容量限制、当前画板目标解析、自动 reveal、create grilling、原型质量门禁和 generate 恢复/验收流程。
 - 项目包含 Node 内置回归入口和 `features/draw2code.feature` BDD 契约。
 - DeepSeek Harness 的真实界面已加载 `画码` 标签页，当前能看到 `prototype` 画板、`新画板` 菜单入口、Excalidraw 工具栏和原型文字元素；这证明插件注册与非空画板挂载路径至少可达。
 - 重新启动 `dsh web` 后，`GET /api/draw2code/active-board?root=<workspace>` 与 `GET /api/draw2code/reveal-request?root=<workspace>` 均能从真实 host 返回成功 envelope；仅刷新网页不足以重装 host bundle。
 - Harness 真实删除回归确认：用户删除与 Agent 新增发生并发冲突时，旧内容不会复活，Agent 新增内容仍会保留并显示。
 - Harness 最终 update 回归确认：新画板“更新容错回归三”只调用一次 `draw2code_update`，14 个 ops 一次应用并返回 `verified=true`；frame 局部坐标、Chip `left/top` 到 `center/middle` 的语义修复、嵌套 delete，以及同批 `upsert→delete` 均未触发重试。活动画板 API 返回该画板，磁盘读回为 12 个元素且 `temp-note` 不存在，真实画布可见“任务详情页”和三条检查项。
+- 无 Frame 真实协作回归确认：真实 DSH 0.3.0 在“无Frame回归”画板显示两个 `prototype-page` rectangle，页面内元素均为 `frameId=null`。用户通过 Excalidraw 箭头工具从“查看详情”按钮手工拖到第二页目标卡片，箭头完整跨过两个页面边界，磁盘读回 `frameId=null`、双端 binding 完整，`draw2code_read.pageRelations` 正确返回“任务列表 → 任务详情”。
+- 用户改动保护确认：用户又在真实画布把“评审需求文档 · 14:00”改为“评审需求文档 · 15:00”，随后 Agent 只新增“明天 10:00 复盘”组件；`draw2code_update` 返回 `verified=true`，读回确认手工文案、跨页箭头及其 binding 均未被覆盖，真实画布也同时可见三者。
+- Legacy Frame 兼容确认：真实 workspace 的“小猪清单”仍被读取为 5 个 `legacy-frame` 页面，deprecated `frames` 参数可以启动 generate 的 `page-scope` 选择；调用前后原画板 SHA-256 均为 `5307fa45aa5193d2d8c82245492261c8ae6fdd9726debda59fcdbb164bae6d36`，没有自动迁移或重写。
 
 ## 验收边界
 
-电脑验收只能证明 Harness 中的插件注册、画板显示和菜单交互；它不能替代 host 层的 replace、元数据保留和 workspace 安全测试。当前 host 回归已由 `npm test` 覆盖；客户端删除活动画板仍建议在真实宿主中补充一条 UI 自动化场景。
+电脑验收与 host 测试承担不同证据：真实 Harness 已覆盖插件加载、普通矩形页面显示、用户手绘跨页箭头、手工文字修改、Agent 增量更新和 legacy Frame generate 兼容；`npm test` 继续覆盖 replace、元数据保留、冲突合并和 workspace 安全边界。客户端删除活动画板仍建议后续补一条独立 UI 自动化场景。

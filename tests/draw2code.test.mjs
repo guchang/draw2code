@@ -792,6 +792,293 @@ test('draw2code_update accepts a complete low-fi mobile page layout', async () =
   assert.equal(result.layoutWarnings.length, 0)
 })
 
+test('draw2code_update uses a rectangle page shell and rejects a new prototype frame', async () => {
+  const { root, store } = await makeStore()
+  const update = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    update.execute({
+      root,
+      name: 'no-frame-pages',
+      ops: [{
+        op: 'upsert',
+        element: {
+          id: 'legacy-shaped-new-page',
+          type: 'frame',
+          name: '任务列表',
+          x: 0,
+          y: 40,
+          width: 390,
+          height: 844,
+          customData: { role: 'prototype-page', mockDataMin: 3 },
+        },
+      }],
+    }, {}),
+    /prototype-page-frame-deprecated/u,
+  )
+
+  const result = await update.execute({
+    root,
+    name: 'no-frame-pages',
+    ops: [
+      { op: 'upsert', element: { id: 'page-list', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表', mockDataMin: 3 } } },
+      { op: 'upsert', element: { id: 'page-list-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 180, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-list' } } },
+      { op: 'upsert', element: { id: 'task-a', type: 'text', text: '修复登录闪退 · 进行中', frameId: 'page-list', x: 24, y: 140, width: 320, height: 32, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'task-b', type: 'text', text: '评审需求文档 · 14:00', x: 24, y: 200, width: 320, height: 32, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'task-c', type: 'text', text: '整理回归用例 · 已完成', x: 24, y: 260, width: 320, height: 32, customData: { role: 'mock-data' } } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const board = await store.read(root, 'no-frame-pages')
+  assert.equal(board.ok, true)
+  assert.equal(board.value.scene.elements.some((element) => element.type === 'frame'), false)
+  assert.equal(board.value.scene.elements.filter((element) => element.id.startsWith('task-')).every((element) => element.frameId === null), true)
+})
+
+test('draw2code_update applies mock-data quality gates to rectangle page shells', async () => {
+  const { root, store } = await makeStore()
+  const update = draw2codeUpdateTool(store)
+
+  await assert.rejects(
+    update.execute({
+      root,
+      name: 'page-shell-mock-gate',
+      ops: [
+        { op: 'upsert', element: { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '好友列表', mockDataMin: 3 } } },
+        { op: 'upsert', element: { id: 'page-label', type: 'text', text: '好友列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } } },
+        { op: 'upsert', element: { id: 'only-row', type: 'text', text: '林小满 · 18:42 在线', x: 24, y: 140, width: 320, height: 32, customData: { role: 'mock-data' } } },
+      ],
+    }, {}),
+    /mock-data-insufficient/u,
+  )
+})
+
+test('draw2code_update rechecks a rectangle page when mock data is deleted or loses its role', async () => {
+  const { root, store } = await makeStore()
+  const update = draw2codeUpdateTool(store)
+  const page = { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '好友列表', mockDataMin: 3 } }
+  const pageLabel = { id: 'page-label', type: 'text', text: '好友列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } }
+  const records = [
+    { id: 'friend-a', type: 'text', text: '林小满 · 18:42 在线', x: 24, y: 140, width: 320, height: 32, customData: { role: 'mock-data' } },
+    { id: 'friend-b', type: 'text', text: '周可乐 · 14:20 已读', x: 24, y: 200, width: 320, height: 32, customData: { role: 'mock-data' } },
+    { id: 'friend-c', type: 'text', text: '陈一川 · 昨天聊过', x: 24, y: 260, width: 320, height: 32, customData: { role: 'mock-data' } },
+  ]
+  assert.equal((await update.execute({
+    root,
+    name: 'page-shell-incremental-mock-gate',
+    ops: [page, pageLabel, ...records].map((element) => ({ op: 'upsert', element })),
+  }, {})).verified, true)
+
+  await assert.rejects(
+    update.execute({
+      root,
+      name: 'page-shell-incremental-mock-gate',
+      ops: [{ op: 'delete', id: 'friend-c' }],
+    }, {}),
+    /mock-data-insufficient/u,
+  )
+  await assert.rejects(
+    update.execute({
+      root,
+      name: 'page-shell-incremental-mock-gate',
+      ops: [{ op: 'upsert', element: { ...records[2], customData: { role: 'helper-text' } } }],
+    }, {}),
+    /mock-data-insufficient/u,
+  )
+
+  const board = await store.read(root, 'page-shell-incremental-mock-gate')
+  assert.equal(board.ok, true)
+  assert.equal(board.value.scene.elements.find((element) => element.id === 'friend-c').customData.role, 'mock-data')
+})
+
+test('draw2code_update requires a mock-data minimum and one external label on each new page shell', async () => {
+  const { root, store } = await makeStore()
+  const update = draw2codeUpdateTool(store)
+  await assert.rejects(
+    update.execute({
+      root,
+      name: 'page-shell-contract',
+      ops: [{ op: 'upsert', element: { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表' } } }],
+    }, {}),
+    /prototype-page-mock-min-missing[\s\S]*prototype-page-label-missing/u,
+  )
+})
+
+test('draw2code_read exposes rectangle pages and cross-page relations without claiming the arrow', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'page-relations', {
+    elements: [
+      { id: 'page-list', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表' } },
+      { id: 'page-list-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 180, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-list' } },
+      { id: 'open-detail', type: 'rectangle', x: 286, y: 120, width: 80, height: 40, customData: { role: 'button' } },
+      { id: 'list-filter', type: 'rectangle', x: 24, y: 120, width: 80, height: 40, customData: { role: 'button' } },
+      { id: 'same-page-flow', type: 'arrow', x: -600, y: -200, width: 100, height: 0, points: [[0, 0], [100, 0]], startBinding: { elementId: 'list-filter', focus: 0, gap: 4 }, endBinding: { elementId: 'open-detail', focus: 0, gap: 4 } },
+      { id: 'page-detail', type: 'rectangle', x: 480, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务详情' } },
+      { id: 'page-detail-label', type: 'text', text: '任务详情', x: 480, y: 4, width: 180, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-detail' } },
+      {
+        id: 'open-detail-flow',
+        type: 'arrow',
+        x: 366,
+        y: 140,
+        width: 114,
+        height: 0,
+        points: [[0, 0], [114, 0]],
+        frameId: null,
+        startBinding: { elementId: 'open-detail', focus: 0, gap: 4 },
+        endBinding: { elementId: 'page-detail', focus: 0, gap: 4 },
+      },
+      { id: 'open-detail-flow-label', type: 'text', text: '查看详情', x: 400, y: 112, width: 72, height: 24, containerId: 'open-detail-flow' },
+    ],
+  })
+
+  const read = await draw2codeReadTool(store).execute({ root, name: 'page-relations' }, {})
+  assert.deepEqual(read.pageNames, ['任务列表', '任务详情'])
+  assert.equal(read.pages[0].kind, 'page-shell')
+  assert.equal(read.pages[0].elementIds.includes('open-detail'), true)
+  assert.equal(read.pages[0].elementIds.includes('same-page-flow'), true)
+  assert.equal(read.pages[0].elementIds.includes('open-detail-flow'), false)
+  assert.equal(read.pages.every((page) => !page.elementIds.includes('open-detail-flow-label')), true)
+  assert.deepEqual(read.pageRelations, [{
+    id: 'open-detail-flow',
+    sourcePage: '任务列表',
+    targetPage: '任务详情',
+    sourceElementId: 'open-detail',
+    targetElementId: 'page-detail',
+    label: '查看详情',
+  }])
+  assert.deepEqual(read.frameNames, ['任务列表', '任务详情'])
+})
+
+test('an existing binding target with no unique page does not fall back to endpoint coordinates', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'binding-priority', {
+    elements: [
+      { id: 'page-a', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 A' } },
+      { id: 'page-b', type: 'rectangle', x: 480, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 B' } },
+      { id: 'source', type: 'rectangle', x: 300, y: 120, width: 60, height: 40 },
+      { id: 'outside-target', type: 'rectangle', x: 1000, y: 120, width: 60, height: 40 },
+      { id: 'bound-arrow', type: 'arrow', x: 360, y: 140, width: 120, height: 0, points: [[0, 0], [120, 0]], startBinding: { elementId: 'source', focus: 0, gap: 4 }, endBinding: { elementId: 'outside-target', focus: 0, gap: 4 } },
+    ],
+  })
+
+  const read = await draw2codeReadTool(store).execute({ root, name: 'binding-priority' }, {})
+  assert.deepEqual(read.pageRelations, [])
+})
+
+test('draw2code_read supports mixed rectangle pages and legacy frames without migrating either', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'mixed-page-models', {
+    elements: [
+      { id: 'modern', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表' } },
+      { id: 'modern-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'modern' } },
+      { id: 'modern-title', type: 'text', text: '今天的任务', x: 24, y: 100, width: 240, height: 32 },
+      { id: 'legacy', type: 'frame', name: '任务详情', x: 480, y: 40, width: 390, height: 844 },
+      { id: 'legacy-title', type: 'text', text: '修复登录闪退', frameId: 'legacy', x: 504, y: 100, width: 240, height: 32 },
+    ],
+  })
+
+  const read = await draw2codeReadTool(store).execute({ root, name: 'mixed-page-models' }, {})
+  assert.deepEqual(read.pageNames, ['任务列表', '任务详情'])
+  assert.deepEqual(read.frameNames, ['任务列表', '任务详情'])
+  assert.deepEqual(read.pages.map((page) => page.kind), ['page-shell', 'legacy-frame'])
+
+  const board = await store.read(root, 'mixed-page-models')
+  assert.equal(board.ok, true)
+  assert.equal(board.value.scene.elements.find((element) => element.id === 'modern').type, 'rectangle')
+  assert.equal(board.value.scene.elements.find((element) => element.id === 'legacy').type, 'frame')
+})
+
+test('draw2code_update preserves a user-added cross-page arrow when adding another component', async () => {
+  const { root, store } = await makeStore()
+  const update = draw2codeUpdateTool(store)
+  await update.execute({
+    root,
+    name: 'manual-arrow-preserved',
+    ops: [
+      { op: 'upsert', element: { id: 'page-one', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表', mockDataMin: 3 } } },
+      { op: 'upsert', element: { id: 'page-one-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-one' } } },
+      { op: 'upsert', element: { id: 'page-two', type: 'rectangle', x: 480, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务详情', mockDataMin: 3 } } },
+      { op: 'upsert', element: { id: 'page-two-label', type: 'text', text: '任务详情', x: 480, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-two' } } },
+      { op: 'upsert', element: { id: 'open-detail', type: 'rectangle', x: 286, y: 120, width: 80, height: 40, customData: { role: 'button' } } },
+      { op: 'upsert', element: { id: 'list-task-a', type: 'text', text: '修复登录闪退 · 进行中', x: 24, y: 200, width: 300, height: 28, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'list-task-b', type: 'text', text: '评审需求文档 · 14:00', x: 24, y: 248, width: 300, height: 28, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'list-task-c', type: 'text', text: '整理回归用例 · 已完成', x: 24, y: 296, width: 300, height: 28, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'detail-item-a', type: 'text', text: '复现路径确认 · 已完成', x: 504, y: 200, width: 300, height: 28, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'detail-item-b', type: 'text', text: '竞态修复自测 · 已完成', x: 504, y: 248, width: 300, height: 28, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'detail-item-c', type: 'text', text: '回归用例补充 · 进行中', x: 504, y: 296, width: 300, height: 28, customData: { role: 'mock-data' } } },
+    ],
+  }, {})
+
+  const beforeManualEdit = await store.read(root, 'manual-arrow-preserved')
+  assert.equal(beforeManualEdit.ok, true)
+  const manualArrow = {
+    id: 'user-cross-page-arrow',
+    type: 'arrow',
+    x: 366,
+    y: 140,
+    width: 114,
+    height: 0,
+    points: [[0, 0], [114, 0]],
+    frameId: null,
+    startBinding: { elementId: 'open-detail', focus: 0, gap: 4 },
+    endBinding: { elementId: 'page-two', focus: 0, gap: 4 },
+  }
+  assert.equal((await store.write(root, 'manual-arrow-preserved', {
+    elements: [...beforeManualEdit.value.scene.elements, manualArrow],
+  })).ok, true)
+
+  const result = await update.execute({
+    root,
+    name: 'manual-arrow-preserved',
+    ops: [{ op: 'upsert', element: { id: 'detail-owner', type: 'text', text: '负责人：陈舟', x: 504, y: 120, width: 240, height: 32 } }],
+  }, {})
+  assert.equal(result.verified, true)
+
+  const board = await store.read(root, 'manual-arrow-preserved')
+  assert.equal(board.ok, true)
+  const preservedArrow = board.value.scene.elements.find((element) => element.id === 'user-cross-page-arrow')
+  assert.equal(preservedArrow.frameId, null)
+  assert.deepEqual(preservedArrow.points, manualArrow.points)
+  assert.deepEqual(preservedArrow.startBinding, manualArrow.startBinding)
+  assert.deepEqual(preservedArrow.endBinding, manualArrow.endBinding)
+})
+
+test('draw2code_read warns when overlapping page shells make ownership ambiguous', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'overlapping-pages', {
+    elements: [
+      { id: 'page-a', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 A' } },
+      { id: 'page-b', type: 'rectangle', x: 300, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 B' } },
+      { id: 'ambiguous', type: 'text', text: '无法唯一归属', x: 320, y: 120, width: 60, height: 28 },
+    ],
+  })
+
+  const read = await draw2codeReadTool(store).execute({ root, name: 'overlapping-pages' }, {})
+  assert.equal(read.layoutWarnings.some((warning) => warning.code === 'page-membership-ambiguous' && warning.id === 'ambiguous'), true)
+})
+
+test('duplicate page names are reported and block name-based generation', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'duplicate-page-names', {
+    elements: [
+      { id: 'page-a', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务详情' } },
+      { id: 'page-b', type: 'frame', name: '任务详情', x: 480, y: 40, width: 390, height: 844 },
+    ],
+  })
+
+  const read = await draw2codeReadTool(store).execute({ root, name: 'duplicate-page-names' }, {})
+  assert.equal(read.layoutWarnings.some((warning) => warning.code === 'page-name-duplicate' && warning.id === 'page-b'), true)
+
+  const generated = await draw2codeGenerateTool(store).execute({
+    root,
+    action: 'start',
+    name: 'duplicate-page-names',
+  }, {})
+  assert.equal(generated.status, 'error')
+  assert.equal(generated.error.code, 'page-name-duplicate')
+})
+
 test('draw2code_update aligns semantic controls without centering form values', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
@@ -1005,24 +1292,24 @@ test('draw2code_update rejects a completed prototype page without enough visible
   const tool = draw2codeUpdateTool(store)
   const page = {
     id: 'friends-page',
-    type: 'frame',
-    name: '好友列表',
-    customData: { role: 'prototype-page', mockDataMin: 3 },
+    type: 'rectangle',
+    customData: { role: 'prototype-page', pageName: '好友列表', mockDataMin: 3 },
     x: 0,
-    y: 0,
+    y: 40,
     width: 420,
     height: 860,
   }
   const firstTwoFriends = [
-    { id: 'friend-1', type: 'text', text: '林小满 · 周末一起去徒步吗？ · 18:42', customData: { role: 'mock-data' }, frameId: 'friends-page', x: 24, y: 120, width: 360, height: 32 },
-    { id: 'friend-2', type: 'text', text: '周可乐 · 碰一碰成功啦 · 14:20', customData: { role: 'mock-data' }, frameId: 'friends-page', x: 24, y: 180, width: 360, height: 32 },
+    { id: 'friend-1', type: 'text', text: '林小满 · 周末一起去徒步吗？ · 18:42', customData: { role: 'mock-data' }, x: 24, y: 120, width: 360, height: 32 },
+    { id: 'friend-2', type: 'text', text: '周可乐 · 碰一碰成功啦 · 14:20', customData: { role: 'mock-data' }, x: 24, y: 180, width: 360, height: 32 },
   ]
+  const pageLabel = { id: 'friends-page-label', type: 'text', text: '好友列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'friends-page' } }
 
   await assert.rejects(
     tool.execute({
       root,
       name: 'mock-data-gate',
-      ops: [page, ...firstTwoFriends].map((element) => ({ op: 'upsert', element })),
+      ops: [page, pageLabel, ...firstTwoFriends].map((element) => ({ op: 'upsert', element })),
     }, {}),
     /layout-invalid[\s\S]*mock-data-insufficient[\s\S]*requires 3[\s\S]*found 2/i,
   )
@@ -1032,8 +1319,9 @@ test('draw2code_update rejects a completed prototype page without enough visible
     name: 'mock-data-gate',
     ops: [
       page,
+      pageLabel,
       ...firstTwoFriends,
-      { id: 'friend-3', type: 'text', text: '陈一川 · 下次一起喝咖啡 · 昨天', customData: { role: 'mock-data' }, frameId: 'friends-page', x: 24, y: 240, width: 360, height: 32 },
+      { id: 'friend-3', type: 'text', text: '陈一川 · 下次一起喝咖啡 · 昨天', customData: { role: 'mock-data' }, x: 24, y: 240, width: 360, height: 32 },
     ].map((element) => ({ op: 'upsert', element })),
   }, {})
 
@@ -1204,6 +1492,84 @@ test('draw2code_generate starts with an explicit page-scope choice instead of ge
   assert.equal(result.question.options.find((option) => option.valueLabel === '好友列表').reason, '与用户点名页面存在直接 Arrow 交互关系')
   assert.equal(result.outputDir, undefined)
   assert.equal(result.instructions, undefined)
+})
+
+test('draw2code_generate selects rectangle pages through pages and keeps frames as a compatibility alias', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'generate-page-shells', {
+    elements: [
+      { id: 'list', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表', mockDataMin: 3 } },
+      { id: 'list-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'list' } },
+      { id: 'list-a', type: 'text', text: '修复登录闪退 · 进行中', x: 24, y: 140, width: 320, height: 32, customData: { role: 'mock-data' } },
+      { id: 'list-b', type: 'text', text: '评审需求文档 · 14:00', x: 24, y: 200, width: 320, height: 32, customData: { role: 'mock-data' } },
+      { id: 'list-c', type: 'text', text: '整理回归用例 · 已完成', x: 24, y: 260, width: 320, height: 32, customData: { role: 'mock-data' } },
+      { id: 'detail', type: 'rectangle', x: 480, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务详情', mockDataMin: 3 } },
+      { id: 'detail-label', type: 'text', text: '任务详情', x: 480, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'detail' } },
+      { id: 'detail-a', type: 'text', text: '负责人：陈舟', x: 504, y: 140, width: 320, height: 32, customData: { role: 'mock-data' } },
+      { id: 'detail-b', type: 'text', text: '截止：今天 18:00', x: 504, y: 200, width: 320, height: 32, customData: { role: 'mock-data' } },
+      { id: 'detail-c', type: 'text', text: '优先级：高', x: 504, y: 260, width: 320, height: 32, customData: { role: 'mock-data' } },
+      { id: 'list-detail', type: 'arrow', x: 390, y: 180, width: 90, height: 0, points: [[0, 0], [90, 0]] },
+      { id: 'list-detail-label', type: 'text', text: '查看详情', x: 400, y: 148, width: 72, height: 24, containerId: 'list-detail' },
+    ],
+  })
+
+  const tool = draw2codeGenerateTool(store)
+  const started = await tool.execute({
+    root,
+    action: 'start',
+    name: 'generate-page-shells',
+    pages: ['任务列表'],
+    styleNote: '简洁现代',
+  }, {})
+
+  assert.equal(started.status, 'question')
+  assert.deepEqual(started.question.options.map((option) => option.valueLabel), ['任务列表', '任务详情'])
+  assert.equal(started.question.options.find((option) => option.valueLabel === '任务列表').recommended, true)
+
+  const ready = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    questionId: 'page-scope',
+    values: ['任务列表'],
+  }, {})
+  assert.equal(ready.status, 'ready')
+
+  const confirmed = await tool.execute({
+    root,
+    action: 'confirm',
+    sessionId: ready.sessionId,
+    revision: ready.revision,
+  }, {})
+  assert.equal(confirmed.status, 'confirmed')
+  assert.equal(confirmed.scope, 'pages')
+  assert.deepEqual(confirmed.pageNames, ['任务列表'])
+  assert.deepEqual(confirmed.frameNames, ['任务列表'])
+  assert.equal(confirmed.elements.some((element) => element.id === 'list'), true)
+  assert.equal(confirmed.elements.some((element) => element.id === 'detail'), false)
+  assert.equal(confirmed.unassignedElementCount, 0)
+})
+
+test('draw2code_generate rejects conflicting pages and frames instead of guessing', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'generate-scope-conflict', {
+    elements: [
+      { id: 'list', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表' } },
+      { id: 'detail', type: 'frame', name: '任务详情', x: 480, y: 40, width: 390, height: 844 },
+    ],
+  })
+
+  const result = await draw2codeGenerateTool(store).execute({
+    root,
+    action: 'start',
+    name: 'generate-scope-conflict',
+    pages: ['任务列表'],
+    frames: ['任务详情'],
+  }, {})
+
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'page-scope-conflict')
 })
 
 test('draw2code_generate keeps unselected connected pages in the final brief', async () => {
@@ -2054,6 +2420,9 @@ test('draw2code_create confirms an isolated board and hands off to update', asyn
   assert.equal(state.status, 'ready')
   assert.equal(state.brief.pages.length, 3)
   assert.equal(state.brief.deferredStyleNote, null)
+  assert.match(state.brief.mockDataPolicy.updateContract, /rectangle/u)
+  assert.match(state.brief.mockDataPolicy.updateContract, /pageName/u)
+  assert.doesNotMatch(state.brief.mockDataPolicy.updateContract, /页面 frame/u)
 
   const confirmed = await create.execute({
     root,
@@ -2078,8 +2447,12 @@ test('draw2code_create confirms an isolated board and hands off to update', asyn
     root,
     name: confirmed.boardName,
     ops: [
-      { op: 'upsert', element: { id: 'page-query', type: 'frame', name: '日期查询', x: 0, y: 0, width: 420, height: 720 } },
-      { op: 'upsert', element: { id: 'query-title', type: 'text', text: '选择日期和城市', x: 24, y: 32, width: 300, height: 40 } },
+      { op: 'upsert', element: { id: 'page-query', type: 'rectangle', x: 0, y: 40, width: 420, height: 720, customData: { role: 'prototype-page', pageName: '日期查询', mockDataMin: 3 } } },
+      { op: 'upsert', element: { id: 'page-query-label', type: 'text', text: '日期查询', x: 0, y: 4, width: 180, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-query' } } },
+      { op: 'upsert', element: { id: 'query-title', type: 'text', text: '选择日期和城市', x: 24, y: 64, width: 300, height: 40 } },
+      { op: 'upsert', element: { id: 'query-city', type: 'text', text: '北京 · 朝阳区', x: 24, y: 110, width: 300, height: 32, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'query-date', type: 'text', text: '2026 年 8 月 22 日', x: 24, y: 160, width: 300, height: 32, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'query-weather', type: 'text', text: '晴 · 18–28℃', x: 24, y: 210, width: 300, height: 32, customData: { role: 'mock-data' } } },
     ],
   }, {})
   assert.equal(drawn.verified, true)
