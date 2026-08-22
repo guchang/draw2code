@@ -1,9 +1,9 @@
 /**
- * The model-facing grilling contract for draw2code_create.
+ * Legacy Create v1 questionnaire and brief derivation.
  *
- * The question set has a small stable core. Options are contextual so a
- * domain like "万年历穿搭" gets useful semantic choices without turning the
- * tool into a giant industry questionnaire.
+ * Confirmed v1 projects keep using this module for backward compatibility.
+ * New and resumed unfinished projects use the adaptive v2 discovery contract
+ * in create-discovery.ts and the executable brief in prototype-brief.ts.
  */
 
 export interface CreateOption {
@@ -15,6 +15,11 @@ export interface CreateOption {
 export interface CreateQuestion {
   id: string
   kind: 'choice' | 'interpretation'
+  dimension?: string
+  insight?: string
+  decisionImpact?: string
+  recommendedOptionId?: string
+  dependsOn?: string[]
   text: string
   selectionMode: 'single' | 'multiple'
   options: CreateOption[]

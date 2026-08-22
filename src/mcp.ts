@@ -7,6 +7,7 @@ import { Draw2CodeDaemonClient } from './daemon-client.ts'
 import { DRAW2CODE_UI_HTML, DRAW2CODE_UI_URI } from './mcp-ui.ts'
 import type { Draw2CodeCommand, Draw2CodeResult, HostContext } from './runtime.ts'
 import workflowContract from '../references/workflow-contract.md'
+import { CREATE_ACTIONS } from './create-contract.ts'
 
 const here = resolve(fileURLToPath(import.meta.url), '..')
 const daemonEntry = process.env.DRAW2CODE_DAEMON_ENTRY ?? resolve(here, 'draw2code-daemon.js')
@@ -17,7 +18,7 @@ const openedWorkspaces = new Set<string>()
 const instructions = workflowContract
 
 const server = new McpServer(
-  { name: 'draw2code', title: 'Draw2Code / 画码', version: '0.4.0' },
+  { name: 'draw2code', title: 'Draw2Code / 画码', version: '0.5.0' },
   { capabilities: { tools: {}, resources: {} }, instructions },
 )
 
@@ -98,7 +99,7 @@ server.registerTool('draw2code_create', {
   description: 'Run the resumable Create state machine. Preserve structured question fields for native host choices.',
   inputSchema: {
     root,
-    action: z.enum(['start', 'answer', 'revise', 'rename', 'resume', 'list', 'confirm', 'abandon', 'archive']),
+    action: z.enum(CREATE_ACTIONS),
     idea: z.string().optional(),
     projectName: z.string().optional(),
     styleNote: z.string().optional(),
@@ -107,6 +108,9 @@ server.registerTool('draw2code_create', {
     questionId: z.string().optional(),
     values: z.array(z.string()).optional(),
     otherText: z.string().optional(),
+    question: z.record(z.unknown()).optional(),
+    brief: z.record(z.unknown()).optional(),
+    stopReason: z.string().optional(),
   },
 }, async ({ root, ...input }) => execute({ type: 'create', root, input }))
 

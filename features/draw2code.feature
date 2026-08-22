@@ -446,15 +446,14 @@ Feature: 画码原型板的人机协作
     When 用户明确说“按照最新画板重新生成”
     Then 才应开始新一轮 generate
 
-  Scenario: 新项目必须先进入 choice-first grilling，确认前不创建画板
+  Scenario: 新项目必须先进入自适应 discovery，确认前不创建画板
     When 用户说“我想做一个万年历穿搭工具”
     Then 模型应调用 draw2code_create 的 action=start
-    And 工具结果应返回 status 为 question
-    And 工具结果应返回目标端的结构化 options
-    And 工具结果应允许用户选择“其他”并补充文字
-    And 模型应优先调用 ask_user_question 展示单个选择题
-    And ask_user_question 应保留工具结果中的全部 options
-    And 用户不应被要求把选项编号重新输入聊天框
+    And 工具结果应返回 status 为 discovery
+    And 工具结果应列出已明确事实、待解决维度和最多 10 题的剩余预算
+    And 模型不应固定返回目标端、核心用户、模块或页面问题
+    And 信息不足时模型应调用 action=propose_question 提交产品专属洞察和有取舍的选项
+    And 信息足够时模型应调用 action=synthesize 提交完整 PrototypeBrief
     And workspace 中不应创建新的 Excalidraw 画板
 
   Scenario: 长需求描述不应直接成为画板名称
@@ -472,32 +471,67 @@ Feature: 画码原型板的人机协作
     And draw2code_create 不应自行从用户原话生成或裁剪名称
     And 用户确认后创建的画板名应为“龙珠雷达社交”
 
-  Scenario: 项目简报必须提供逐页 mock 数据蓝图
-    Given 用户创建一个陌生人社交 App
-    When draw2code_create 整理出雷达首页、碰一碰和好友聊天页
-    Then brief.pageMockData 应为每个页面给出 requiredContent 和 examples
-    And 雷达首页应包含至少 3 个带昵称和距离的附近用户示例
-    And 好友聊天页应包含好友最近消息、时间和至少 3 条双方对话
-    And brief.mockDataPolicy 应禁止空白方框和无意义占位符
+  Scenario: 项目简报必须是可直接绘制的完整原型文档
+    Given 用户已明确个人四象限待办清单的核心场景、机制、首版流程和范围
+    When Agent 调用 action=synthesize 提交 PrototypeBrief
+    Then 工具应确定性生成同一份 briefMarkdown、pageBlueprints 和 pageMockData
+    And briefMarkdown 应包含产品定义、原型结构、逐页页面目标、页面结构和真实 mock 数据
+    And briefMarkdown 应包含页面关系、原型表达原则、验收方式和默认假设
+    And 今日四象限页应包含至少 9 条真实任务
+    And 编辑页应包含完整的真实编辑案例
+    And ready 结果应完整展示 briefMarkdown 而不是“需求已整理完成”的摘要
 
-  Scenario: grilling 每次推进一个问题并保存项目草稿
+  Scenario: discovery 每次只推进一个有洞察的问题并保存项目草稿
     Given 用户已经启动“万年历穿搭工具”的 draw2code_create 会话
-    When 用户选择“Web”作为目标端
-    Then 模型应用 action=answer 提交 questionId 和 option id
-    And 工具结果应只返回下一个问题
+    When Agent 提交“推荐应基于天气还是用户真实衣橱”的产品专属问题
+    Then 问题应先展示 insight，再展示 2–4 个带价值和代价说明的选项
+    And 工具应自动补充“还没想好”和“其他”
+    And 模型应用 action=answer 提交 questionId 和 option id 后应返回 discovery
     And 项目草稿 revision 应递增
-    And 重复提交同一个 revision 的同一个答案应返回幂等结果
+    And 重复提交同一个 revision 的同一个 mutation 应返回幂等结果
+
+  Scenario: discovery 不能无限追问或重复模块和页面
+    Given 用户已经连续回答 10 个产品决策问题
+    When Agent 继续调用 action=propose_question
+    Then 工具应返回 question_limit_reached
+    And 要求 Agent 调用 action=synthesize
+    But “需要哪些核心模块”和“需要画哪些核心页面”不应作为两道独立问题
+
+  Scenario: 跳过或直接整理不会卡在待回答问题
+    Given draw2code_create 当前有一个待回答的产品问题
+    When 用户跳过本题
+    Then Agent 应调用 action=skip
+    And 该决策应保留为待验证假设
+    And discovery 应继续判断其他高价值问题
+    When 用户在原生问题卡片选择“直接整理项目简报”
+    Then Agent 应把 synthesize-now 作为 answer 提交
+    And discovery.nextAction 应为 synthesize
+    And Agent 可直接调用 action=synthesize
+    And 当前未回答问题不应阻止进入 ready
+
+  Scenario: ready 后调整方向只重新打开受影响的决策
+    Given 用户已看到完整 briefMarkdown
+    When 用户选择“调整首版范围”
+    Then Agent 应调用 action=propose_question 只追问受影响的一项
+    And 旧 brief 与 briefMarkdown 应立即失效
+    And 回答后应重新 synthesize 完整项目简报
+
+  Scenario: 问题预算按完整历史计算且问题必须引用当前产品
+    Given 一个依赖问题因修改历史答案而失效
+    Then 该问题仍应保留在动态问题历史中并计入最多 10 题
+    When Agent 给万年历穿搭产品提交陌生人雷达的连接问题
+    Then 工具应返回 question_not_grounded
 
   Scenario: 用户回答“其他”时不应重复确认同一段原话
-    Given draw2code_create 当前正在询问目标端
-    When 用户选择“其他”并输入“先做小程序，后面再扩展到 Web”
+    Given draw2code_create 当前正在询问一个产品专属的触发场景问题
+    When 用户选择“其他”并输入“每天下班后规划第二天”
     Then 工具应直接记录这条自由文字
-    And 工具应继续返回核心用户问题
+    And 工具应返回 discovery 让 Agent 判断下一项最高价值的问题
     And 工具不应再返回 interpretation 复述确认
     And 用户只需在 ready 项目简报统一确认一次
 
   Scenario: 用户确认简报后才创建独立画板并交给 update
-    Given 用户已完成目标端、用户、目标、核心流程、模块和页面问题
+    Given 用户已经看过由 PrototypeBrief 确定性生成的完整 briefMarkdown
     And 当前活动画板“prototype”中有用户原有内容
     When 用户确认项目简报并调用 draw2code_create 的 action=confirm
     Then 工具应创建一个独立的新画板
@@ -505,6 +539,7 @@ Feature: 画码原型板的人机协作
     And 新画板应为空
     And 工具结果的 nextAction 应为“draw2code_update”
     And 工具结果应返回新画板名称
+    And confirmed.brief 应与用户刚才看到的简报来自同一份 PrototypeBrief
 
   Scenario: 新画板确认后应在当前 Harness 画布中可见
     Given draw2code_create 已确认并把新画板设为 activeBoard

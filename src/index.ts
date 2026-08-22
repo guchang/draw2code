@@ -58,6 +58,23 @@ export function normalizeOpsArg(ops: unknown): unknown[] {
   throw new Error('ops must be an array or a JSON string encoding an array')
 }
 
+/** Preserve visual-review evidence when the host stringifies JSON parameters. */
+export function normalizeVisualReviewArg(visualReview: unknown): Record<string, unknown> | undefined {
+  if (visualReview === undefined) return undefined
+  let parsed = visualReview
+  if (typeof visualReview === 'string' && visualReview.trim() !== '') {
+    try {
+      parsed = JSON.parse(visualReview)
+    } catch (error) {
+      throw new Error(`visualReview is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>
+  }
+  throw new Error('visualReview must be an object or a JSON string encoding an object')
+}
+
 /**
  * Mount the scene store, routes, tools, and announcement.
  * @param ctx - host plugin context carrying webServer/tools/systemPrompt/workspaceRegistry.
@@ -75,13 +92,16 @@ export function apply(ctx: Context): void {
     daemonTool(ctx, client, localTools[0], (args) => ({ type: 'list', root: String(args.root ?? '') })),
     daemonTool(ctx, client, localTools[1], (args) => ({ type: 'read', root: String(args.root ?? ''), ...(typeof args.name === 'string' ? { board: args.name } : {}) })),
     daemonTool(ctx, client, localTools[2], (args) => { const { root, ...input } = args; return { type: 'create', root: String(root ?? ''), input } }),
-    daemonTool(ctx, client, localTools[3], (args) => ({
-      type: 'update', root: String(args.root ?? ''), ops: normalizeOpsArg(args.ops),
-      ...(typeof args.name === 'string' ? { board: args.name } : {}),
-      ...(typeof args.force === 'boolean' ? { force: args.force } : {}),
-      ...(typeof args.safeMode === 'boolean' ? { safeMode: args.safeMode } : {}),
-      ...(typeof args.visualReview === 'object' && args.visualReview !== null ? { visualReview: args.visualReview as Record<string, unknown> } : {}),
-    })),
+    daemonTool(ctx, client, localTools[3], (args) => {
+      const visualReview = normalizeVisualReviewArg(args.visualReview)
+      return {
+        type: 'update', root: String(args.root ?? ''), ops: normalizeOpsArg(args.ops),
+        ...(typeof args.name === 'string' ? { board: args.name } : {}),
+        ...(typeof args.force === 'boolean' ? { force: args.force } : {}),
+        ...(typeof args.safeMode === 'boolean' ? { safeMode: args.safeMode } : {}),
+        ...(visualReview === undefined ? {} : { visualReview }),
+      }
+    }),
     daemonTool(ctx, client, localTools[4], (args) => { const { root, ...input } = args; return { type: 'generate', root: String(root ?? ''), input } }),
   ]
 

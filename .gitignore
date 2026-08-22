@@ -4,5 +4,5 @@ node_modules/
 npm-debug.log*
 
 # Runtime data belongs to the user's workspace, never to this repository.
-draw2code/
-draw2code-pages/
+/draw2code/
+/draw2code-pages/

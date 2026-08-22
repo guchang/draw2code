@@ -19,6 +19,21 @@ var PROJECTS_DIR = `${SCENE_DIR}/.projects`;
 // src/create-tool.ts
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
+// src/create-discovery.ts
+var DISCOVERY_DIMENSION_IDS = [
+  "trigger-context",
+  "existing-alternative",
+  "core-outcome",
+  "unique-mechanism",
+  "core-loop",
+  "critical-risk",
+  "scope-proof",
+  "target-user",
+  "target-platform",
+  "product-architecture"
+];
+var DISCOVERY_DIMENSIONS = new Set(DISCOVERY_DIMENSION_IDS);
+
 // src/tools.ts
 import { defineTool as defineTool2 } from "@deepseek-ai/dsh-tools";
 

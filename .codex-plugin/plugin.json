@@ -1,6 +1,6 @@
 {
   "name": "draw2code",
-  "version": "0.4.0+codex.20260822090220",
+  "version": "0.5.0+codex.20260822",
   "description": "Turn product ideas into shared editable Excalidraw prototypes and verified frontend pages across Codex, DSH, and MCP agents.",
   "author": {
     "name": "guchang",

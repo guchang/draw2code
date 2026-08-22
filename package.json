@@ -1,6 +1,6 @@
 {
   "name": "dsh-draw2code",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Human-AI collaborative prototyping for DSH, Codex and MCP agents, from product clarification to editable Excalidraw wireframes and verified frontend generation.",
   "type": "module",
   "main": "dist/index.js",

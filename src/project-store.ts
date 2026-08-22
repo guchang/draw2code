@@ -31,6 +31,7 @@ export interface ProjectHistoryEntry {
 }
 
 export interface ProjectDraft {
+  flowVersion?: number
   projectId: string
   projectName: string
   originalIdea: string
@@ -48,6 +49,8 @@ export interface ProjectDraft {
     confirmed: boolean
   }>
   currentQuestion: unknown
+  discovery?: unknown
+  briefMarkdown?: string | null
   pendingInterpretation: {
     questionId: string
     values: string[]

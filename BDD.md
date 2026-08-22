@@ -1,6 +1,6 @@
 # dsh-draw2code BDD 验收说明
 
-`features/draw2code.feature` 面向插件的真实协作契约：workspace 门禁、`draw2code_create` 的 choice-first grilling、项目草稿与版本、确认后独立画板、agent 工具、冲突确认、场景持久化、客户端挂载同步、画板切换，以及 `draw2code_generate` 从页面范围选择到真实预览验收的完整产品流程。它不把 Excalidraw 的坐标或 React 内部 ref 当作用户行为。
+`features/draw2code.feature` 面向插件的真实协作契约：workspace 门禁、`draw2code_create` 的自适应产品深挖与可执行项目简报、项目草稿与版本、确认后独立画板、agent 工具、冲突确认、场景持久化、客户端挂载同步、画板切换，以及 `draw2code_generate` 从页面范围选择到真实预览验收的完整产品流程。它不把 Excalidraw 的坐标或 React 内部 ref 当作用户行为。
 
 ## 已实现并通过真实宿主验收 — `draw2code_generate` 产品流程
 
@@ -47,8 +47,10 @@
 ### 工具职责
 
 - `draw2code_create` 是新项目意图的入口，不是 grilling 完成后的收尾工具。
-- `action=start` 创建 `draw2code/.projects/<projectId>.json` 草稿并返回第一个结构化问题；不会创建画板。
-- `action=answer` 每次只推进一个问题；模型优先调用宿主 `ask_user_question`，完整传递结构化 options（包括“还没想好”和“其他”），让用户直接选择，不要求用户把选项重新输入聊天框；没有该宿主能力时才降级为编号选择。
+- `action=start` 创建 `draw2code/.projects/<projectId>.json` 草稿并返回 discovery：已明确事实、待解决维度、历史决策和最多 10 题的剩余预算；不会创建画板。
+- 信息不足时 Agent 用 `action=propose_question` 提交产品专属 insight、一个决策问题、2–4 个有真实取舍的选项、推荐方向、决策影响和依赖；模型再调用宿主 `ask_user_question` 原样展示。禁止固定依次询问平台、用户、目标、流程、模块和页面。
+- `action=answer` 记录一个选择后返回 discovery；`action=skip` 把当前题保留为待验证假设。信息足够或用户要求停止时，Agent 用 `action=synthesize` 提交结构化 `PrototypeBrief`，即使当前题尚未回答也不会卡住。
+- 工具校验 `PrototypeBrief` 后确定性生成完整 `briefMarkdown`、`pageBlueprints` 和 `pageMockData`，三者来自同一事实来源。ready 阶段必须完整展示 Markdown，只做一次统一确认。
 - 选择“其他”后直接记录自由文字并继续下一题；ready 项目简报是唯一统一确认点，不再逐项复述用户原话。
 - `action=confirm` 只在项目简报 ready 且用户确认后创建独立空画板，并把 active-board 指针切到新画板；随后模型必须调用 `draw2code_update`。
 - 项目简报和画板是两种事实：简报记录产品意图，画板记录当前可见原型；确认前不写画板，用户删除的画板内容不能由简报自动恢复。
@@ -63,11 +65,11 @@
 - 同一 mutation 重试返回缓存的幂等结果，不重复追加回答或推进问题。
 - 项目草稿写入前会归档旧版本到 `draw2code/.projects/.versions/<projectId>/`。
 
-### 已实现的最小 SOP
+### 已实现的自适应 SOP 与项目简报
 
-核心信息：目标端、核心用户、核心目标、最重要的用户流程、首版核心模块、首轮核心页面。用户原话明确 App/Web/小程序时目标端自动预填；平台/用户/目标/流程默认单选，模块和页面可多选。选项按用户想法动态生成，万年历穿搭会出现日期、天气、穿搭推荐、衣橱等语义选项，陌生人社交会出现雷达发现、碰一碰、好友聊天、足迹与隐私等选项。视觉风格不在原型阶段应用，主动提供的 `styleNote` 延迟给 `draw2code_generate`。
+每轮从触发场景、现有替代、核心结果、独特机制、使用闭环、关键风险和首版验证中选择当前影响最大的一项；用户已经说清楚的信息不重复问，模块和页面由产品判断推导后在最终简报统一确认。简单产品通常 3–5 题，复杂产品最多 10 题；预算按完整问题历史计算，修改答案不会刷新额度。“还没想好”或跳过记录为待验证假设，不理解为暂停或取消；原生问题卡片始终提供“直接整理项目简报”，避免输入框被卡片隐藏后无法停止。视觉风格不在原型阶段应用，主动提供的 `styleNote` 延迟给 `draw2code_generate`。
 
-首轮简报默认约束为 3–5 个核心页面、默认成功路径和语义化低保真组件；`brief.pageMockData` 按页面给出 `requiredContent`、`minimumRecords` 和可直接绘制的 `examples`，`brief.pageBlueprints` 进一步明确每页核心任务、首屏必须出现的信息、唯一主操作和建议的语义组件。列表、聊天、图表、详情和状态组件默认至少放入 3 条可见 mock 数据，不能以空白方框、Lorem ipsum、“用户A”“标题”“内容”等占位。具体 Excalidraw 元素仍由 `draw2code_update` 按现有冲突检查、内容门禁、读回验证和可见性协议写入。
+`PrototypeBrief` 必须完整包含产品定义、首版包含与排除范围、原型布局、逐页目标与具体结构、每页至少 3 条真实 mock 数据或表单字段、关键状态、页面关系、原型表达原则、验收方式和默认假设。工具据此生成可直接给用户阅读的 Markdown，以及 `draw2code_update` 使用的页面蓝图和 mock 数据蓝图；列表、聊天、图表、详情和状态组件不能以空白方框、Lorem ipsum、“用户A”“标题”“内容”等占位。
 
 ### 本轮新增 — 低保真原型可读性与语义修复
 

@@ -1671,6 +1671,683 @@ function interpretOther(question, text3) {
   return `\u6309\u7528\u6237\u63CF\u8FF0\u5904\u7406\uFF1A${trimmed}`;
 }
 
+// src/create-discovery.ts
+var CREATE_FLOW_VERSION = 2;
+var MAX_DISCOVERY_QUESTIONS = 10;
+var DISCOVERY_DIMENSION_IDS = [
+  "trigger-context",
+  "existing-alternative",
+  "core-outcome",
+  "unique-mechanism",
+  "core-loop",
+  "critical-risk",
+  "scope-proof",
+  "target-user",
+  "target-platform",
+  "product-architecture"
+];
+var DISCOVERY_DIMENSIONS = new Set(DISCOVERY_DIMENSION_IDS);
+var GENERIC_QUESTION_RE = /^(?:这个工具主要服务谁|你的核心目标是什么|首版最重要的是帮助用户完成什么|用户最重要的一条使用流程是什么|第一版需要包含哪些核心模块|首轮原型要画哪些核心页面)[？?]?$/u;
+var ARCHITECTURE_LIST_RE = /(?:需要哪些|选择哪些|包含哪些).*(?:模块|页面)|(?:核心模块|核心页面).*请选择/iu;
+function platformFact(answers) {
+  const platform = answers["target-platform"]?.values[0];
+  if (platform === "app") return "\u4EA7\u54C1\u7AEF\uFF1AApp";
+  if (platform === "web") return "\u4EA7\u54C1\u7AEF\uFF1AWeb";
+  if (platform === "mini-program") return "\u4EA7\u54C1\u7AEF\uFF1A\u5C0F\u7A0B\u5E8F";
+  return null;
+}
+function domainFacts(idea) {
+  const facts = [];
+  if (/陌生人|社交|交友|附近的人|雷达|碰一碰|好友|聊天/iu.test(idea)) facts.push("\u4EA7\u54C1\u65B9\u5411\uFF1A\u9644\u8FD1\u53D1\u73B0\u4E0E\u964C\u751F\u4EBA\u793E\u4EA4");
+  if (/万年历|穿搭|天气|衣橱|服饰/iu.test(idea)) facts.push("\u4EA7\u54C1\u65B9\u5411\uFF1A\u65E5\u671F\u3001\u5929\u6C14\u4E0E\u7A7F\u642D\u5EFA\u8BAE");
+  if (/待办|任务|清单|todo/iu.test(idea)) facts.push("\u4EA7\u54C1\u65B9\u5411\uFF1A\u4EFB\u52A1\u4E0E\u5F85\u529E\u7BA1\u7406");
+  return facts;
+}
+function recommendedDimensions(idea) {
+  if (/陌生人|社交|交友|附近的人|雷达|碰一碰|好友|聊天/iu.test(idea)) return ["unique-mechanism", "critical-risk", "core-loop"];
+  if (/万年历|穿搭|天气|衣橱|服饰/iu.test(idea)) return ["unique-mechanism", "trigger-context", "critical-risk"];
+  if (/待办|任务|清单|todo/iu.test(idea)) return ["trigger-context", "existing-alternative", "core-outcome"];
+  return ["trigger-context", "core-outcome", "existing-alternative"];
+}
+function initialDiscovery(idea, answers) {
+  const fact = platformFact(answers);
+  const explicitFacts = [`\u7528\u6237\u539F\u8BDD\uFF1A${idea.trim()}`, ...fact === null ? [] : [fact], ...domainFacts(idea)];
+  const openDimensions = DISCOVERY_DIMENSION_IDS.filter((dimension) => dimension !== "target-platform" || fact === null);
+  return {
+    explicitFacts,
+    assumptions: [],
+    resolvedDecisions: [],
+    openDimensions,
+    recommendedDimensions: recommendedDimensions(idea).filter((dimension) => openDimensions.includes(dimension)),
+    questions: [],
+    invalidatedQuestionIds: [],
+    adjustmentQuestionIds: [],
+    questionCount: 0,
+    maxQuestions: MAX_DISCOVERY_QUESTIONS,
+    remainingQuestions: MAX_DISCOVERY_QUESTIONS,
+    nextAction: "propose_question",
+    stopReason: null
+  };
+}
+function refreshDiscovery(state) {
+  const adjustmentQuestionIds = new Set(state.adjustmentQuestionIds ?? []);
+  const questionCount = state.questions.filter((question) => !adjustmentQuestionIds.has(question.id)).length;
+  const remainingQuestions = Math.max(0, state.maxQuestions - questionCount);
+  return {
+    ...state,
+    questionCount,
+    remainingQuestions,
+    nextAction: remainingQuestions === 0 ? "synthesize" : "propose_question"
+  };
+}
+function removeDependentQuestions(state, questionId) {
+  const removed = /* @__PURE__ */ new Set();
+  const alreadyInvalidated = new Set(state.invalidatedQuestionIds ?? []);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const question of state.questions) {
+      if (question.id === questionId || removed.has(question.id) || alreadyInvalidated.has(question.id)) continue;
+      if ((question.dependsOn ?? []).some((dependency) => dependency === questionId || removed.has(dependency))) {
+        removed.add(question.id);
+        changed = true;
+      }
+    }
+  }
+  const prefixes = [...removed].map((id) => `${id}\uFF1A`);
+  const removedDimensions = state.questions.filter((question) => removed.has(question.id)).map((question) => question.dimension);
+  return {
+    discovery: refreshDiscovery({
+      ...state,
+      invalidatedQuestionIds: [.../* @__PURE__ */ new Set([...alreadyInvalidated, ...removed])],
+      openDimensions: [.../* @__PURE__ */ new Set([...state.openDimensions, ...removedDimensions])],
+      resolvedDecisions: state.resolvedDecisions.filter((item) => !prefixes.some((prefix) => item.startsWith(prefix))),
+      assumptions: state.assumptions.filter((item) => !prefixes.some((prefix) => item.startsWith(prefix)))
+    }),
+    removedIds: [...removed]
+  };
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+function objectValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function normalizedQuestionText(value) {
+  return value.toLowerCase().replace(/[\s，。！？、,.!?：:；;（）()]/gu, "");
+}
+var GROUNDING_STOP_WORDS = /* @__PURE__ */ new Set([
+  "\u4E00\u4E2A",
+  "\u4E00\u6B3E",
+  "\u8FD9\u4E2A",
+  "\u7528\u6237",
+  "\u4EA7\u54C1",
+  "\u5DE5\u5177",
+  "\u5E94\u7528",
+  "\u9996\u7248",
+  "\u6838\u5FC3",
+  "\u9875\u9762",
+  "\u529F\u80FD",
+  "\u65B9\u5411",
+  "\u95EE\u9898",
+  "\u9700\u8981",
+  "\u5E94\u8BE5",
+  "\u4EC0\u4E48",
+  "app",
+  "web"
+]);
+function groundingTokens(values) {
+  const tokens = /* @__PURE__ */ new Set();
+  for (const value of values) {
+    const segments = value.toLowerCase().replace(/(?:用户原话|产品方向|产品端)：/gu, " ").split(/[^\p{Script=Han}a-z0-9]+|(?:我想|我要|希望|做|一个|一款|类似|用于|帮助|里面|里的|这个|那个)/giu).filter((segment) => segment.length >= 2);
+    for (const segment of segments) {
+      if (/^[a-z0-9-]+$/u.test(segment)) {
+        if (!GROUNDING_STOP_WORDS.has(segment)) tokens.add(segment);
+        continue;
+      }
+      const maxSize = Math.min(6, segment.length);
+      for (let size = 2; size <= maxSize; size += 1) {
+        for (let index = 0; index <= segment.length - size; index += 1) {
+          const token = segment.slice(index, index + size);
+          if (!GROUNDING_STOP_WORDS.has(token)) tokens.add(token);
+        }
+      }
+    }
+  }
+  return tokens;
+}
+function validateAdaptiveQuestion(value, discovery, validationOptions = {}) {
+  if (discovery.questionCount >= discovery.maxQuestions && validationOptions.allowAdjustment !== true) {
+    return { ok: false, code: "question_limit_reached", message: `\u5DF2\u7ECF\u8FBE\u5230 ${discovery.maxQuestions} \u4E2A\u95EE\u9898\uFF0C\u5FC5\u987B\u8C03\u7528 action=synthesize \u6574\u7406\u9879\u76EE\u7B80\u62A5` };
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, code: "question_quality_invalid", message: "question \u5FC5\u987B\u662F\u7ED3\u6784\u5316\u5BF9\u8C61" };
+  }
+  const input = value;
+  if (!nonEmptyString(input.id) || !/^q[0-9a-z_-]+$/iu.test(input.id)) {
+    return { ok: false, code: "question_quality_invalid", message: "question.id \u5FC5\u987B\u662F\u4EE5 q \u5F00\u5934\u7684\u7A33\u5B9A\u6807\u8BC6\u7B26" };
+  }
+  if (!nonEmptyString(input.dimension) || !DISCOVERY_DIMENSIONS.has(input.dimension)) {
+    return { ok: false, code: "question_quality_invalid", message: `question.dimension \u4E0D\u662F\u5141\u8BB8\u7684\u4EA7\u54C1\u51B3\u7B56\u7EF4\u5EA6\uFF1B\u5FC5\u987B\u4F7F\u7528\u4EE5\u4E0B\u7A33\u5B9A ID \u4E4B\u4E00\uFF1A${DISCOVERY_DIMENSION_IDS.join(", ")}` };
+  }
+  if (!nonEmptyString(input.insight) || input.insight.trim().length < 18) {
+    return { ok: false, code: "question_quality_invalid", message: "\u6BCF\u9053\u9898\u5FC5\u987B\u5148\u63D0\u4F9B\u57FA\u4E8E\u5F53\u524D\u4EA7\u54C1\u7684\u5177\u4F53\u5224\u65AD\uFF0C\u4E0D\u80FD\u53EA\u8865\u9F50\u5B57\u6BB5" };
+  }
+  if (!nonEmptyString(input.text)) {
+    return { ok: false, code: "question_quality_invalid", message: "question.text \u5FC5\u987B\u5305\u542B\u201C\u5224\u65AD\uFF1A...\n\n\u95EE\u9898\uFF1A...\u201D\u5E76\u53EF\u76F4\u63A5\u7528\u4E8E\u539F\u751F\u95EE\u9898\u5361\u7247" };
+  }
+  const presentationText = input.text.trim().replace(/\\n/gu, "\n");
+  const presentationMatch = /^判断：([\s\S]+?)\s*问题：([\s\S]+)$/u.exec(presentationText);
+  if (presentationMatch === null || !normalizedQuestionText(presentationMatch[1]).includes(normalizedQuestionText(input.insight.trim()))) {
+    return { ok: false, code: "question_presentation_invalid", message: "question.text \u5FC5\u987B\u5B8C\u6574\u5305\u542B\u5F53\u524D insight\uFF0C\u683C\u5F0F\u4E3A\u201C\u5224\u65AD\uFF1A{insight}\n\n\u95EE\u9898\uFF1A{decision question}\u201D\uFF0C\u7981\u6B62\u5728\u5C55\u793A\u5361\u7247\u65F6\u4E22\u6389\u4EA7\u54C1\u5224\u65AD" };
+  }
+  const questionText = presentationMatch[2].trim();
+  if (questionText.length < 6) {
+    return { ok: false, code: "question_quality_invalid", message: "question.text \u4E2D\u7684\u51B3\u7B56\u95EE\u9898\u5FC5\u987B\u660E\u786E\u4E14\u53EF\u56DE\u7B54" };
+  }
+  const insightTokens = groundingTokens([input.insight.trim()]);
+  const selfContainedQuestionTokens = groundingTokens([questionText]);
+  if (![...insightTokens].some((token) => token.length >= 4 && selfContainedQuestionTokens.has(token))) {
+    return { ok: false, code: "question_presentation_invalid", message: "\u201C\u95EE\u9898\uFF1A\u201D\u540E\u7684\u6587\u5B57\u4E5F\u5FC5\u987B\u81EA\u5305\u542B\u5730\u91CD\u8FF0\u5F53\u524D\u4EA7\u54C1\u5224\u65AD\u518D\u63D0\u51FA\u51B3\u7B56\uFF08\u5141\u8BB8\u540C\u4E49\u6539\u5199\uFF09\uFF0C\u907F\u514D Agent \u53EA\u622A\u53D6\u95EE\u9898\u90E8\u5206\u65F6\u4E22\u6389 insight" };
+  }
+  if (GENERIC_QUESTION_RE.test(questionText) || ARCHITECTURE_LIST_RE.test(questionText)) {
+    return { ok: false, code: "question_quality_invalid", message: "\u4E0D\u80FD\u4F7F\u7528\u56FA\u5B9A\u7684\u7528\u6237\u3001\u76EE\u6807\u3001\u6A21\u5757\u6216\u9875\u9762\u95EE\u5377\uFF1B\u8BF7\u7ED3\u5408\u5F53\u524D\u4EA7\u54C1\u573A\u666F\u63D0\u51FA\u6709\u53D6\u820D\u7684\u95EE\u9898" };
+  }
+  if (!nonEmptyString(input.decisionImpact) || input.decisionImpact.trim().length < 10) {
+    return { ok: false, code: "question_quality_invalid", message: "question.decisionImpact \u5FC5\u987B\u8BF4\u660E\u7B54\u6848\u4F1A\u6539\u53D8\u54EA\u9879\u4EA7\u54C1\u51B3\u7B56" };
+  }
+  const questionId = input.id.trim();
+  const dimension = input.dimension.trim();
+  const insight = input.insight.trim();
+  const decisionImpact = input.decisionImpact.trim();
+  const dependsOn = Array.isArray(input.dependsOn) && input.dependsOn.every(nonEmptyString) ? [...new Set(input.dependsOn.map((item) => item.trim()))] : [];
+  const invalidatedQuestionIds = new Set(discovery.invalidatedQuestionIds ?? []);
+  const knownQuestionIds = new Set(discovery.questions.filter((question) => !invalidatedQuestionIds.has(question.id)).map((question) => question.id));
+  const unknownDependency = dependsOn.find((id) => !knownQuestionIds.has(id));
+  if (unknownDependency !== void 0) {
+    return { ok: false, code: "question_quality_invalid", message: `dependsOn \u5F15\u7528\u4E86\u4E0D\u5B58\u5728\u7684\u95EE\u9898 ${unknownDependency}` };
+  }
+  if (discovery.questions.some((question) => question.id === questionId)) {
+    return { ok: false, code: "question_duplicate", message: `\u95EE\u9898 ${questionId} \u5DF2\u7ECF\u95EE\u8FC7` };
+  }
+  const fingerprint = normalizedQuestionText(questionText);
+  if (discovery.questions.some((question) => normalizedQuestionText(question.text) === fingerprint)) {
+    return { ok: false, code: "question_duplicate", message: "\u8FD9\u4E2A\u95EE\u9898\u4E0E\u5386\u53F2\u95EE\u9898\u91CD\u590D\uFF0C\u8BF7\u5BFB\u627E\u5C1A\u672A\u89E3\u51B3\u7684\u4EA7\u54C1\u51B3\u7B56" };
+  }
+  const sameDimension = discovery.questions.find((question) => question.dimension === dimension && !invalidatedQuestionIds.has(question.id));
+  if (sameDimension !== void 0 && !dependsOn.includes(sameDimension.id)) {
+    return { ok: false, code: "question_duplicate", message: `\u7EF4\u5EA6 ${input.dimension} \u5DF2\u7ECF\u8BE2\u95EE\u8FC7\uFF1B\u5982\u9700\u6DF1\u6316\uFF0C\u5FC5\u987B\u901A\u8FC7 dependsOn \u8BF4\u660E\u4F9D\u8D56` };
+  }
+  if (!Array.isArray(input.options)) {
+    return { ok: false, code: "question_quality_invalid", message: "question.options \u5FC5\u987B\u63D0\u4F9B 2\u20134 \u4E2A\u5177\u6709\u771F\u5B9E\u53D6\u820D\u7684\u65B9\u5411\u548C\u4E09\u4E2A\u56FA\u5B9A\u63A7\u5236\u9009\u9879" };
+  }
+  const requiredControls = [
+    ["synthesize-now", "\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5"],
+    ["unknown", "\u8FD8\u6CA1\u60F3\u597D"],
+    ["other", "\u5176\u4ED6"]
+  ];
+  for (const [id, label] of requiredControls) {
+    const option = input.options.find((item) => objectValue(item)?.id === id);
+    const object = objectValue(option);
+    if (object?.label !== label || !nonEmptyString(object.description)) {
+      return { ok: false, code: "question_presentation_invalid", message: `question.options \u5FC5\u987B\u663E\u5F0F\u5305\u542B ${id} / ${label} \u53CA\u8BF4\u660E\uFF0C\u4FDD\u8BC1\u539F\u751F\u95EE\u9898\u5361\u7247\u4E0D\u4F1A\u5220\u6389\u7528\u6237\u63A7\u5236\u9879` };
+    }
+  }
+  const meaningful = input.options.filter((option) => {
+    if (typeof option !== "object" || option === null || Array.isArray(option)) return false;
+    const candidate = option;
+    return candidate.id !== "unknown" && candidate.id !== "other" && candidate.id !== "synthesize-now";
+  });
+  if (meaningful.length < 2 || meaningful.length > 4) {
+    return { ok: false, code: "question_quality_invalid", message: "\u6BCF\u9053\u9898\u5FC5\u987B\u63D0\u4F9B 2\u20134 \u4E2A\u4EA7\u54C1\u4E13\u5C5E\u65B9\u5411\uFF0C\u518D\u7531\u5DE5\u5177\u8865\u5145\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u548C\u201C\u5176\u4ED6\u201D" };
+  }
+  const options = [];
+  const optionIds = /* @__PURE__ */ new Set();
+  for (const item of meaningful) {
+    const option = item;
+    if (!nonEmptyString(option.id) || !nonEmptyString(option.label) || !nonEmptyString(option.description) || option.description.trim().length < 8) {
+      return { ok: false, code: "question_quality_invalid", message: "\u6BCF\u4E2A\u9009\u9879\u90FD\u5FC5\u987B\u5305\u542B id\u3001label\uFF0C\u4EE5\u53CA\u8BF4\u660E\u4EF7\u503C\u3001\u6210\u672C\u6216\u9002\u7528\u6761\u4EF6\u7684 description" };
+    }
+    if (optionIds.has(option.id.trim())) return { ok: false, code: "question_quality_invalid", message: `\u9009\u9879 ${option.id.trim()} \u91CD\u590D` };
+    optionIds.add(option.id.trim());
+    options.push({ id: option.id.trim(), label: option.label.trim(), description: option.description.trim() });
+  }
+  if (!nonEmptyString(input.recommendedOptionId) || !optionIds.has(input.recommendedOptionId.trim())) {
+    return { ok: false, code: "question_quality_invalid", message: "recommendedOptionId \u5FC5\u987B\u6307\u5411\u4E00\u4E2A\u771F\u5B9E\u5019\u9009\u65B9\u5411" };
+  }
+  const factTokens = groundingTokens([
+    ...discovery.explicitFacts,
+    ...discovery.resolvedDecisions,
+    ...discovery.assumptions
+  ]);
+  const questionTokens = groundingTokens([
+    insight,
+    questionText,
+    decisionImpact,
+    ...options.flatMap((option) => [option.label, option.description ?? ""])
+  ]);
+  if (![...factTokens].some((token) => questionTokens.has(token))) {
+    return {
+      ok: false,
+      code: "question_not_grounded",
+      message: "\u95EE\u9898\u6CA1\u6709\u5F15\u7528\u5F53\u524D\u4EA7\u54C1\u4E8B\u5B9E\u3001\u5DF2\u6709\u7B54\u6848\u6216\u660E\u786E\u98CE\u9669\uFF1B\u8BF7\u5148\u57FA\u4E8E discovery \u4E2D\u7684\u4E8B\u5B9E\u91CD\u65B0\u63D0\u51FA\u4EA7\u54C1\u4E13\u5C5E\u95EE\u9898"
+    };
+  }
+  if (discovery.questionCount === 0 && validationOptions.allowAdjustment !== true) {
+    const highestValue = discovery.recommendedDimensions.slice(0, 2);
+    if (highestValue.length > 0 && !highestValue.includes(dimension)) {
+      return {
+        ok: false,
+        code: "question_priority_invalid",
+        message: `\u7B2C\u4E00\u9898\u5E94\u5148\u6DF1\u6316\u5F53\u524D\u4EA7\u54C1\u6700\u5173\u952E\u7684 ${highestValue.join(" \u6216 ")}\uFF0C\u4E0D\u8981\u5148\u8BA9\u7528\u6237\u9009\u62E9\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784`
+      };
+    }
+  }
+  options.push(
+    { id: "synthesize-now", label: "\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5", description: "\u505C\u6B62\u7EE7\u7EED\u63D0\u95EE\uFF0C\u57FA\u4E8E\u5F53\u524D\u4E8B\u5B9E\u4E0E\u5F85\u9A8C\u8BC1\u5047\u8BBE\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" },
+    { id: "unknown", label: "\u8FD8\u6CA1\u60F3\u597D", description: "\u5148\u8BB0\u5F55\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF0C\u4E0D\u628A\u6C89\u9ED8\u7406\u89E3\u4E3A\u6682\u505C\u6216\u53D6\u6D88\u3002" },
+    { id: "other", label: "\u5176\u4ED6", description: "\u4FDD\u7559\u7528\u6237\u81EA\u5DF1\u7684\u4EA7\u54C1\u65B9\u5411\u548C\u8865\u5145\u8BF4\u660E\u3002" }
+  );
+  return {
+    ok: true,
+    question: {
+      id: questionId,
+      kind: "choice",
+      dimension,
+      insight,
+      text: questionText,
+      decisionImpact,
+      recommendedOptionId: input.recommendedOptionId.trim(),
+      dependsOn,
+      selectionMode: "single",
+      options,
+      allowOther: true
+    }
+  };
+}
+
+// src/prototype-brief.ts
+function objectValue2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function textValue(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+function stringList(value) {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() !== "")) return null;
+  return value.map((item) => item.trim());
+}
+function viewportValue(value) {
+  const object = objectValue2(value);
+  if (object === null || typeof object.width !== "number" || typeof object.height !== "number") return null;
+  if (!Number.isFinite(object.width) || !Number.isFinite(object.height) || object.width < 240 || object.height < 240) return null;
+  return { width: object.width, height: object.height };
+}
+function hasGenericMock(value) {
+  return /^(?:用户\s*[A-ZＡ-Ｚ]|标题|内容|示例任务|Lorem ipsum|待填|占位)$/iu.test(value.trim());
+}
+function hasGenericStructure(value) {
+  return /^(?:顶部区域|底部区域|内容区域|内容卡片|信息模块|列表内容|若干按钮|若干卡片|按钮|卡片|列表)$/u.test(value.trim());
+}
+var VISUAL_OR_TECH_IMPLEMENTATION_RE = /(?:React|Vue|Svelte|Angular|Next\.?js|Tailwind|TypeScript|技术栈|前端框架|数据库实现|API\s*接口|品牌色|品牌字体|字体(?:风格|家族)|圆角(?:体系|半径|\s*\d+\s*px)|3D|拟物|扁平风)/iu;
+var POSITIVE_SCOPE_RE = /(?:包含|支持|提供|接入|启用|加入|允许)/u;
+function normalizedScopeConcept(value) {
+  return value.replace(/(?:首版|第一版|本轮|原型|功能|能力|页面|明确|不加入|不包含|无需|暂不|推迟|延迟)/gu, "").replace(/[\s，。！？、,.!?：:；;（）()／/\-]/gu, "");
+}
+function parsePage(value, index, issues) {
+  const object = objectValue2(value);
+  if (object === null) {
+    issues.push(`pages[${index}] \u5FC5\u987B\u662F\u5BF9\u8C61`);
+    return null;
+  }
+  const id = textValue(object.id);
+  const name = textValue(object.name);
+  const goal = textValue(object.goal);
+  const size = viewportValue(object.size);
+  const structure = stringList(object.structure);
+  const primaryAction = textValue(object.primaryAction);
+  const secondaryActions = stringList(object.secondaryActions);
+  const states = stringList(object.states);
+  const navigation = stringList(object.navigation);
+  const annotations = stringList(object.annotations);
+  const acceptanceCriteria = stringList(object.acceptanceCriteria);
+  if (id === null) issues.push(`pages[${index}].id \u4E0D\u80FD\u4E3A\u7A7A`);
+  if (name === null) issues.push(`pages[${index}].name \u4E0D\u80FD\u4E3A\u7A7A`);
+  if (goal === null || goal.length < 8) issues.push(`pages[${index}].goal \u5FC5\u987B\u8BF4\u660E\u7528\u6237\u6765\u5230\u9875\u9762\u540E\u7684\u6838\u5FC3\u4EFB\u52A1`);
+  if (size === null) issues.push(`pages[${index}].size \u5FC5\u987B\u63D0\u4F9B\u6709\u6548\u9875\u9762\u5C3A\u5BF8`);
+  if (structure === null || structure.length < 3) issues.push(`pages[${index}].structure \u81F3\u5C11\u5305\u542B 3 \u6761\u53EF\u76F4\u63A5\u7ED8\u5236\u7684\u5177\u4F53\u5185\u5BB9`);
+  else {
+    const generic = structure.find(hasGenericStructure);
+    if (generic !== void 0) issues.push(`pages[${index}].structure \u5305\u542B\u6CDB\u5316\u5360\u4F4D\u201C${generic}\u201D\uFF0C\u5FC5\u987B\u6539\u6210\u53EF\u76F4\u63A5\u7ED8\u5236\u7684\u6807\u9898\u3001\u63A7\u4EF6\u6587\u6848\u6216\u5185\u5BB9\u7ED3\u6784`);
+  }
+  if (primaryAction === null) issues.push(`pages[${index}].primaryAction \u4E0D\u80FD\u4E3A\u7A7A`);
+  if (secondaryActions === null) issues.push(`pages[${index}].secondaryActions \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4`);
+  if (states === null) issues.push(`pages[${index}].states \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4`);
+  if (navigation === null) issues.push(`pages[${index}].navigation \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4`);
+  if (annotations === null) issues.push(`pages[${index}].annotations \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4`);
+  if (acceptanceCriteria === null || acceptanceCriteria.length === 0) issues.push(`pages[${index}].acceptanceCriteria \u81F3\u5C11\u5305\u542B\u4E00\u9879\u9875\u9762\u4E13\u9879\u9A8C\u6536`);
+  const rawGroups = Array.isArray(object.mockDataGroups) ? object.mockDataGroups : [];
+  if (!Array.isArray(object.mockDataGroups)) {
+    issues.push(`pages[${index}].mockDataGroups \u5FC5\u987B\u662F [{ name, items: string[] }]\uFF0C\u4E0D\u8981\u4F7F\u7528 mockData\u3001mockDataItems \u6216\u5BF9\u8C61\u8BB0\u5F55\u522B\u540D`);
+  }
+  const mockDataGroups = [];
+  for (const [groupIndex, rawGroup] of rawGroups.entries()) {
+    const group = objectValue2(rawGroup);
+    const groupName = textValue(group?.name);
+    const items = stringList(group?.items);
+    if (groupName === null || items === null || items.length === 0) {
+      issues.push(`pages[${index}].mockDataGroups[${groupIndex}] \u5FC5\u987B\u5305\u542B\u540D\u79F0\u548C\u771F\u5B9E\u6570\u636E`);
+      continue;
+    }
+    if (items.some(hasGenericMock)) issues.push(`pages[${index}].mockDataGroups[${groupIndex}] \u5305\u542B\u65E0\u610F\u4E49\u5360\u4F4D\u5185\u5BB9`);
+    mockDataGroups.push({ name: groupName, items });
+  }
+  const mockCount = mockDataGroups.reduce((sum, group) => sum + group.items.length, 0);
+  if (mockCount < 3) issues.push(`pages[${index}] \u81F3\u5C11\u9700\u8981 3 \u6761\u9996\u6B21\u6E32\u67D3\u53EF\u89C1\u7684\u771F\u5B9E mock \u6570\u636E\u6216\u8868\u5355\u5B57\u6BB5`);
+  if ([id, name, goal, size, structure, primaryAction, secondaryActions, states, navigation, annotations, acceptanceCriteria].some((item) => item === null)) return null;
+  return {
+    id,
+    name,
+    goal,
+    size,
+    structure,
+    primaryAction,
+    secondaryActions,
+    mockDataGroups,
+    states,
+    navigation,
+    annotations,
+    acceptanceCriteria
+  };
+}
+function parseRelation(value, index, issues) {
+  const object = objectValue2(value);
+  if (object === null) {
+    issues.push(`pageRelations[${index}] \u5FC5\u987B\u662F\u5BF9\u8C61`);
+    return null;
+  }
+  const fromPageId = textValue(object.fromPageId);
+  const toPageId = textValue(object.toPageId);
+  const trigger = textValue(object.trigger);
+  const result = textValue(object.result);
+  const label = textValue(object.label);
+  const arrowStyle = object.arrowStyle === "solid" || object.arrowStyle === "dashed" ? object.arrowStyle : null;
+  if (fromPageId === null || toPageId === null || trigger === null || result === null || label === null || arrowStyle === null) {
+    issues.push(`pageRelations[${index}] \u5FC5\u987B\u5B8C\u6574\u8BF4\u660E\u6765\u6E90\u3001\u76EE\u6807\u3001\u89E6\u53D1\u52A8\u4F5C\u3001\u7ED3\u679C\u3001\u7BAD\u5934\u6837\u5F0F\u548C\u6807\u7B7E`);
+    return null;
+  }
+  return { fromPageId, toPageId, trigger, result, label, arrowStyle };
+}
+function semanticComponents(page) {
+  const components = [
+    { kind: "page-header", role: "page-heading", purpose: "\u8BF4\u660E\u9875\u9762\u8EAB\u4EFD\u4E0E\u5F53\u524D\u4E0A\u4E0B\u6587", requiredParts: ["\u53EF\u8BFB\u9875\u9762\u6807\u9898", "\u5FC5\u8981\u7684\u65E5\u671F\u6216\u72B6\u6001\u4E0A\u4E0B\u6587"] },
+    { kind: "primary-action", role: "primary-action", purpose: "\u7A81\u51FA\u9875\u9762\u552F\u4E00\u4E3B\u8981\u64CD\u4F5C", requiredParts: [page.primaryAction, "\u5C45\u4E2D\u7684\u53EF\u8BFB\u6309\u94AE\u6587\u5B57"] }
+  ];
+  if (page.mockDataGroups.length > 0) components.push({ kind: "content-card", role: "content-card", purpose: "\u627F\u8F7D\u771F\u5B9E\u4E1A\u52A1\u5185\u5BB9", requiredParts: ["\u5BF9\u8C61\u6807\u9898", "\u72B6\u6001\u3001\u65F6\u95F4\u6216\u5173\u952E\u4E0A\u4E0B\u6587", "\u9996\u6B21\u6E32\u67D3\u53EF\u89C1\u7684 mock \u6570\u636E"] });
+  if (page.navigation.length > 0) components.push({ kind: "bottom-navigation", role: "bottom-navigation", purpose: "\u8868\u8FBE\u5168\u5C40\u9875\u9762\u5207\u6362", requiredParts: ["\u5B8C\u6574\u680F\u76EE\u6587\u5B57", "\u6E05\u695A\u7684\u5F53\u524D\u9009\u4E2D\u9879", "\u5E95\u90E8\u5B89\u5168\u533A\u5185\u5BF9\u9F50"] });
+  return components;
+}
+function chineseNumber(index) {
+  return ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u4E03", "\u516B", "\u4E5D", "\u5341"][index] ?? String(index + 1);
+}
+function bullets(items) {
+  return items.map((item) => `- ${item}`).join("\n");
+}
+function renderPrototypeBriefMarkdown(brief) {
+  const layout = brief.prototypeLayout;
+  const pages = brief.pages.map((page, index) => {
+    const mock = page.mockDataGroups.map((group) => `- ${group.name}
+${group.items.map((item) => `  - \`${item}\``).join("\n")}`).join("\n");
+    const interactions = [
+      `\u4E3B\u64CD\u4F5C\uFF1A${page.primaryAction}`,
+      ...page.secondaryActions.map((item) => `\u6B21\u8981\u64CD\u4F5C\uFF1A${item}`),
+      ...page.states,
+      ...page.navigation.map((item) => `\u5BFC\u822A\uFF1A${item}`),
+      ...page.annotations.map((item) => `\u4EA4\u4E92\u6807\u6CE8\uFF1A${item}`)
+    ];
+    return [
+      `### \u9875\u9762${chineseNumber(index)}\uFF1A${page.name}`,
+      "",
+      `\u9875\u9762\u76EE\u6807\uFF1A${page.goal}`,
+      "",
+      "\u9875\u9762\u7ED3\u6784\uFF1A",
+      "",
+      bullets(page.structure),
+      "",
+      "\u771F\u5B9E mock \u6570\u636E\uFF1A",
+      "",
+      mock,
+      "",
+      "\u5173\u952E\u72B6\u6001\u4E0E\u4EA4\u4E92\uFF1A",
+      "",
+      bullets(interactions),
+      "",
+      "\u9875\u9762\u4E13\u9879\u9A8C\u6536\uFF1A",
+      "",
+      bullets(page.acceptanceCriteria)
+    ].join("\n");
+  }).join("\n\n");
+  const relations = brief.pageRelations.map((relation) => {
+    const from = brief.pages.find((page) => page.id === relation.fromPageId)?.name ?? relation.fromPageId;
+    const to = brief.pages.find((page) => page.id === relation.toPageId)?.name ?? relation.toPageId;
+    const style = relation.arrowStyle === "dashed" ? "\u865A\u7EBF\u7BAD\u5934" : "\u5B9E\u7EBF\u7BAD\u5934";
+    return `${from} \u2192 ${to}\uFF1A${relation.trigger}\uFF1B${relation.result}\uFF08${style}\uFF1A${relation.label}\uFF09`;
+  });
+  return [
+    `# ${brief.title.replace(/原型$/u, "")}\u539F\u578B`,
+    "",
+    "## \u4EA7\u54C1\u5B9A\u4E49",
+    "",
+    brief.productDefinition,
+    "",
+    `\u6838\u5FC3\u7528\u6237\uFF1A${brief.target}`,
+    "",
+    `\u6838\u5FC3\u4F7F\u7528\u573A\u666F\uFF1A${brief.coreScenario}`,
+    "",
+    `\u6838\u5FC3\u7ED3\u679C\uFF1A${brief.coreOutcome}`,
+    "",
+    "\u6838\u5FC3\u4EAE\u70B9\u4E0E\u72EC\u7279\u673A\u5236\uFF1A",
+    "",
+    bullets(brief.uniqueMechanism),
+    "",
+    "\u9996\u7248\u6838\u5FC3\u6D41\u7A0B\uFF1A",
+    "",
+    bullets(brief.firstVersionFlow),
+    "",
+    "\u9996\u7248\u5305\u542B\uFF1A",
+    "",
+    bullets(brief.includedScope),
+    "",
+    "\u9996\u7248\u660E\u786E\u4E0D\u5305\u542B\uFF1A",
+    "",
+    bullets(brief.excludedScope),
+    "",
+    "## \u539F\u578B\u7ED3\u6784",
+    "",
+    `\u5728\u5F53\u524D\u753B\u677F\u4E2D\u6309\u7167${layout.arrangement}\u7ED8\u5236 ${brief.pages.length} \u4E2A \`${layout.viewport.width} \xD7 ${layout.viewport.height}\` \u7684${layout.platform}\u9875\u9762\u3002${layout.connectionStyle}${layout.comprehensionGoal}`,
+    "",
+    pages,
+    "",
+    "## \u9875\u9762\u5173\u7CFB\u4E0E\u4EA4\u4E92\u8868\u8FBE",
+    "",
+    bullets(relations),
+    "",
+    "## \u539F\u578B\u8868\u8FBE\u539F\u5219",
+    "",
+    bullets(brief.prototypePrinciples),
+    "",
+    "## \u9A8C\u6536\u65B9\u5F0F",
+    "",
+    bullets(brief.acceptanceCriteria),
+    "",
+    "## \u9ED8\u8BA4\u5047\u8BBE",
+    "",
+    bullets(brief.assumptions),
+    ...brief.pendingDecisions.length === 0 ? [] : ["", "\u5C1A\u5F85\u51B3\u5B9A\uFF1A", "", bullets(brief.pendingDecisions)]
+  ].join("\n");
+}
+function validatePrototypeBrief(value, deferredStyleNote) {
+  const issues = [];
+  const object = objectValue2(value);
+  if (object === null) return { ok: false, code: "brief_quality_invalid", message: "PrototypeBrief \u5FC5\u987B\u662F\u7ED3\u6784\u5316\u5BF9\u8C61", issues: ["brief \u4E0D\u662F\u5BF9\u8C61"] };
+  const title = textValue(object.title);
+  const productDefinition = textValue(object.productDefinition);
+  const target = textValue(object.target);
+  const coreScenario = textValue(object.coreScenario);
+  const coreOutcome = textValue(object.coreOutcome);
+  const uniqueMechanism = stringList(object.uniqueMechanism);
+  const firstVersionFlow = stringList(object.firstVersionFlow);
+  const includedScope = stringList(object.includedScope);
+  const excludedScope = stringList(object.excludedScope);
+  const prototypePrinciples = stringList(object.prototypePrinciples);
+  const acceptanceCriteria = stringList(object.acceptanceCriteria);
+  const assumptions = stringList(object.assumptions);
+  const pendingDecisions = stringList(object.pendingDecisions);
+  if (title === null) issues.push("title \u4E0D\u80FD\u4E3A\u7A7A");
+  if (productDefinition === null || productDefinition.length < 30) issues.push("productDefinition \u5FC5\u987B\u7528\u5B8C\u6574\u81EA\u7136\u8BED\u8A00\u5B9A\u4E49\u4EA7\u54C1\u3001\u6838\u5FC3\u6D41\u7A0B\u548C\u9996\u7248\u53D6\u820D");
+  if (target === null) issues.push("target \u4E0D\u80FD\u4E3A\u7A7A");
+  if (coreScenario === null) issues.push("coreScenario \u4E0D\u80FD\u4E3A\u7A7A");
+  if (coreOutcome === null) issues.push("coreOutcome \u4E0D\u80FD\u4E3A\u7A7A");
+  if (uniqueMechanism === null || uniqueMechanism.length === 0) issues.push("uniqueMechanism \u81F3\u5C11\u5305\u542B\u4E00\u4E2A\u4EA7\u54C1\u4EAE\u70B9\uFF0C\u6216\u660E\u786E\u8BF4\u660E\u9996\u7248\u5C1A\u672A\u5F62\u6210\u5DEE\u5F02\u5316");
+  if (firstVersionFlow === null || firstVersionFlow.length < 2) issues.push("firstVersionFlow \u81F3\u5C11\u5305\u542B\u4E24\u4E2A\u8FDE\u7EED\u6B65\u9AA4");
+  if (includedScope === null || includedScope.length === 0) issues.push("includedScope \u4E0D\u80FD\u4E3A\u7A7A");
+  if (excludedScope === null || excludedScope.length === 0) issues.push("excludedScope \u4E0D\u80FD\u4E3A\u7A7A");
+  if (prototypePrinciples === null || prototypePrinciples.length < 3) issues.push("prototypePrinciples \u81F3\u5C11\u5305\u542B 3 \u6761\u539F\u578B\u8868\u8FBE\u539F\u5219");
+  if (acceptanceCriteria === null || acceptanceCriteria.length < 5) issues.push("acceptanceCriteria \u81F3\u5C11\u5305\u542B 5 \u6761\u53EF\u9A8C\u8BC1\u6807\u51C6");
+  if (assumptions === null || assumptions.length === 0) issues.push("assumptions \u4E0D\u80FD\u4E3A\u7A7A");
+  if (pendingDecisions === null) issues.push("pendingDecisions \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4");
+  const layoutObject = objectValue2(object.prototypeLayout);
+  const viewport = viewportValue(layoutObject?.viewport);
+  const platform = textValue(layoutObject?.platform);
+  const arrangement = textValue(layoutObject?.arrangement);
+  const connectionStyle = textValue(layoutObject?.connectionStyle);
+  const representativePageId = textValue(layoutObject?.representativePageId);
+  const comprehensionGoal = textValue(layoutObject?.comprehensionGoal);
+  if (layoutObject === null || viewport === null || platform === null || arrangement === null || connectionStyle === null || representativePageId === null || comprehensionGoal === null) {
+    issues.push("prototypeLayout \u5FC5\u987B\u5B8C\u6574\u8BF4\u660E\u5E73\u53F0\u3001\u5C3A\u5BF8\u3001\u6392\u5217\u3001\u8FDE\u7EBF\u3001\u4EE3\u8868\u9875\u548C 5 \u79D2\u7406\u89E3\u76EE\u6807");
+  }
+  const rawPages = Array.isArray(object.pages) ? object.pages : [];
+  if (rawPages.length === 0) issues.push("pages \u81F3\u5C11\u5305\u542B\u4E00\u4E2A\u9875\u9762");
+  const pages = rawPages.map((page, index) => parsePage(page, index, issues)).filter((page) => page !== null);
+  const pageIds = /* @__PURE__ */ new Set();
+  const pageNames = /* @__PURE__ */ new Set();
+  for (const page of pages) {
+    if (pageIds.has(page.id)) issues.push(`\u9875\u9762 id ${page.id} \u91CD\u590D`);
+    pageIds.add(page.id);
+    if (pageNames.has(page.name)) issues.push(`\u9875\u9762\u540D\u79F0 ${page.name} \u91CD\u590D`);
+    pageNames.add(page.name);
+  }
+  if (representativePageId !== null && !pageIds.has(representativePageId)) issues.push("prototypeLayout.representativePageId \u5FC5\u987B\u5F15\u7528\u771F\u5B9E\u9875\u9762");
+  const rawRelations = Array.isArray(object.pageRelations) ? object.pageRelations : [];
+  const pageRelations = rawRelations.map((relation, index) => parseRelation(relation, index, issues)).filter((relation) => relation !== null);
+  if (pages.length > 1 && pageRelations.length === 0) issues.push("\u591A\u9875\u9762\u539F\u578B\u5FC5\u987B\u81F3\u5C11\u63D0\u4F9B\u4E00\u6761\u660E\u786E\u7684\u9875\u9762\u5173\u7CFB");
+  for (const relation of pageRelations) {
+    if (!pageIds.has(relation.fromPageId) || !pageIds.has(relation.toPageId)) issues.push(`\u9875\u9762\u5173\u7CFB ${relation.label} \u5F15\u7528\u4E86\u4E0D\u5B58\u5728\u7684\u9875\u9762`);
+  }
+  if (acceptanceCriteria !== null) {
+    const corpus = acceptanceCriteria.join("\uFF1B");
+    const required = [
+      [/可见|文字/u, "\u6587\u5B57\u9996\u6B21\u6E32\u67D3\u53EF\u89C1"],
+      [/裁切|越界/u, "\u9875\u9762\u548C\u7EC4\u4EF6\u65E0\u88C1\u5207\u6216\u8D8A\u754C"],
+      [/按钮.*居中|居中.*按钮/u, "\u6309\u94AE\u6587\u6848\u5C45\u4E2D"],
+      [/导航/u, "\u5E95\u90E8\u5BFC\u822A\u5B8C\u6574\u5BF9\u9F50"],
+      [/流程|交互|箭头/u, "\u6838\u5FC3\u6D41\u7A0B\u6216\u4EA4\u4E92\u5173\u7CFB"]
+    ];
+    for (const [pattern, label] of required) if (!pattern.test(corpus)) issues.push(`acceptanceCriteria \u7F3A\u5C11\u201C${label}\u201D\u9A8C\u6536`);
+  }
+  const implementationCorpus = [
+    productDefinition ?? "",
+    ...uniqueMechanism ?? [],
+    ...firstVersionFlow ?? [],
+    ...includedScope ?? [],
+    ...prototypePrinciples ?? [],
+    ...pages.flatMap((page) => [...page.structure, ...page.states, ...page.navigation, ...page.annotations])
+  ].join("\uFF1B");
+  if (VISUAL_OR_TECH_IMPLEMENTATION_RE.test(implementationCorpus)) {
+    issues.push("\u539F\u578B\u7B80\u62A5\u4E0D\u80FD\u89C4\u5B9A\u54C1\u724C\u89C6\u89C9\u6216\u524D\u7AEF\u6280\u672F\u5B9E\u73B0\uFF1B\u8BF7\u628A\u989C\u8272\u4F53\u7CFB\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\u63A8\u8FDF\u5230 Generate");
+  }
+  if (excludedScope !== null && assumptions !== null) {
+    const contradiction = assumptions.find((assumption) => {
+      if (!POSITIVE_SCOPE_RE.test(assumption)) return false;
+      const normalizedAssumption = normalizedScopeConcept(assumption);
+      return excludedScope.some((excluded) => {
+        const concept = normalizedScopeConcept(excluded);
+        return concept.length >= 2 && normalizedAssumption.includes(concept);
+      });
+    });
+    if (contradiction !== void 0) issues.push(`\u9ED8\u8BA4\u5047\u8BBE\u201C${contradiction}\u201D\u4E0E\u9996\u7248\u660E\u786E\u6392\u9664\u8303\u56F4\u77DB\u76FE`);
+  }
+  if (issues.length > 0 || title === null || productDefinition === null || target === null || coreScenario === null || coreOutcome === null || uniqueMechanism === null || firstVersionFlow === null || includedScope === null || excludedScope === null || viewport === null || platform === null || arrangement === null || connectionStyle === null || representativePageId === null || comprehensionGoal === null || prototypePrinciples === null || acceptanceCriteria === null || assumptions === null || pendingDecisions === null) {
+    return { ok: false, code: "brief_quality_invalid", message: `\u9879\u76EE\u7B80\u62A5\u672A\u901A\u8FC7\u8D28\u91CF\u95E8\u7981\uFF1A${issues.join("\uFF1B")}`, issues };
+  }
+  const canonical = {
+    title,
+    productDefinition,
+    target,
+    coreScenario,
+    coreOutcome,
+    uniqueMechanism,
+    firstVersionFlow,
+    includedScope,
+    excludedScope,
+    prototypeLayout: { platform, viewport, arrangement, connectionStyle, representativePageId, comprehensionGoal },
+    pages,
+    pageRelations,
+    prototypePrinciples,
+    acceptanceCriteria,
+    assumptions,
+    pendingDecisions
+  };
+  const brief = {
+    ...canonical,
+    briefSchemaVersion: 2,
+    pageBlueprints: pages.map((page) => ({
+      pageId: page.id,
+      page: page.name,
+      coreTask: page.goal,
+      primaryAction: page.primaryAction,
+      aboveFold: [...page.structure.slice(0, 3), `\u552F\u4E00\u4E3B\u8981\u64CD\u4F5C\uFF1A${page.primaryAction}`],
+      semanticComponents: semanticComponents(page)
+    })),
+    pageMockData: pages.map((page) => ({
+      pageId: page.id,
+      page: page.name,
+      minimumRecords: 3,
+      requiredContent: page.structure,
+      examples: page.mockDataGroups.flatMap((group) => group.items)
+    })),
+    mockDataPolicy: {
+      rule: "\u5217\u8868\u3001\u804A\u5929\u3001\u56FE\u8868\u3001\u8BE6\u60C5\u548C\u72B6\u6001\u7EC4\u4EF6\u5FC5\u987B\u5C55\u793A\u771F\u5B9E\u793A\u4F8B\u5185\u5BB9\uFF0C\u4E0D\u80FD\u4F7F\u7528\u7A7A\u767D\u65B9\u6846\u3001Lorem ipsum\u3001\u7528\u6237A\u6216\u65E0\u542B\u4E49\u5360\u4F4D\u7B26\u4EE3\u66FF",
+      minimumRecordsPerRepeatedComponent: 3,
+      visibility: "mock \u6570\u636E\u5FC5\u987B\u4F7F\u7528\u9996\u6B21\u6E32\u67D3\u5373\u53EF\u89C1\u7684\u72EC\u7ACB text \u5143\u7D20"
+    },
+    prototypeQualityPolicy: {
+      firstScreen: canonical.prototypeLayout.comprehensionGoal,
+      hierarchy: "\u6BCF\u9875\u53EA\u6709\u4E00\u4E2A primary-action\uFF1B\u6807\u9898\u3001\u6B63\u6587\u548C\u8F85\u52A9\u4FE1\u606F\u5F62\u6210\u6E05\u695A\u5C42\u7EA7",
+      completionRule: "writeVerified=true \u53EA\u4EE3\u8868\u5199\u5165\u4E00\u81F4\uFF1B\u9010\u6761\u901A\u8FC7\u672C\u7B80\u62A5 acceptanceCriteria \u540E\u624D\u80FD\u5BA3\u5E03\u5B8C\u6210"
+    },
+    interactions: pageRelations.map((relation) => `${relation.fromPageId} \u2192 ${relation.toPageId}\uFF1A${relation.trigger}\uFF1B${relation.result}`),
+    deferredStyleNote
+  };
+  return { ok: true, brief, markdown: renderPrototypeBriefMarkdown(canonical) };
+}
+
+// src/create-contract.ts
+var CREATE_ACTIONS = [
+  "start",
+  "propose_question",
+  "synthesize",
+  "answer",
+  "skip",
+  "revise",
+  "rename",
+  "resume",
+  "list",
+  "confirm",
+  "abandon",
+  "archive"
+];
+
 // src/create-tool.ts
 function text(value) {
   return [{ type: "text", text: value }];
@@ -1684,6 +2361,19 @@ function continuation(value) {
 }
 function clone2(value) {
   return JSON.parse(JSON.stringify(value));
+}
+function normalizeStructuredArg(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, canonicalValue(entry)]));
 }
 var PROJECT_NAME_MAX_LENGTH = 16;
 var PROJECT_NAME_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5 -]*$/u;
@@ -1712,30 +2402,148 @@ function boardNameFromProject(projectName, existing) {
   return `${base} ${Date.now()}`;
 }
 function requestKey(args) {
-  return JSON.stringify({
+  return JSON.stringify(canonicalValue({
     action: args.action,
     sessionId: args.sessionId ?? null,
     revision: args.revision ?? null,
     questionId: args.questionId ?? null,
     values: args.values ?? [],
     otherText: args.otherText ?? null,
-    projectName: args.projectName ?? null
-  });
+    projectName: args.projectName ?? null,
+    question: normalizeStructuredArg(args.question) ?? null,
+    brief: normalizeStructuredArg(args.brief) ?? null,
+    stopReason: args.stopReason ?? null
+  }));
 }
 function draftStatus(draft) {
-  if (draft.status === "draft") return draft.currentQuestion === null ? "ready" : "question";
+  if (draft.status === "draft") {
+    if (draft.currentQuestion !== null) return "question";
+    if (draft.brief !== null) return "ready";
+    if (draft.flowVersion === CREATE_FLOW_VERSION) return "discovery";
+    return "ready";
+  }
   return draft.status;
 }
+var CREATE_DIMENSION_HEADERS = {
+  "trigger-context": "\u6838\u5FC3\u573A\u666F",
+  "existing-alternative": "\u73B0\u6709\u66FF\u4EE3",
+  "core-outcome": "\u6838\u5FC3\u7ED3\u679C",
+  "unique-mechanism": "\u72EC\u7279\u673A\u5236",
+  "core-loop": "\u4F7F\u7528\u95ED\u73AF",
+  "critical-risk": "\u5173\u952E\u98CE\u9669",
+  "scope-proof": "\u9996\u7248\u9A8C\u8BC1",
+  "target-user": "\u6838\u5FC3\u7528\u6237",
+  "target-platform": "\u4EA7\u54C1\u7AEF",
+  "product-architecture": "\u4EA7\u54C1\u7ED3\u6784"
+};
+function hostQuestionFor(question) {
+  const prompt = question.insight === void 0 ? question.text : `\u5224\u65AD\uFF1A${question.insight}
+
+\u95EE\u9898\uFF1A${question.text}`;
+  return {
+    questions: [{
+      id: question.id,
+      question: prompt,
+      header: CREATE_DIMENSION_HEADERS[question.dimension ?? ""] ?? "\u4EA7\u54C1\u51B3\u7B56",
+      options: question.options.map((option) => ({ label: option.label, description: option.description ?? "" })),
+      multi_select: question.selectionMode === "multiple"
+    }]
+  };
+}
+function displayedQuestionText(question) {
+  return question.insight === void 0 ? question.text : `\u5224\u65AD\uFF1A${question.insight}
+
+\u95EE\u9898\uFF1A${question.text}`;
+}
+function createConfirmation() {
+  return {
+    id: "create-brief-confirm",
+    options: [
+      { id: "confirm", label: "\u786E\u8BA4\u5E76\u7ED8\u5236", description: "\u4F7F\u7528\u521A\u521A\u5C55\u793A\u7684\u540C\u4E00\u4EFD\u9879\u76EE\u7B80\u62A5\u521B\u5EFA\u72EC\u7ACB\u753B\u677F\u3002" },
+      { id: "adjust-direction", label: "\u8C03\u6574\u4EA7\u54C1\u65B9\u5411", description: "\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4EA7\u54C1\u51B3\u7B56\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" },
+      { id: "adjust-scope", label: "\u8C03\u6574\u9996\u7248\u8303\u56F4", description: "\u53EA\u8C03\u6574\u9996\u7248\u5305\u542B\u4E0E\u6392\u9664\u8303\u56F4\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" }
+    ],
+    askUserQuestionArgs: {
+      questions: [{
+        id: "create-brief-confirm",
+        question: "\u8FD9\u4EFD\u9879\u76EE\u7B80\u62A5\u662F\u5426\u51C6\u786E\uFF0C\u53EF\u4EE5\u5F00\u59CB\u7ED8\u5236\u539F\u578B\u5417\uFF1F",
+        header: "\u7B80\u62A5\u786E\u8BA4",
+        options: [
+          { label: "\u786E\u8BA4\u5E76\u7ED8\u5236", description: "\u4F7F\u7528\u521A\u521A\u5C55\u793A\u7684\u540C\u4E00\u4EFD\u9879\u76EE\u7B80\u62A5\u521B\u5EFA\u72EC\u7ACB\u753B\u677F\u3002" },
+          { label: "\u8C03\u6574\u4EA7\u54C1\u65B9\u5411", description: "\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4EA7\u54C1\u51B3\u7B56\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" },
+          { label: "\u8C03\u6574\u9996\u7248\u8303\u56F4", description: "\u53EA\u8C03\u6574\u9996\u7248\u5305\u542B\u4E0E\u6392\u9664\u8303\u56F4\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" }
+        ],
+        multi_select: false
+      }]
+    }
+  };
+}
+function prototypeBriefContract() {
+  return {
+    requiredTopLevel: [
+      "title",
+      "productDefinition",
+      "target",
+      "coreScenario",
+      "coreOutcome",
+      "uniqueMechanism",
+      "firstVersionFlow",
+      "includedScope",
+      "excludedScope",
+      "prototypeLayout",
+      "pages",
+      "pageRelations",
+      "prototypePrinciples",
+      "acceptanceCriteria",
+      "assumptions",
+      "pendingDecisions"
+    ],
+    prototypeLayout: ["platform", "viewport: { width, height }", "arrangement", "connectionStyle", "representativePageId", "comprehensionGoal"],
+    page: [
+      "id",
+      "name",
+      "goal",
+      "size: { width, height }",
+      "structure: string[]",
+      "primaryAction",
+      "secondaryActions: string[]",
+      "mockDataGroups: Array<{ name: string, items: string[] }>",
+      "states: string[]",
+      "navigation: string[]",
+      "annotations: string[]",
+      "acceptanceCriteria: string[]"
+    ],
+    pageRelation: ["fromPageId", "toPageId", "trigger", "result", "arrowStyle: solid|dashed", "label"],
+    rules: [
+      "structure \u53EA\u80FD\u653E\u53EF\u76F4\u63A5\u7ED8\u5236\u7684\u5177\u4F53\u5B57\u7B26\u4E32\uFF0C\u4E0D\u653E\u7EC4\u4EF6\u5BF9\u8C61",
+      "\u6BCF\u9875\u901A\u8FC7 mockDataGroups \u63D0\u4F9B\u81F3\u5C11 3 \u6761\u771F\u5B9E\u53EF\u89C1\u6570\u636E\u6216\u5B8C\u6574\u8868\u5355\u5B57\u6BB5",
+      "\u591A\u9875\u9762\u81F3\u5C11\u4E00\u6761 pageRelations\uFF0C\u4E14\u9875\u9762 ID \u5FC5\u987B\u5B58\u5728",
+      "\u539F\u578B\u9636\u6BB5\u4E0D\u5199\u54C1\u724C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u30013D \u6216\u524D\u7AEF\u6280\u672F\u6808"
+    ]
+  };
+}
 function responseFor(projects, draft, extras = {}) {
+  const status = draftStatus(draft);
   const response = {
-    status: draftStatus(draft),
+    status,
+    ...draft.flowVersion === void 0 ? {} : { flowVersion: draft.flowVersion },
     sessionId: draft.projectId,
     projectId: draft.projectId,
     projectName: draft.projectName,
     projectFile: projects.fileName(draft.projectId),
     revision: draft.revision,
-    ...draft.currentQuestion === null ? {} : { question: draft.currentQuestion },
+    ...draft.currentQuestion === null ? {} : {
+      question: {
+        ...draft.currentQuestion,
+        text: displayedQuestionText(draft.currentQuestion),
+        askUserQuestionArgs: hostQuestionFor(draft.currentQuestion)
+      }
+    },
+    ...draft.discovery === void 0 ? {} : { discovery: draft.discovery },
     ...draft.brief === null ? {} : { brief: draft.brief, assumptions: draft.brief.assumptions ?? [] },
+    ...draft.briefMarkdown === void 0 || draft.briefMarkdown === null ? {} : { briefMarkdown: draft.briefMarkdown },
+    ...draft.flowVersion === CREATE_FLOW_VERSION && draft.status === "draft" ? { briefContract: prototypeBriefContract() } : {},
+    ...status === "ready" ? { confirmation: createConfirmation() } : {},
     ...draft.boardName === null ? {} : { boardName: draft.boardName },
     ...extras
   };
@@ -1758,6 +2566,11 @@ function errorResponse(code, message, current) {
 function questionFromDraft(draft, questionId) {
   if (draft.currentQuestion !== null && draft.currentQuestion.id === questionId) {
     return draft.currentQuestion;
+  }
+  if (draft.flowVersion === CREATE_FLOW_VERSION && draft.discovery !== void 0) {
+    const discovery = draft.discovery;
+    if ((discovery.invalidatedQuestionIds ?? []).includes(questionId)) return null;
+    return discovery.questions.find((question) => question.id === questionId) ?? null;
   }
   return questionById(draft.originalIdea, questionId);
 }
@@ -1814,6 +2627,7 @@ async function loadSession(projects, root, sessionId) {
 function initialDraft(idea, projectName, styleNote, projectId) {
   const answers = explicitAnswersFromIdea(idea);
   return {
+    flowVersion: CREATE_FLOW_VERSION,
     projectId,
     projectName,
     originalIdea: idea.trim(),
@@ -1824,22 +2638,57 @@ function initialDraft(idea, projectName, styleNote, projectId) {
     boardName: null,
     deferredStyleNote: styleNote,
     answers,
-    currentQuestion: questionFor(idea, answers),
+    currentQuestion: null,
+    discovery: initialDiscovery(idea, answers),
+    briefMarkdown: null,
     pendingInterpretation: null,
     brief: null,
     history: [{ revision: 1, action: "start", at: Date.now() }]
   };
 }
+function migrateLegacyDraft(draft) {
+  const discovery = initialDiscovery(draft.originalIdea, draft.answers);
+  const legacyDimensionByQuestion = {
+    "target-platform": "target-platform",
+    "core-user": "target-user",
+    "core-goal": "core-outcome",
+    "core-flow": "core-loop",
+    "core-modules": "product-architecture",
+    "core-pages": "product-architecture"
+  };
+  const legacyLabelByQuestion = {
+    "target-platform": "\u4EA7\u54C1\u7AEF",
+    "core-user": "\u6838\u5FC3\u7528\u6237",
+    "core-goal": "\u6838\u5FC3\u7ED3\u679C",
+    "core-flow": "\u6838\u5FC3\u6D41\u7A0B",
+    "core-modules": "\u4EA7\u54C1\u7ED3\u6784",
+    "core-pages": "\u9875\u9762\u7ED3\u6784"
+  };
+  discovery.resolvedDecisions = Object.entries(draft.answers).map(([questionId, answer]) => {
+    const legacyQuestion = questionById(draft.originalIdea, questionId);
+    const semanticValues = answer.values.map((value2) => legacyQuestion?.options.find((option) => option.id === value2)?.label ?? value2);
+    const value = answer.normalizedText ?? answer.otherText ?? semanticValues.join("\u3001");
+    return `${legacyLabelByQuestion[questionId] ?? questionId}\uFF1A${value}`;
+  });
+  const resolvedDimensions = new Set(Object.keys(draft.answers).map((questionId) => legacyDimensionByQuestion[questionId]).filter(Boolean));
+  discovery.openDimensions = discovery.openDimensions.filter((dimension) => !resolvedDimensions.has(dimension));
+  draft.flowVersion = CREATE_FLOW_VERSION;
+  draft.currentQuestion = null;
+  draft.pendingInterpretation = null;
+  draft.discovery = refreshDiscovery(discovery);
+  draft.briefMarkdown = null;
+  addHistory(draft, "migrate-create-v2");
+}
 function draw2codeCreateTool(projects, scenes) {
   return defineTool({
     name: "draw2code_create",
-    description: "Create a new \u753B\u7801 project through a stateful, choice-first grilling flow. This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. Call action=start as soon as a new-project intent is clear, even when the idea is incomplete; pass the user's idea faithfully without speculative expansion, infer a concise semantic projectName from the entire idea, and do not call draw2code_update first. Never obtain projectName by copying or clipping the beginning of idea. Explicit App/Web/mini-program wording is prefilled and must not be asked again. After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including \u201C\u8FD8\u6CA1\u60F3\u597D\u201D and \u201C\u5176\u4ED6\u201D; never truncate or silently replace options, so the user can select instead of typing. Map the selected label back to its option id, then call this tool again; only use the numbered text fallback when ask_user_question is unavailable. Use action=answer for a choice, action=revise to change an earlier answer, action=rename to accept a project-name edit, action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4\u201312 Chinese characters, and becomes the board name directly; never append \u201C\u539F\u578B\u201D or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. Options are structured for native choice cards when available; otherwise render them as numbered choices. \u201COther\u201D requires text and is stored directly; the ready brief is the single confirmation checkpoint, so never add a redundant per-answer paraphrase confirmation.",
+    description: "Create a new \u753B\u7801 project through adaptive product discovery and one executable prototype brief. This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. Call action=start as soon as a new-project intent is clear; pass the user's idea faithfully, infer a concise semantic projectName from the entire idea, and never call draw2code_update first. Explicit facts returned in discovery must not be asked again. A discovery result means the Agent must choose the single highest-impact unresolved product decision. If information is insufficient, call action=propose_question with a product-specific insight, one decision question, 2\u20134 tradeoff-rich options, a recommendation, decisionImpact and dependencies. To make the native card lossless, question.text itself must be \u201C\u5224\u65AD\uFF1A{insight}\\n\\n\u95EE\u9898\uFF1A{self-contained insight + decision question}\u201D; the text after \u201C\u95EE\u9898\uFF1A\u201D must repeat the product judgment so it remains meaningful even if an Agent extracts only that part. question.options must already include synthesize-now/\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5, unknown/\u8FD8\u6CA1\u60F3\u597D and other/\u5176\u4ED6 in addition to the product directions. question.dimension must use one returned openDimensions ID exactly: trigger-context, existing-alternative, core-outcome, unique-mechanism, core-loop, critical-risk, scope-proof, target-user, target-platform, or product-architecture. Never invent shorter aliases such as mechanism or risk. Never use the old fixed platform/user/goal/flow/modules/pages sequence, and never ask modules and pages as separate checklist questions. After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D, \u201C\u8FD8\u6CA1\u60F3\u597D\u201D and \u201C\u5176\u4ED6\u201D; never truncate or silently replace options. Map the selected label back to its option id and call action=answer. The synthesize-now choice returns discovery.nextAction=synthesize. When the core scenario, outcome, unique mechanism, first-version flow and scope are clear\u2014or the user asks to stop\u2014call action=synthesize with stopReason and a complete PrototypeBrief. Discovery may stop early and must stop after ten questions. The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim before the single \u201C\u786E\u8BA4\u5E76\u7ED8\u5236 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411 / \u8C03\u6574\u9996\u7248\u8303\u56F4\u201D confirmation; do not summarize it. Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4\u201312 Chinese characters, and becomes the board name directly; never append \u201C\u539F\u578B\u201D or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. Options are structured for native choice cards when available; otherwise render them as numbered choices. \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D ends discovery without requiring a hidden chat input; \u201COther\u201D requires text and is stored directly; silence or \u201C\u8FD8\u6CA1\u60F3\u597D\u201D is an explicit pending decision, not pause or cancellation.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       action: {
         type: "string",
         required: true,
-        enum: ["start", "answer", "revise", "rename", "resume", "list", "confirm", "abandon", "archive"],
+        enum: [...CREATE_ACTIONS],
         description: "State-machine action for draw2code_create."
       },
       idea: { type: "string", description: "The user\u2019s new-project idea. Required for action=start." },
@@ -1849,7 +2698,10 @@ function draw2codeCreateTool(projects, scenes) {
       revision: { type: "integer", description: "Expected draft revision for mutation actions." },
       questionId: { type: "string", description: "Question being answered or revised." },
       values: { type: "array", items: { type: "string" }, description: "Selected option IDs. Use one value for single-select questions." },
-      otherText: { type: "string", description: "Free-text answer when the user selected \u201Cother\u201D." }
+      otherText: { type: "string", description: "Free-text answer when the user selected \u201Cother\u201D." },
+      question: { type: "json", description: "Adaptive product question for action=propose_question. text must be directly displayable as \u201C\u5224\u65AD\uFF1A{insight}\\n\\n\u95EE\u9898\uFF1A{self-contained insight + decision question}\u201D; repeat the product judgment after \u95EE\u9898\uFF1A so the native card remains meaningful even if only that part is used. options must explicitly contain 2\u20134 product directions plus synthesize-now/\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5, unknown/\u8FD8\u6CA1\u60F3\u597D, and other/\u5176\u4ED6. DSH may serialize this JSON object as a string; both forms are accepted." },
+      brief: { type: "json", description: "Structured PrototypeBrief for action=synthesize. Exact top-level keys: title, productDefinition, target, coreScenario, coreOutcome, uniqueMechanism[], firstVersionFlow[], includedScope[], excludedScope[], prototypeLayout, pages[], pageRelations[], prototypePrinciples[], acceptanceCriteria[], assumptions[], pendingDecisions[]. prototypeLayout requires platform, viewport{width,height}, arrangement, connectionStyle, representativePageId, comprehensionGoal. Each page requires id, name, goal, size{width,height}, structure:string[], primaryAction, secondaryActions:string[], mockDataGroups:[{name,items:string[]}], states:string[], navigation:string[], annotations:string[], acceptanceCriteria:string[]. Each relation requires fromPageId, toPageId, trigger, result, arrowStyle (solid|dashed), label. Never use mockData or other aliases. DSH may serialize this JSON object as a string; both forms are accepted." },
+      stopReason: { type: "string", description: "Why discovery is ready to synthesize early." }
     },
     output: {
       schema: {
@@ -1857,13 +2709,18 @@ function draw2codeCreateTool(projects, scenes) {
         additionalProperties: false,
         properties: {
           status: { type: "string", required: true },
+          flowVersion: { type: "integer" },
           sessionId: { type: "string" },
           projectId: { type: "string" },
           projectName: { type: "string" },
           projectFile: { type: "string" },
           revision: { type: "integer" },
           question: { type: "json" },
+          discovery: { type: "json" },
           brief: { type: "json" },
+          briefMarkdown: { type: "string" },
+          briefContract: { type: "json" },
+          confirmation: { type: "json" },
           assumptions: { type: "json" },
           nameProposal: { type: "json" },
           boardName: { type: "string" },
@@ -1876,16 +2733,37 @@ function draw2codeCreateTool(projects, scenes) {
         }
       },
       render: (_args, value) => {
+        if (value.status === "discovery" && value.discovery !== void 0) {
+          const discovery = value.discovery;
+          if (discovery.nextAction === "synthesize") {
+            return text(`${continuation(value)} status=discovery nextAction=synthesize
+\u7528\u6237\u5DF2\u9009\u62E9\u76F4\u63A5\u6574\u7406\u6216\u95EE\u9898\u9884\u7B97\u5DF2\u7ECF\u7528\u5B8C\u3002\u5FC5\u987B\u7ACB\u5373\u8C03\u7528 action=synthesize\uFF0C\u5E76\u4E25\u683C\u6309 briefContract \u63D0\u4EA4 stopReason \u4E0E\u5B8C\u6574 PrototypeBrief\uFF1B\u9875\u9762\u771F\u5B9E\u6570\u636E\u5B57\u6BB5\u5FC5\u987B\u53EB mockDataGroups\uFF0C\u683C\u5F0F\u4E3A [{ name, items: string[] }]\uFF1B\u9875\u9762\u5173\u7CFB\u5B57\u6BB5\u5FC5\u987B\u53EB fromPageId/toPageId/trigger/result/arrowStyle/label\u3002\u7981\u6B62\u731C\u522B\u540D\u3001\u8BFB\u53D6\u63D2\u4EF6\u6E90\u7801\u6216\u7EE7\u7EED\u8C03\u7528 action=propose_question\u3002`);
+          }
+          return text(`${continuation(value)} status=discovery allowedDimensions=${discovery.openDimensions.join(",")} recommendedDimensions=${discovery.recommendedDimensions.join(",")}
+\u8BF7\u6839\u636E discovery \u4E2D\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C\u5269\u4F59\u95EE\u9898\u9884\u7B97\uFF0C\u5224\u65AD\u4E0B\u4E00\u9879\u6700\u503C\u5F97\u89E3\u51B3\u7684\u4EA7\u54C1\u51B3\u7B56\u3002\u7B2C\u4E00\u9898\u4F18\u5148\u4ECE recommendedDimensions \u524D\u4E24\u9879\u4E2D\u9009\u62E9\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 action=propose_question\uFF1Bquestion \u5FC5\u987B\u5305\u542B id\u3001dimension\u3001insight\u3001text\u3001decisionImpact\u3001recommendedOptionId\u3001dependsOn \u548C 2\u20134 \u4E2A\u5E26 description \u7684 options\uFF0C\u5E76\u4E14 dimension \u5FC5\u987B\u9010\u5B57\u4F7F\u7528 allowedDimensions \u4E2D\u7684\u7A33\u5B9A ID\u3002\u4FE1\u606F\u5DF2\u7ECF\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u76F4\u63A5\u6574\u7406\u65F6\u8C03\u7528 action=synthesize\u3002`);
+        }
         if (value.status === "question" && value.question !== void 0) {
           const question = value.question;
-          const options = question.options.map((option, index) => `${index + 1}. ${option.id} \u2014 ${option.label}`).join("\n");
+          const options = question.options.map((option, index) => `${index + 1}. ${option.id} \u2014 ${option.label}${option.description === void 0 ? "" : `\uFF1A${option.description}`}`).join("\n");
+          const recommended = question.options.find((option) => option.id === question.recommendedOptionId);
+          const insight = question.insight === void 0 || question.text.startsWith("\u5224\u65AD\uFF1A") ? "" : `\u5224\u65AD\uFF1A${question.insight}
+`;
+          const recommendation = recommended === void 0 ? "" : `
+\u63A8\u8350\uFF1A${recommended.label} \u2014 ${recommended.description ?? ""}`;
+          const impact = question.decisionImpact === void 0 ? "" : `
+\u51B3\u7B56\u5F71\u54CD\uFF1A${question.decisionImpact}`;
           return text(`${continuation(value)} status=question questionId=${question.id}
-${question.text}
-${options}${question.allowOther ? "\n\uFF08\u53EF\u9009\u201C\u5176\u4ED6\u201D\u5E76\u8865\u5145\u8BF4\u660E\uFF09" : ""}
-\u4E0B\u4E00\u6B21\u8C03\u7528\u5FC5\u987B\u4F7F\u7528 action=answer\u3001\u4E0A\u9762\u7684 sessionId/revision/questionId\uFF0C\u5E76\u628A\u7528\u6237\u9009\u62E9\u7684 option id \u653E\u5165 values\u3002`);
+${insight}${question.text}
+${options}${recommendation}${impact}${question.allowOther ? "\n\uFF08\u53EF\u9009\u201C\u5176\u4ED6\u201D\u5E76\u8865\u5145\u8BF4\u660E\uFF09" : ""}
+\u8C03\u7528 ask_user_question \u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236 question.askUserQuestionArgs\uFF0C\u4E0D\u80FD\u4E22\u6389\u5224\u65AD\u3001\u9009\u9879\u6216\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\u3002\u4E0B\u4E00\u6B21\u8C03\u7528\u5FC5\u987B\u4F7F\u7528 action=answer\u3001\u4E0A\u9762\u7684 sessionId/revision/questionId\uFF0C\u5E76\u628A\u7528\u6237\u9009\u62E9\u7684 option id \u653E\u5165 values\u3002`);
         }
-        if (value.status === "ready") return text(`${continuation(value)} status=ready
-\u9700\u6C42\u5DF2\u6574\u7406\u5B8C\u6210\u3002brief.pageMockData \u662F\u9010\u9875\u5185\u5BB9\u84DD\u56FE\uFF0C\u5FC5\u987B\u968F brief \u4E00\u8D77\u5C55\u793A\u5E76\u5728\u7ED8\u5236\u65F6\u843D\u5B9E\uFF1B\u8BF7\u7B49\u5F85\u7528\u6237\u7EDF\u4E00\u786E\u8BA4\uFF0C\u786E\u8BA4\u540E\u8C03\u7528 action=confirm\uFF0C\u4F20\u5165\u540C\u4E00\u4E2A sessionId \u548C revision\u3002`);
+        if (value.status === "ready") {
+          const markdown = value.briefMarkdown ?? "\u9879\u76EE\u7B80\u62A5\u7F3A\u5C11\u53EF\u8BFB Markdown\uFF0C\u8BF7\u4FEE\u590D\u540E\u518D\u786E\u8BA4\u3002";
+          return text(`${continuation(value)} status=ready
+${markdown}
+
+\u8BF7\u5B8C\u6574\u5C55\u793A\u4EE5\u4E0A\u9879\u76EE\u7B80\u62A5\uFF0C\u4E0D\u8981\u81EA\u884C\u7F29\u5199\u6216\u91CD\u65B0\u603B\u7ED3\u3002\u968F\u540E\u4F7F\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u590D\u5236 confirmation.askUserQuestionArgs\uFF0C\u5176\u4E2D\u4EC5\u5305\u542B\u201C\u786E\u8BA4\u5E76\u7ED8\u5236 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411 / \u8C03\u6574\u9996\u7248\u8303\u56F4\u201D\uFF1B\u786E\u8BA4\u540E\u8C03\u7528 action=confirm\u3002\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 action=propose_question \u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u4F1A\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0 synthesize \u5B8C\u6574\u7B80\u62A5\u3002`);
+        }
         if (value.status === "confirmed") return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ""} activeBoard=${value.activeBoard ?? ""} nextAction=${value.nextAction ?? "draw2code_update"}
 \u9879\u76EE\u300C${value.projectName ?? ""}\u300D\u5DF2\u786E\u8BA4\uFF0C\u72EC\u7ACB\u753B\u677F\u5DF2\u521B\u5EFA\u3002\u4E0B\u4E00\u6B65\u5FC5\u987B\u540C\u65F6\u6309 brief.pageBlueprints \u548C brief.pageMockData \u8C03\u7528 draw2code_update\uFF0C\u5E76\u660E\u786E\u4F20\u5165\u4E0A\u9762\u7684 boardName\uFF1B\u9996\u8F6E\u6709 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\u5148\u753B\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u67E5\u770B\u771F\u5B9E\u753B\u677F\uFF0C\u518D\u63D0\u4EA4 representative visualReview \u540E\u6DFB\u52A0\u5176\u4F59\u9875\u9762\uFF0C\u6700\u7EC8\u53EA\u6709 completionReady=true \u624D\u80FD\u62A5\u544A\u5B8C\u6210\u3002\u6BCF\u4E2A\u91CD\u590D\u5185\u5BB9\u7EC4\u4EF6\u81F3\u5C11\u63D0\u4F9B 3 \u6761\u53EF\u89C1 mock \u6570\u636E\uFF0C\u4E0D\u8981\u56DE\u5199\u65E7\u753B\u677F\u3002`);
         if (value.status === "drafts") {
@@ -1951,7 +2829,77 @@ ${summary}`);
       if (draft.lastRequestKey === key && draft.lastResponse !== void 0) {
         return { ...clone2(draft.lastResponse), idempotent: true };
       }
-      if (args.action === "resume") return responseFor(projects, draft);
+      if (draft.status !== "draft" && ["propose_question", "synthesize", "skip", "answer", "revise"].includes(args.action)) {
+        return errorResponse("project_not_editable", `\u9879\u76EE\u5F53\u524D\u72B6\u6001\u4E3A ${draft.status}\uFF0C\u4E0D\u80FD\u7EE7\u7EED\u4FEE\u6539\u53D1\u73B0\u95EE\u9898\u6216\u9879\u76EE\u7B80\u62A5`, draft);
+      }
+      if (args.action === "resume") {
+        if (draft.flowVersion === void 0 && draft.status === "draft" && draft.brief === null) {
+          const expectedRevision = draft.revision;
+          migrateLegacyDraft(draft);
+          return persistMutation(projects, args.root, draft, expectedRevision, key, responseFor(projects, draft));
+        }
+        return responseFor(projects, draft);
+      }
+      if (args.action === "propose_question") {
+        if (draft.flowVersion !== CREATE_FLOW_VERSION) return errorResponse("legacy_upgrade_required", "\u8BF7\u5148\u7528 action=resume \u5347\u7EA7\u65E7\u9879\u76EE\u8349\u7A3F", draft);
+        if (typeof args.revision !== "number") return errorResponse("invalid_action", "action=propose_question requires revision", draft);
+        if (draft.revision !== args.revision) return errorResponse("stale_revision", `project changed since revision ${args.revision}`, draft);
+        if (draft.currentQuestion !== null) return errorResponse("question_pending", "\u8BF7\u5148\u56DE\u7B54\u5F53\u524D\u95EE\u9898\uFF0C\u518D\u63D0\u51FA\u4E0B\u4E00\u9898", draft);
+        const discovery = draft.discovery;
+        const isReadyAdjustment = draft.brief !== null;
+        const validated = validateAdaptiveQuestion(normalizeStructuredArg(args.question), discovery, { allowAdjustment: isReadyAdjustment });
+        if (!validated.ok) return errorResponse(validated.code, validated.message, draft);
+        draft.brief = null;
+        draft.briefMarkdown = null;
+        draft.currentQuestion = validated.question;
+        draft.discovery = refreshDiscovery({
+          ...discovery,
+          questions: [...discovery.questions, validated.question],
+          adjustmentQuestionIds: isReadyAdjustment ? [.../* @__PURE__ */ new Set([...discovery.adjustmentQuestionIds ?? [], validated.question.id])] : discovery.adjustmentQuestionIds ?? [],
+          stopReason: null
+        });
+        addHistory(draft, "propose-question", validated.question.id);
+        return persistMutation(projects, args.root, draft, args.revision, key, responseFor(projects, draft));
+      }
+      if (args.action === "synthesize") {
+        if (draft.flowVersion !== CREATE_FLOW_VERSION) return errorResponse("legacy_upgrade_required", "\u8BF7\u5148\u7528 action=resume \u5347\u7EA7\u65E7\u9879\u76EE\u8349\u7A3F", draft);
+        if (typeof args.revision !== "number") return errorResponse("invalid_action", "action=synthesize requires revision", draft);
+        if (draft.revision !== args.revision) return errorResponse("stale_revision", `project changed since revision ${args.revision}`, draft);
+        if (typeof args.stopReason !== "string" || args.stopReason.trim() === "") return errorResponse("invalid_action", "action=synthesize requires stopReason", draft);
+        let discovery = draft.discovery;
+        if (draft.currentQuestion !== null) {
+          const pending = draft.currentQuestion;
+          const prefix = `${pending.id}\uFF1A`;
+          draft.answers[pending.id] = { questionId: pending.id, values: ["unknown"], confirmed: true };
+          discovery = refreshDiscovery({
+            ...discovery,
+            assumptions: [
+              ...discovery.assumptions.filter((item) => !item.startsWith(prefix)),
+              `${prefix}${pending.text}\uFF08\u7528\u6237\u9009\u62E9\u76F4\u63A5\u6574\u7406\uFF0C\u5F53\u524D\u95EE\u9898\u672A\u56DE\u7B54\uFF09`
+            ]
+          });
+          addHistory(draft, "skip-for-synthesize", pending.id, ["unknown"]);
+        }
+        const normalizedBrief = normalizeStructuredArg(args.brief);
+        const briefObject = typeof normalizedBrief === "object" && normalizedBrief !== null && !Array.isArray(normalizedBrief) ? clone2(normalizedBrief) : normalizedBrief;
+        if (typeof briefObject === "object" && briefObject !== null && !Array.isArray(briefObject)) {
+          const briefRecord = briefObject;
+          const pending = Array.isArray(briefRecord.pendingDecisions) ? briefRecord.pendingDecisions.filter((item) => typeof item === "string") : [];
+          briefRecord.pendingDecisions = [.../* @__PURE__ */ new Set([...pending, ...discovery.assumptions])];
+        }
+        const validated = validatePrototypeBrief(briefObject, draft.deferredStyleNote);
+        if (!validated.ok) return errorResponse(validated.code, validated.message, draft);
+        draft.discovery = {
+          ...discovery,
+          nextAction: "synthesize",
+          stopReason: args.stopReason.trim()
+        };
+        draft.currentQuestion = null;
+        draft.brief = validated.brief;
+        draft.briefMarkdown = validated.markdown;
+        addHistory(draft, "synthesize");
+        return persistMutation(projects, args.root, draft, args.revision, key, responseFor(projects, draft));
+      }
       if (args.action === "abandon" || args.action === "archive") {
         if (typeof args.revision !== "number") return errorResponse("invalid_action", `${args.action} requires revision`, draft);
         if (draft.revision !== args.revision) return errorResponse("stale_revision", `project changed since revision ${args.revision}`, draft);
@@ -1976,6 +2924,31 @@ ${summary}`);
         });
         return persistMutation(projects, args.root, draft, args.revision, key, response);
       }
+      if (args.action === "skip") {
+        if (typeof args.revision !== "number" || typeof args.questionId !== "string") {
+          return errorResponse("invalid_action", "action=skip requires revision and questionId", draft);
+        }
+        if (draft.revision !== args.revision) return errorResponse("stale_revision", `project changed since revision ${args.revision}`, draft);
+        if (draft.flowVersion !== CREATE_FLOW_VERSION || draft.currentQuestion === null) return errorResponse("question_not_pending", "\u5F53\u524D\u6CA1\u6709\u53EF\u4EE5\u8DF3\u8FC7\u7684\u95EE\u9898", draft);
+        const question2 = draft.currentQuestion;
+        if (question2.id !== args.questionId) return errorResponse("invalid_question", `question "${args.questionId}" is not pending`, draft);
+        const discovery = draft.discovery;
+        const prefix = `${question2.id}\uFF1A`;
+        draft.answers[question2.id] = { questionId: question2.id, values: ["unknown"], confirmed: true };
+        draft.discovery = refreshDiscovery({
+          ...discovery,
+          assumptions: [
+            ...discovery.assumptions.filter((item) => !item.startsWith(prefix)),
+            `${prefix}${question2.text}\uFF08\u7528\u6237\u8DF3\u8FC7\uFF0C\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF09`
+          ],
+          openDimensions: question2.dimension === void 0 ? discovery.openDimensions : [.../* @__PURE__ */ new Set([...discovery.openDimensions, question2.dimension])]
+        });
+        draft.currentQuestion = null;
+        draft.brief = null;
+        draft.briefMarkdown = null;
+        addHistory(draft, "skip", question2.id, ["unknown"]);
+        return persistMutation(projects, args.root, draft, args.revision, key, responseFor(projects, draft));
+      }
       if (args.action === "confirm") {
         if (typeof args.revision !== "number") return errorResponse("invalid_action", "action=confirm requires revision", draft);
         if (draft.revision !== args.revision) return errorResponse("stale_revision", `project changed since revision ${args.revision}`, draft);
@@ -1992,7 +2965,9 @@ ${summary}`);
         }
         draft.status = "confirmed";
         draft.boardName = boardName;
-        draft.brief = buildBrief(draft.originalIdea, draft.answers, draft.deferredStyleNote);
+        if (draft.flowVersion !== CREATE_FLOW_VERSION) {
+          draft.brief = buildBrief(draft.originalIdea, draft.answers, draft.deferredStyleNote);
+        }
         addHistory(draft, "confirm");
         const response = responseFor(projects, draft, { activeBoard: active.value.name, nextAction: "draw2code_update" });
         const saved = await persistMutation(projects, args.root, draft, args.revision, key, response);
@@ -2004,10 +2979,63 @@ ${summary}`);
         return errorResponse("invalid_action", `${args.action} requires revision, questionId and values`, draft);
       }
       if (draft.revision !== args.revision) return errorResponse("stale_revision", `project changed since revision ${args.revision}`, draft);
+      if (args.action === "answer" && (draft.currentQuestion === null || draft.currentQuestion.id !== args.questionId)) {
+        return errorResponse("historical_answer_requires_revise", "action=answer \u53EA\u80FD\u56DE\u7B54\u5F53\u524D\u95EE\u9898\uFF1B\u4FEE\u6539\u5386\u53F2\u7B54\u6848\u5FC5\u987B\u4F7F\u7528 action=revise", draft);
+      }
       const question = questionFromDraft(draft, args.questionId);
       if (question === null) return errorResponse("invalid_question", `question "${args.questionId}" is not valid for this project`, draft);
       const validation = validateValues(question, args.values, args.otherText);
       if (validation !== null) return errorResponse("invalid_option", validation, draft);
+      if (draft.flowVersion === CREATE_FLOW_VERSION && question.kind === "choice") {
+        if (args.values.includes("synthesize-now")) {
+          const discovery2 = draft.discovery;
+          const prefix = `${question.id}\uFF1A`;
+          draft.answers[question.id] = { questionId: question.id, values: ["unknown"], confirmed: true };
+          draft.discovery = {
+            ...refreshDiscovery({
+              ...discovery2,
+              assumptions: [
+                ...discovery2.assumptions.filter((item) => !item.startsWith(prefix)),
+                `${prefix}${question.text}\uFF08\u7528\u6237\u9009\u62E9\u76F4\u63A5\u6574\u7406\uFF0C\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF09`
+              ],
+              openDimensions: question.dimension === void 0 ? discovery2.openDimensions : [.../* @__PURE__ */ new Set([...discovery2.openDimensions, question.dimension])]
+            }),
+            nextAction: "synthesize",
+            stopReason: "\u7528\u6237\u9009\u62E9\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5"
+          };
+          draft.currentQuestion = null;
+          draft.brief = null;
+          draft.briefMarkdown = null;
+          addHistory(draft, "synthesize-now", question.id, args.values);
+          return persistMutation(projects, args.root, draft, args.revision, key, responseFor(projects, draft));
+        }
+        const selected = question.options.find((option) => option.id === args.values[0]);
+        const answerText = args.values.includes("other") ? args.otherText?.trim() ?? "" : selected?.label ?? args.values[0];
+        draft.answers[question.id] = {
+          questionId: question.id,
+          values: args.values,
+          ...args.values.includes("other") ? { otherText: args.otherText?.trim() ?? "" } : {},
+          confirmed: true
+        };
+        let discovery = draft.discovery;
+        if (args.action === "revise") {
+          const invalidated = removeDependentQuestions(discovery, question.id);
+          discovery = invalidated.discovery;
+          for (const id of invalidated.removedIds) delete draft.answers[id];
+        }
+        const decisionPrefix = `${question.id}\uFF1A`;
+        const resolvedDecisions = discovery.resolvedDecisions.filter((item) => !item.startsWith(decisionPrefix));
+        const assumptions = discovery.assumptions.filter((item) => !item.startsWith(decisionPrefix));
+        const openDimensions = question.dimension === void 0 ? discovery.openDimensions : args.values.includes("unknown") ? [.../* @__PURE__ */ new Set([...discovery.openDimensions, question.dimension])] : discovery.openDimensions.filter((dimension) => dimension !== question.dimension);
+        if (args.values.includes("unknown")) assumptions.push(`${decisionPrefix}${question.text}\uFF08\u7528\u6237\u6682\u672A\u51B3\u5B9A\uFF09`);
+        else resolvedDecisions.push(`${decisionPrefix}${answerText}`);
+        draft.discovery = refreshDiscovery({ ...discovery, resolvedDecisions, assumptions, openDimensions });
+        draft.currentQuestion = null;
+        draft.brief = null;
+        draft.briefMarkdown = null;
+        addHistory(draft, args.action, question.id, args.values, args.otherText);
+        return persistMutation(projects, args.root, draft, args.revision, key, responseFor(projects, draft));
+      }
       if (question.kind === "interpretation") {
         const pending = draft.pendingInterpretation;
         if (pending === null) return errorResponse("invalid_state", "no free-text interpretation is waiting for confirmation", draft);
@@ -3429,7 +4457,7 @@ function draw2codeUpdateTool(store) {
       render: (_args, value) => text2(
         value.pending === true ? `\u3010\u5F85\u786E\u8BA4\u3011\u68C0\u6D4B\u5230\u6F5C\u5728\u51B2\u7A81\uFF08${value.conflicts?.length ?? 0} \u6761\uFF09\uFF1A
 ${value.planSummary ?? ""}
-\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""} updated and selected. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; revealRequestId=${value.revealRequestId ?? "missing"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. ${value.nextAction ?? ""} The \u753B\u7801 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `
+\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""} updated and selected. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. ${value.nextAction ?? ""} The \u753B\u7801 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `
 \u7ED3\u6784\u4E0E\u5E03\u5C40\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       )
@@ -4081,7 +5109,7 @@ function briefFor(draft, existingPages) {
     output: `draw2code-pages/${draft.board}/index.html`
   };
 }
-function hostQuestionFor(question) {
+function hostQuestionFor2(question) {
   return {
     questions: [{
       id: question.id,
@@ -4125,7 +5153,7 @@ function responseFromDraft(draft, extras = {}) {
     ...draft.currentQuestion === null ? {} : {
       question: {
         ...draft.currentQuestion,
-        askUserQuestionArgs: hostQuestionFor(draft.currentQuestion)
+        askUserQuestionArgs: hostQuestionFor2(draft.currentQuestion)
       }
     },
     ...draft.blockers.length === 0 ? {} : { blockers: draft.blockers },

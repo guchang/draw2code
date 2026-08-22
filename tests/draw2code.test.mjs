@@ -10,13 +10,49 @@ import { deflateSync } from 'node:zlib'
 import {
   ProjectStore,
   SceneStore,
-  draw2codeCreateTool,
+  draw2codeCreateTool as rawDraw2codeCreateTool,
   draw2codeGenerateTool,
   draw2codeReadTool,
   draw2codeUpdateTool,
   inspectPrototypeQuality,
   normalizeOpsArg,
+  normalizeVisualReviewArg,
 } from '../dist/index.js'
+
+const NATIVE_CREATE_CONTROLS = [
+  { id: 'synthesize-now', label: '直接整理项目简报', description: '停止继续提问，基于当前事实与待验证假设生成完整简报。' },
+  { id: 'unknown', label: '还没想好', description: '先记录为待验证假设，不把沉默理解为暂停或取消。' },
+  { id: 'other', label: '其他', description: '保留用户自己的产品方向和补充说明。' },
+]
+
+function nativeCreateQuestion(value) {
+  const wasString = typeof value === 'string'
+  const question = wasString ? JSON.parse(value) : structuredClone(value)
+  if (question !== null && typeof question === 'object') {
+    if (typeof question.insight === 'string' && typeof question.text === 'string' && !question.text.startsWith('判断：')) {
+      question.text = `判断：${question.insight}\n\n问题：${question.insight} 因此，${question.text}`
+    }
+    if (Array.isArray(question.options)) {
+      for (const control of NATIVE_CREATE_CONTROLS) {
+        if (!question.options.some((option) => option?.id === control.id)) question.options.push(control)
+      }
+    }
+  }
+  return wasString ? JSON.stringify(question) : question
+}
+
+function draw2codeCreateTool(...args) {
+  const tool = rawDraw2codeCreateTool(...args)
+  return {
+    ...tool,
+    execute(input, context) {
+      const normalized = input.action === 'propose_question' && input.question !== undefined
+        ? { ...input, question: nativeCreateQuestion(input.question) }
+        : input
+      return tool.execute(normalized, context)
+    },
+  }
+}
 
 const roots = []
 let sync
@@ -531,6 +567,7 @@ test('draw2code_update render exposes write, completion, quality, and reveal evi
   assert.match(rendered[0].text, /writeVerified=true/)
   assert.match(rendered[0].text, /completionReady=false/)
   assert.match(rendered[0].text, /visualReviewRequired=false/)
+  assert.match(rendered[0].text, new RegExp(`boardRevision=${result.rev}`))
   assert.match(rendered[0].text, new RegExp(`revealRequestId=${result.revealRequestId}`))
 })
 
@@ -1472,13 +1509,25 @@ test('draw2code_update applies restrained semantic colors without overriding exp
   )
 })
 
-test('host update adapter preserves ops delivered as a JSON string', () => {
+test('host update adapter preserves ops and visual review delivered as JSON strings', () => {
   const ops = [{ op: 'upsert', element: { id: 'title', type: 'text', text: '任务清单' } }]
+  const visualReview = {
+    phase: 'representative',
+    passed: true,
+    boardRevision: 1,
+    revealRequestId: 'reveal-1',
+    inspectedPageIds: ['page-today'],
+    observations: ['代表页内容完整'],
+  }
 
   assert.deepEqual(normalizeOpsArg(JSON.stringify(ops)), ops)
   assert.deepEqual(normalizeOpsArg(ops), ops)
+  assert.deepEqual(normalizeVisualReviewArg(JSON.stringify(visualReview)), visualReview)
+  assert.deepEqual(normalizeVisualReviewArg(visualReview), visualReview)
   assert.throws(() => normalizeOpsArg('{broken json'), /ops is not valid JSON/)
   assert.throws(() => normalizeOpsArg({}), /ops must be an array/)
+  assert.throws(() => normalizeVisualReviewArg('{broken json'), /visualReview is not valid JSON/)
+  assert.throws(() => normalizeVisualReviewArg([]), /visualReview must be an object/)
 })
 
 test('prototype quality explains sparse hierarchy and interaction problems separately from write verification', () => {
@@ -2307,7 +2356,48 @@ test('concurrent project saves from one revision allow only one answer', async (
   assert.equal(attempts.filter((result) => !result.ok && result.error.code === 'stale_revision').length, 11)
 })
 
-test('draw2code_create starts a choice-first draft without touching the board', async () => {
+test('draw2code_create resumes an unfinished legacy questionnaire as v2 discovery without re-asking saved facts', async () => {
+  const { root, store, projects } = await makeStore()
+  const created = await projects.create(root, {
+    projectId: 'project-00000000-0000-4000-8000-000000000099',
+    projectName: '旧版雷达社交',
+    originalIdea: '一个陌生人雷达社交 App',
+    status: 'draft',
+    revision: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    boardName: null,
+    deferredStyleNote: null,
+    answers: {
+      'target-platform': { questionId: 'target-platform', values: ['app'], confirmed: true },
+    },
+    currentQuestion: {
+      id: 'core-user', kind: 'choice', text: '这个工具主要服务谁？', selectionMode: 'single',
+      options: [{ id: 'consumer', label: '普通消费者' }], allowOther: true,
+    },
+    pendingInterpretation: null,
+    brief: null,
+    history: [{ revision: 1, action: 'start', at: Date.now() }],
+  })
+  assert.equal(created.ok, true)
+
+  const tool = draw2codeCreateTool(projects, store)
+  const resumed = await tool.execute({ root, action: 'resume', sessionId: created.value.projectId }, {})
+  assert.equal(resumed.status, 'discovery')
+  assert.equal(resumed.flowVersion, 2)
+  assert.equal(resumed.revision, 2)
+  assert.equal(resumed.question, undefined)
+  assert.ok(resumed.discovery.explicitFacts.some((fact) => /App/.test(fact)))
+  assert.ok(resumed.discovery.resolvedDecisions.some((fact) => /产品端.*App/i.test(fact)))
+  assert.ok(!resumed.discovery.openDimensions.includes('target-platform'))
+
+  const reread = await projects.read(root, created.value.projectId)
+  assert.equal(reread.ok, true)
+  assert.equal(reread.value.flowVersion, 2)
+  assert.equal(reread.value.currentQuestion, null)
+})
+
+test('draw2code_create starts adaptive discovery without touching the board', async () => {
   const { root, canonicalRoot, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
 
@@ -2318,26 +2408,725 @@ test('draw2code_create starts a choice-first draft without touching the board', 
     projectName: '万年历穿搭',
   }, {})
 
-  assert.equal(result.status, 'question')
-  assert.equal(result.question.id, 'target-platform')
-  assert.equal(result.question.selectionMode, 'single')
-  assert.ok(result.question.options.some((option) => option.id === 'web'))
-  assert.equal(result.question.allowOther, true)
+  assert.equal(result.status, 'discovery')
+  assert.equal(result.flowVersion, 2)
+  assert.equal(result.discovery.questionCount, 0)
+  assert.equal(result.discovery.maxQuestions, 10)
+  assert.equal(result.discovery.remainingQuestions, 10)
+  assert.equal(result.discovery.nextAction, 'propose_question')
+  assert.deepEqual(result.discovery.recommendedDimensions.slice(0, 2), ['unique-mechanism', 'trigger-context'])
+  assert.ok(result.briefContract.page.some((field) => /mockDataGroups/.test(field)))
+  assert.ok(result.discovery.openDimensions.includes('target-platform'))
+  assert.equal(result.question, undefined)
   assert.equal(result.nameProposal.suggestedName, '万年历穿搭')
   assert.match(result.projectFile, /^draw2code\/\.projects\/project-[^/]+\.json$/)
   const rendered = tool.output.render({ root, action: 'start', idea: '万年历穿搭工具' }, result)
   assert.match(rendered[0].text, /sessionId=project-/)
   assert.match(rendered[0].text, /revision=1/)
-  assert.match(rendered[0].text, /questionId=target-platform/)
-  assert.match(rendered[0].text, /web — Web/)
+  assert.match(rendered[0].text, /status=discovery/)
+  assert.match(rendered[0].text, /action=propose_question/)
+  assert.match(rendered[0].text, /allowedDimensions=.*trigger-context.*unique-mechanism/)
 
   const boards = await store.list(root)
   assert.equal(boards.ok, true)
   assert.deepEqual(boards.value, [])
   const draft = JSON.parse(await readFile(join(canonicalRoot, result.projectFile), 'utf8'))
   assert.equal(draft.status, 'draft')
+  assert.equal(draft.flowVersion, 2)
   assert.equal(draft.revision, 1)
   assert.equal(draft.originalIdea, '万年历穿搭工具')
+})
+
+test('draw2code_create accepts one grounded product question and renders its insight before the choices', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({
+    root,
+    action: 'start',
+    idea: '我想做一个类似龙珠雷达的陌生人社交APP。',
+    projectName: '龙珠雷达社交',
+  }, {})
+
+  const proposed = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    question: {
+      id: 'q1-trust-mechanism',
+      dimension: 'unique-mechanism',
+      insight: '真正的难点不是看见附近的人，而是让陌生人有一个自然且安全的理由建立联系。',
+      text: '双方第一次建立关系，需要经过什么门槛？',
+      decisionImpact: '决定关系建立流程、信任强度和雷达首页的主要操作。',
+      recommendedOptionId: 'bump',
+      dependsOn: [],
+      options: [
+        { id: 'bump', label: '线下碰一碰', description: '信任强且有辨识度，但使用门槛较高。' },
+        { id: 'mutual-like', label: '双方表达兴趣', description: '增长更容易，但会更像普通交友产品。' },
+        { id: 'shared-place', label: '共同地点触发', description: '联系理由自然，但依赖地点密度。' },
+      ],
+    },
+  }, {})
+
+  assert.equal(proposed.status, 'question')
+  assert.equal(proposed.question.dimension, 'unique-mechanism')
+  assert.match(proposed.question.insight, /陌生人.*安全/)
+  assert.match(proposed.question.text, /^判断：.*陌生人.*安全.*问题：/s)
+  assert.equal(proposed.question.recommendedOptionId, 'bump')
+  assert.ok(proposed.question.options.some((option) => option.id === 'unknown'))
+  assert.ok(proposed.question.options.some((option) => option.id === 'other'))
+  assert.ok(proposed.question.options.some((option) => option.id === 'synthesize-now'))
+  assert.match(proposed.question.askUserQuestionArgs.questions[0].question, /判断：.*陌生人.*安全.*问题：/s)
+  assert.equal(proposed.question.askUserQuestionArgs.questions[0].multi_select, false)
+  assert.ok(proposed.question.askUserQuestionArgs.questions[0].options.some((option) => option.label === '直接整理项目简报'))
+  assert.equal(proposed.discovery.questionCount, 1)
+  assert.equal(proposed.discovery.remainingQuestions, 9)
+
+  const rendered = tool.output.render({ root, action: 'propose_question' }, proposed)
+  assert.match(rendered[0].text, /判断：真正的难点/)
+  assert.match(rendered[0].text, /推荐：线下碰一碰/)
+  assert.match(rendered[0].text, /决定关系建立流程/)
+
+  const answered = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: proposed.sessionId,
+    revision: proposed.revision,
+    questionId: proposed.question.id,
+    values: ['bump'],
+  }, {})
+  assert.equal(answered.status, 'discovery')
+  assert.equal(answered.question, undefined)
+  assert.ok(answered.discovery.resolvedDecisions.some((item) => /线下碰一碰/.test(item)))
+  assert.ok(!answered.discovery.openDimensions.includes('unique-mechanism'))
+  assert.equal(answered.discovery.nextAction, 'propose_question')
+})
+
+test('draw2code_create rejects a native question payload that could drop its insight or user controls', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = rawDraw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人待办清单 App', projectName: '个人待办' }, {})
+  const result = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    question: {
+      id: 'q1-trigger',
+      dimension: 'trigger-context',
+      insight: '普通待办的替代产品很多，首版必须先找到用户仍然无法决定先做什么的具体时刻。',
+      text: '用户最需要产品介入的是哪个任务决策时刻？',
+      decisionImpact: '决定首页采用四象限、时间线还是单一聚焦任务。',
+      recommendedOptionId: 'morning',
+      dependsOn: [],
+      options: [
+        { id: 'morning', label: '每天开始工作时', description: '触发稳定，适合先判断当天优先事项。' },
+        { id: 'change', label: '计划突然变化时', description: '决策压力更强，需要突出快速重新排序。' },
+      ],
+    },
+  }, {})
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'question_presentation_invalid')
+  assert.match(result.error.message, /判断：.*问题：|原生问题卡片/s)
+
+  const insight = '普通待办的替代产品很多，首版必须先找到用户仍然无法决定先做什么的具体时刻。'
+  const escapedNewlines = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    question: {
+      id: 'q1-trigger',
+      dimension: 'trigger-context',
+      insight,
+      text: `判断：${insight}\\n\\n问题：普通待办仍然无法帮用户决定先做什么，因此用户最需要产品介入的是哪个任务决策时刻？`,
+      decisionImpact: '决定首页采用四象限、时间线还是单一聚焦任务。',
+      recommendedOptionId: 'morning',
+      dependsOn: [],
+      options: [
+        { id: 'morning', label: '每天开始工作时', description: '触发稳定，适合先判断当天优先事项。' },
+        { id: 'change', label: '计划突然变化时', description: '决策压力更强，需要突出快速重新排序。' },
+        ...NATIVE_CREATE_CONTROLS,
+      ],
+    },
+  }, {})
+  assert.equal(escapedNewlines.status, 'question')
+})
+
+test('draw2code_create accepts structured question and brief payloads serialized by the DSH host', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人四象限待办清单 App', projectName: '四象限待办' }, {})
+  const question = {
+    id: 'q1-trigger', dimension: 'trigger-context', dependsOn: [],
+    insight: '普通待办产品已经很多，首版必须找到用户仍然无法判断下一步的具体任务决策时刻。',
+    text: '用户最需要待办产品介入的是哪个任务决策时刻？',
+    decisionImpact: '决定首页采用四象限、时间线还是聚焦单一任务。',
+    recommendedOptionId: 'morning',
+    options: [
+      { id: 'morning', label: '每天开始工作时', description: '触发稳定，适合用优先级组织当天任务。' },
+      { id: 'change', label: '计划突然变化时', description: '决策压力更强，但需要突出重新排序能力。' },
+    ],
+  }
+  const proposed = await tool.execute({
+    root, action: 'propose_question', sessionId: started.sessionId, revision: started.revision,
+    question: JSON.stringify(question),
+  }, {})
+  assert.equal(proposed.status, 'question')
+  const answered = await tool.execute({
+    root, action: 'answer', sessionId: proposed.sessionId, revision: proposed.revision,
+    questionId: question.id, values: ['morning'],
+  }, {})
+  const ready = await tool.execute({
+    root, action: 'synthesize', sessionId: answered.sessionId, revision: answered.revision,
+    stopReason: '宿主字符串载荷回归。', brief: JSON.stringify(quadrantPrototypeBrief()),
+  }, {})
+  assert.equal(ready.status, 'ready')
+  assert.match(ready.briefMarkdown, /# 个人四象限待办清单原型/)
+})
+
+function quadrantPrototypeBrief() {
+  return {
+    title: '个人四象限待办清单',
+    productDefinition: '为个人用户设计一款移动端待办清单，让用户每天打开应用后立即看清今天最应该优先完成什么。首版采用四象限组织任务，只验证查看、调整优先级、完成和编辑任务这条核心流程。',
+    target: '需要每天安排个人任务、但经常无法判断优先顺序的个人用户。',
+    coreScenario: '用户在一天开始或计划发生变化时打开应用，快速判断下一项应该处理的任务。',
+    coreOutcome: '用户在 5 秒内识别最高优先级任务，并能立即完成、调整或编辑。',
+    uniqueMechanism: ['使用重要性与紧急性组成的四象限直接表达行动优先级。'],
+    firstVersionFlow: ['查看今天任务', '调整任务象限', '完成任务', '查看其他日期任务', '添加或编辑任务'],
+    includedScope: ['今日任务', '全部任务', '四象限调整', '完成任务', '添加和编辑任务'],
+    excludedScope: ['团队协作', '统计报表', '复杂重复规则', '多级子任务'],
+    prototypeLayout: {
+      platform: '移动端 App',
+      viewport: { width: 390, height: 844 },
+      arrangement: '3 个页面横向排列，页面之间保留足够间距。',
+      connectionStyle: '核心流程使用带文字说明的画布级箭头连接。',
+      representativePageId: 'today',
+      comprehensionGoal: '普通缩放下，用户能在 5 秒内识别今天最优先的任务。',
+    },
+    pages: [
+      {
+        id: 'today',
+        name: '今日四象限',
+        goal: '用户在 5 秒内看懂今天最应该做什么。',
+        size: { width: 390, height: 844 },
+        structure: ['顶部标题：今天', '日期：8 月 21 日 · 星期五', '完成进度：已完成 3 / 9', '四个 2 × 2 象限卡片', '底部导航：今天 / 全部 / 我的'],
+        primaryAction: '新增任务',
+        secondaryActions: ['勾选完成', '点击任务进入编辑'],
+        mockDataGroups: [
+          { name: '重要且紧急', items: ['10:30 提交产品周报', '14:00 修复登录页闪退', '已逾期 预约牙医'] },
+          { name: '重要不紧急', items: ['周五前 完成阅读计划', '20:00 跑步 30 分钟'] },
+          { name: '紧急不重要', items: ['11:00 回复物业电话', '18:00 取快递'] },
+          { name: '不紧急不重要', items: ['整理手机相册', '查看收藏的文章'] },
+        ],
+        states: ['今天为底部导航选中项', '临近到期使用橙色提示', '已逾期使用红色提示'],
+        navigation: ['今天（选中）', '全部', '我的'],
+        annotations: ['长按任务可拖到其他象限'],
+        acceptanceCriteria: ['四个象限均有可读标题、语义色和真实任务。'],
+      },
+      {
+        id: 'all',
+        name: '全部任务',
+        goal: '查看今天以外的任务，并快速搜索、筛选或进入编辑。',
+        size: { width: 390, height: 844 },
+        structure: ['顶部标题：全部任务', '搜索框：搜索任务', '筛选项：全部 / 今天 / 未来 / 已完成', '任务按日期分组', '底部导航中全部为选中状态'],
+        primaryAction: '新增任务',
+        secondaryActions: ['搜索任务', '切换筛选', '打开任务'],
+        mockDataGroups: [
+          { name: '今天', items: ['提交产品周报 · 重要紧急 · 10:30', '回复物业电话 · 紧急不重要 · 11:00', '跑步 30 分钟 · 重要不紧急 · 20:00'] },
+          { name: '明天', items: ['准备周会材料 · 重要紧急 · 09:30', '购买洗衣液 · 不紧急不重要'] },
+        ],
+        states: ['全部为当前筛选项和底部导航选中项'],
+        navigation: ['今天', '全部（选中）', '我的'],
+        annotations: [],
+        acceptanceCriteria: ['任务标题、象限、日期和提醒状态完整可见。'],
+      },
+      {
+        id: 'edit',
+        name: '添加／编辑任务',
+        goal: '以较低录入成本创建或修改一条任务。',
+        size: { width: 390, height: 844 },
+        structure: ['页面标题：编辑任务', '任务标题输入', '日期选择', '四象限选择器', '基础提醒开关与提醒时间', '主按钮：保存任务'],
+        primaryAction: '保存任务',
+        secondaryActions: ['取消', '删除任务'],
+        mockDataGroups: [
+          { name: '真实编辑案例', items: ['任务标题：提交产品周报', '日期：2026 年 8 月 21 日', '当前象限：重要紧急', '提醒时间：10:00'] },
+        ],
+        states: ['重要紧急为当前选中项', '基础提醒已开启'],
+        navigation: [],
+        annotations: [],
+        acceptanceCriteria: ['编辑案例的标题、日期、象限和提醒时间均可读。'],
+      },
+    ],
+    pageRelations: [
+      { fromPageId: 'today', toPageId: 'edit', trigger: '点击新增按钮或任务卡片', result: '进入新增或编辑状态', arrowStyle: 'solid', label: '新增／编辑' },
+      { fromPageId: 'today', toPageId: 'all', trigger: '点击底部全部', result: '查看其他日期任务', arrowStyle: 'solid', label: '查看全部' },
+      { fromPageId: 'edit', toPageId: 'today', trigger: '保存任务', result: '返回并更新对应象限', arrowStyle: 'solid', label: '保存返回' },
+      { fromPageId: 'today', toPageId: 'today', trigger: '长按并拖拽任务', result: '任务移动到另一个象限', arrowStyle: 'dashed', label: '拖拽换象限' },
+    ],
+    prototypePrinciples: ['采用语义化低保真', '使用真实标题、状态和任务内容', '每页只突出一个主要操作', '按钮文字水平、垂直居中', '底部导航文字完整可见'],
+    acceptanceCriteria: ['3 个移动端页面完整出现且没有内容裁切', '所有标题、任务和状态文字首次渲染可见', '按钮文案水平、垂直居中', '底部导航对齐且内容完整', '页面关系箭头不遮挡正文', '新增、编辑、切换全部和拖拽换象限流程表达清楚'],
+    assumptions: ['原型仅面向手机 App', '无需登录、注册或云同步', '我的只作为导航占位', '首版使用固定 mock 数据', '视觉风格和技术实现延迟到 generate 阶段'],
+    pendingDecisions: [],
+  }
+}
+
+test('draw2code_create synthesizes one executable brief and renders the complete Markdown document', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '我想做一个个人四象限待办清单 App', projectName: '四象限待办' }, {})
+
+  const ready = await tool.execute({
+    root,
+    action: 'synthesize',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    stopReason: '核心场景、独特机制、首版流程和范围已经明确。',
+    brief: quadrantPrototypeBrief(),
+  }, {})
+
+  assert.equal(ready.status, 'ready')
+  assert.equal(ready.brief.title, '个人四象限待办清单')
+  assert.equal(ready.brief.pages.length, 3)
+  assert.equal(ready.brief.pageBlueprints.length, 3)
+  assert.equal(ready.brief.pageMockData[0].examples.length, 9)
+  assert.match(ready.briefMarkdown, /^# 个人四象限待办清单原型/m)
+  assert.match(ready.briefMarkdown, /## 产品定义/)
+  assert.match(ready.briefMarkdown, /### 页面一：今日四象限/)
+  assert.match(ready.briefMarkdown, /真实 mock 数据：/)
+  assert.match(ready.briefMarkdown, /10:30 提交产品周报/)
+  assert.match(ready.briefMarkdown, /## 页面关系与交互表达/)
+  assert.match(ready.briefMarkdown, /## 原型表达原则/)
+  assert.match(ready.briefMarkdown, /## 验收方式/)
+  assert.match(ready.briefMarkdown, /## 默认假设/)
+
+  const rendered = tool.output.render({ root, action: 'synthesize' }, ready)
+  assert.match(rendered[0].text, /# 个人四象限待办清单原型/)
+  assert.match(rendered[0].text, /调整产品方向/)
+  assert.match(rendered[0].text, /调整首版范围/)
+  assert.equal(ready.confirmation.askUserQuestionArgs.questions[0].header, '简报确认')
+  assert.deepEqual(
+    ready.confirmation.askUserQuestionArgs.questions[0].options.map((option) => option.label),
+    ['确认并绘制', '调整产品方向', '调整首版范围'],
+  )
+
+  const confirmed = await tool.execute({
+    root,
+    action: 'confirm',
+    sessionId: ready.sessionId,
+    revision: ready.revision,
+  }, {})
+  assert.equal(confirmed.status, 'confirmed')
+  assert.equal(confirmed.brief.briefSchemaVersion, 2)
+  assert.equal(confirmed.brief.title, '个人四象限待办清单')
+  assert.equal(confirmed.briefMarkdown, ready.briefMarkdown)
+  assert.equal(confirmed.nextAction, 'draw2code_update')
+})
+
+test('draw2code_create refuses a brief whose page structure is still generic placeholder language', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人四象限待办清单 App', projectName: '四象限待办' }, {})
+  const brief = quadrantPrototypeBrief()
+  brief.pages[0].structure = ['顶部区域', '内容卡片', '若干按钮']
+
+  const result = await tool.execute({
+    root,
+    action: 'synthesize',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    stopReason: '尝试直接整理简报。',
+    brief,
+  }, {})
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'brief_quality_invalid')
+  assert.match(result.error.message, /可直接绘制|泛化|顶部区域/)
+})
+
+test('draw2code_create reports the exact mockDataGroups contract instead of forcing schema guesses', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人四象限待办清单 App', projectName: '四象限待办' }, {})
+  const brief = quadrantPrototypeBrief()
+  brief.pages[0].mockData = brief.pages[0].mockDataGroups.flatMap((group) => group.items)
+  delete brief.pages[0].mockDataGroups
+  const result = await tool.execute({
+    root,
+    action: 'synthesize',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    stopReason: '验证 schema 错误提示。',
+    brief,
+  }, {})
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'brief_quality_invalid')
+  assert.match(result.error.message, /mockDataGroups.*\[\{ name, items: string\[\] \}\].*不要使用 mockData/s)
+})
+
+test('draw2code_create rejects canned questions and enforces the ten-question budget', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  let state = await tool.execute({ root, action: 'start', idea: '我想做一个个人待办清单 App', projectName: '个人待办' }, {})
+
+  const generic = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: state.sessionId,
+    revision: state.revision,
+    question: {
+      id: 'q-generic',
+      dimension: 'product-architecture',
+      insight: '目前还没有明确首版页面，因此需要继续补齐常见的产品结构信息。',
+      text: '第一版需要包含哪些核心模块？',
+      decisionImpact: '决定首版产品的信息结构和页面数量。',
+      recommendedOptionId: 'home',
+      dependsOn: [],
+      options: [
+        { id: 'home', label: '首页', description: '提供产品总览，但没有体现当前产品的独特场景。' },
+        { id: 'profile', label: '个人中心', description: '提供个人信息，但未必属于首版核心闭环。' },
+      ],
+    },
+  }, {})
+  assert.equal(generic.status, 'error')
+  assert.equal(generic.error.code, 'question_quality_invalid')
+  assert.match(generic.error.message, /固定.*模块.*页面问卷|结合当前产品场景/)
+
+  const prematureArchitecture = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: state.sessionId,
+    revision: state.revision,
+    question: {
+      id: 'q-premature-architecture',
+      dimension: 'product-architecture',
+      insight: '个人待办的组织方式会影响首页，但在不知道用户何时仍无法决定先做什么之前就选结构，容易把现有产品重新画一遍。',
+      text: '任务应采用哪种可视化组织模型？',
+      decisionImpact: '决定首页是时间线、优先级矩阵还是普通列表。',
+      recommendedOptionId: 'timeline',
+      dependsOn: [],
+      options: [
+        { id: 'timeline', label: '时间线', description: '强调先后顺序，但不直接解决任务取舍。' },
+        { id: 'matrix', label: '优先级矩阵', description: '突出取舍，但需要用户理解分类规则。' },
+      ],
+    },
+  }, {})
+  assert.equal(prematureArchitecture.status, 'error')
+  assert.equal(prematureArchitecture.error.code, 'question_priority_invalid')
+  assert.match(prematureArchitecture.error.message, /trigger-context.*existing-alternative/)
+
+  const dimensions = ['trigger-context', 'existing-alternative', 'core-outcome', 'unique-mechanism', 'core-loop', 'critical-risk', 'scope-proof', 'target-user', 'target-platform', 'product-architecture']
+  for (const [index, dimension] of dimensions.entries()) {
+    state = await tool.execute({
+      root,
+      action: 'propose_question',
+      sessionId: state.sessionId,
+      revision: state.revision,
+      question: {
+        id: `q${index + 1}-${dimension}`,
+        dimension,
+        insight: `针对这个个人待办产品，第 ${index + 1} 个仍未解决的决策会直接改变用户每天安排任务的方式。`,
+        text: `关于每天安排任务的第 ${index + 1} 个关键取舍，首版应该优先验证哪种方向？`,
+        decisionImpact: `这个答案将决定第 ${index + 1} 项核心流程和对应的原型表达。`,
+        recommendedOptionId: 'focused',
+        dependsOn: [],
+        options: [
+          { id: 'focused', label: `聚焦方向 ${index + 1}`, description: '更容易验证核心价值，但会主动舍弃一部分边缘场景。' },
+          { id: 'broad', label: `完整方向 ${index + 1}`, description: '覆盖场景更多，但首版范围和理解成本都会明显增加。' },
+        ],
+      },
+    }, {})
+    assert.equal(state.status, 'question')
+    state = await tool.execute({
+      root,
+      action: 'answer',
+      sessionId: state.sessionId,
+      revision: state.revision,
+      questionId: state.question.id,
+      values: ['focused'],
+    }, {})
+  }
+
+  assert.equal(state.status, 'discovery')
+  assert.equal(state.discovery.questionCount, 10)
+  assert.equal(state.discovery.remainingQuestions, 0)
+  assert.equal(state.discovery.nextAction, 'synthesize')
+
+  const overLimit = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: state.sessionId,
+    revision: state.revision,
+    question: {
+      id: 'q11-more',
+      dimension: 'core-outcome',
+      insight: '虽然前面已经完成十个问题，但这里仍试图继续增加新的产品决策问题。',
+      text: '是否继续增加第十一个产品问题？',
+      decisionImpact: '这会突破已经约定的问题预算并拖慢用户进入原型。',
+      recommendedOptionId: 'stop',
+      dependsOn: ['q3-core-outcome'],
+      options: [
+        { id: 'stop', label: '停止提问', description: '按照约定进入项目简报，避免无限追问。' },
+        { id: 'continue', label: '继续提问', description: '获得更多信息，但违反最多十题的明确约束。' },
+      ],
+    },
+  }, {})
+  assert.equal(overLimit.status, 'error')
+  assert.equal(overLimit.error.code, 'question_limit_reached')
+
+  const readyAtLimit = await tool.execute({
+    root,
+    action: 'synthesize',
+    sessionId: state.sessionId,
+    revision: state.revision,
+    stopReason: '已达到十题上限。',
+    brief: quadrantPrototypeBrief(),
+  }, {})
+  assert.equal(readyAtLimit.status, 'ready')
+  const adjustedAtLimit = await tool.execute({
+    root,
+    action: 'propose_question',
+    sessionId: readyAtLimit.sessionId,
+    revision: readyAtLimit.revision,
+    question: {
+      id: 'q-adjust-after-limit',
+      dimension: 'scope-proof',
+      insight: '用户已经看过完整待办简报并主动要求调整范围，此时只需重新确认首版验证边界，不应重开整套问卷。',
+      text: '首版验证是否仍需保留全部任务页？',
+      decisionImpact: '决定首轮原型是否保留跨日期查找任务的完整流程。',
+      recommendedOptionId: 'keep',
+      dependsOn: ['q7-scope-proof'],
+      options: [
+        { id: 'keep', label: '保留全部任务', description: '核心闭环更完整，但首轮页面和状态会更多。' },
+        { id: 'remove', label: '只做今日任务', description: '验证更聚焦，但无法覆盖跨日期管理场景。' },
+      ],
+    },
+  }, {})
+  assert.equal(adjustedAtLimit.status, 'question')
+  assert.equal(adjustedAtLimit.discovery.questionCount, 10)
+  assert.deepEqual(adjustedAtLimit.discovery.adjustmentQuestionIds, ['q-adjust-after-limit'])
+})
+
+test('draw2code_create revising one decision invalidates only questions that depend on it', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  let state = await tool.execute({ root, action: 'start', idea: '陌生人雷达社交 App', projectName: '雷达社交' }, {})
+  const questions = [
+    {
+      id: 'q1-connection', dimension: 'unique-mechanism', dependsOn: [],
+      insight: '陌生人社交的第一道产品决策，是用什么现实理由让双方愿意安全地建立联系。',
+      text: '双方第一次建立联系，首版采用哪种门槛？',
+      decisionImpact: '决定关系建立流程、信任强度和雷达首页的主要操作。',
+      recommendedOptionId: 'bump',
+      options: [
+        { id: 'bump', label: '线下碰一碰', description: '信任更强且有产品辨识度，但要求双方真实见面。' },
+        { id: 'mutual', label: '双向表达兴趣', description: '连接效率更高，但产品会更接近常见交友应用。' },
+      ],
+    },
+    {
+      id: 'q2-privacy', dimension: 'critical-risk', dependsOn: ['q1-connection'],
+      insight: '如果线下碰一碰才能建立关系，隐私控制应该围绕见面前后的可见范围设计。',
+      text: '碰一碰之前，陌生人可以看到多少个人信息？',
+      decisionImpact: '决定雷达点位、个人资料页和碰一碰确认页展示的信息。',
+      recommendedOptionId: 'limited',
+      options: [
+        { id: 'limited', label: '只显示少量线索', description: '优先保护隐私，同时保留判断是否见面的基本依据。' },
+        { id: 'profile', label: '显示完整资料', description: '方便快速判断，但会增加被识别和骚扰的风险。' },
+      ],
+    },
+  ]
+  for (const question of questions) {
+    state = await tool.execute({ root, action: 'propose_question', sessionId: state.sessionId, revision: state.revision, question }, {})
+    state = await tool.execute({ root, action: 'answer', sessionId: state.sessionId, revision: state.revision, questionId: question.id, values: [question.recommendedOptionId] }, {})
+  }
+  assert.equal(state.discovery.questionCount, 2)
+
+  const revised = await tool.execute({
+    root,
+    action: 'revise',
+    sessionId: state.sessionId,
+    revision: state.revision,
+    questionId: 'q1-connection',
+    values: ['mutual'],
+  }, {})
+  assert.equal(revised.status, 'discovery')
+  assert.equal(revised.discovery.questionCount, 2)
+  assert.deepEqual(revised.discovery.questions.map((question) => question.id), ['q1-connection', 'q2-privacy'])
+  assert.deepEqual(revised.discovery.invalidatedQuestionIds, ['q2-privacy'])
+  assert.ok(revised.discovery.resolvedDecisions.some((item) => /双向表达兴趣/.test(item)))
+  assert.ok(!revised.discovery.resolvedDecisions.some((item) => /q2-privacy/.test(item)))
+
+  const bypass = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: revised.sessionId,
+    revision: revised.revision,
+    questionId: 'q1-connection',
+    values: ['bump'],
+  }, {})
+  assert.equal(bypass.status, 'error')
+  assert.equal(bypass.error.code, 'historical_answer_requires_revise')
+})
+
+test('draw2code_create can skip a pending question or synthesize immediately without getting stuck', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人待办清单 App', projectName: '个人待办' }, {})
+  const question = {
+    id: 'q1-trigger', dimension: 'trigger-context', dependsOn: [],
+    insight: '普通待办产品的替代品很多，首版必须先找到用户仍然无法决定先做什么的具体时刻。',
+    text: '用户最需要产品介入的是哪个任务决策时刻？',
+    decisionImpact: '决定首页组织方式采用四象限、时间线还是聚焦单一任务。',
+    recommendedOptionId: 'morning',
+    options: [
+      { id: 'morning', label: '每天开始工作时', description: '触发稳定，适合用优先级组织当天任务。' },
+      { id: 'change', label: '计划突然变化时', description: '决策压力更强，但需要突出重新排序能力。' },
+    ],
+  }
+  const proposed = await tool.execute({ root, action: 'propose_question', sessionId: started.sessionId, revision: started.revision, question }, {})
+
+  const skipped = await tool.execute({
+    root, action: 'skip', sessionId: proposed.sessionId, revision: proposed.revision, questionId: question.id,
+  }, {})
+  assert.equal(skipped.status, 'discovery')
+  assert.equal(skipped.question, undefined)
+  assert.ok(skipped.discovery.assumptions.some((item) => /跳过|待验证/.test(item)))
+  assert.ok(skipped.discovery.openDimensions.includes('trigger-context'))
+
+  const another = await tool.execute({
+    root, action: 'propose_question', sessionId: skipped.sessionId, revision: skipped.revision,
+    question: { ...question, id: 'q2-risk', dimension: 'critical-risk', text: '如果优先级推荐错误，首版最应该避免哪一种用户损失？' },
+  }, {})
+  const ready = await tool.execute({
+    root, action: 'synthesize', sessionId: another.sessionId, revision: another.revision,
+    stopReason: '用户选择直接整理项目简报。', brief: quadrantPrototypeBrief(),
+  }, {})
+  assert.equal(ready.status, 'ready')
+  assert.equal(ready.question, undefined)
+  assert.ok(ready.discovery.assumptions.some((item) => /直接整理.*未回答/.test(item)))
+  assert.ok(ready.brief.pendingDecisions.some((item) => /当前问题未回答/.test(item)))
+  assert.match(ready.briefMarkdown, /尚待决定：[\s\S]*当前问题未回答/)
+})
+
+test('draw2code_create turns the native direct-brief choice into an explicit synthesize handoff', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭 App', projectName: '衣历穿搭' }, {})
+  const proposed = await tool.execute({
+    root, action: 'propose_question', sessionId: started.sessionId, revision: started.revision,
+    question: {
+      id: 'q1-signal', dimension: 'unique-mechanism', dependsOn: [],
+      insight: '万年历穿搭的独特价值取决于推荐是只看天气，还是结合用户真实衣橱减少选择困难。',
+      text: '首版穿搭推荐主要依据哪类信号？',
+      decisionImpact: '决定推荐页解释方式、衣橱录入成本和首版页面范围。',
+      recommendedOptionId: 'weather-wardrobe',
+      options: [
+        { id: 'weather-wardrobe', label: '天气与真实衣橱', description: '推荐更可信，但需要降低衣物录入成本。' },
+        { id: 'weather-only', label: '只依据天气', description: '首版更轻，但推荐容易变成通用穿搭内容。' },
+      ],
+    },
+  }, {})
+  const handoff = await tool.execute({
+    root, action: 'answer', sessionId: proposed.sessionId, revision: proposed.revision,
+    questionId: proposed.question.id, values: ['synthesize-now'],
+  }, {})
+  assert.equal(handoff.status, 'discovery')
+  assert.equal(handoff.question, undefined)
+  assert.equal(handoff.discovery.nextAction, 'synthesize')
+  assert.match(handoff.discovery.stopReason, /用户.*直接整理/)
+  const rendered = tool.output.render({ root, action: 'answer' }, handoff)
+  assert.match(rendered[0].text, /必须立即调用 action=synthesize/)
+  assert.doesNotMatch(rendered[0].text, /信息不足时调用 action=propose_question/)
+})
+
+test('draw2code_create reopens a ready brief for one affected adjustment and regenerates the full brief', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人四象限待办清单 App', projectName: '四象限待办' }, {})
+  const ready = await tool.execute({
+    root, action: 'synthesize', sessionId: started.sessionId, revision: started.revision,
+    stopReason: '首版信息已经足够。', brief: quadrantPrototypeBrief(),
+  }, {})
+  const adjusted = await tool.execute({
+    root, action: 'propose_question', sessionId: ready.sessionId, revision: ready.revision,
+    question: {
+      id: 'q-adjust-scope', dimension: 'scope-proof', dependsOn: [],
+      insight: '用户选择调整首版范围，当前最需要确认的是“全部任务”是否属于验证四象限价值的必要闭环。',
+      text: '首版是否保留“全部任务”页？',
+      decisionImpact: '决定首轮页面数量、跨日期流程和后续完整简报的页面关系。',
+      recommendedOptionId: 'keep',
+      options: [
+        { id: 'keep', label: '保留全部任务', description: '闭环更完整，但首版需要多维护一个列表页面。' },
+        { id: 'remove', label: '只做今日与编辑', description: '验证更聚焦，但无法查看今天以外的任务。' },
+      ],
+    },
+  }, {})
+  assert.equal(adjusted.status, 'question')
+  assert.equal(adjusted.brief, undefined)
+  assert.equal(adjusted.briefMarkdown, undefined)
+})
+
+test('draw2code_create rejects a polished but ungrounded question from another product', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭 App', projectName: '衣历穿搭' }, {})
+  const result = await tool.execute({
+    root, action: 'propose_question', sessionId: started.sessionId, revision: started.revision,
+    question: {
+      id: 'q-unrelated', dimension: 'critical-risk', dependsOn: [],
+      insight: '陌生人建立关系之前最难的是兼顾附近发现效率和首次联系时的隐私安全感。',
+      text: '双方第一次建立联系需要经过什么信任门槛？',
+      decisionImpact: '决定雷达首页、附近用户资料和聊天解锁流程。',
+      recommendedOptionId: 'bump',
+      options: [
+        { id: 'bump', label: '线下碰一碰', description: '信任较强，但要求双方真实见面。' },
+        { id: 'mutual', label: '双向表达兴趣', description: '连接更容易，但会接近普通交友产品。' },
+      ],
+    },
+  }, {})
+  assert.equal(result.status, 'error')
+  assert.equal(result.error.code, 'question_not_grounded')
+})
+
+test('draw2code_create brief gate rejects duplicate names, missing relations, and visual or technical implementation details', async () => {
+  const { root, store, projects } = await makeStore()
+  const tool = draw2codeCreateTool(projects, store)
+  const started = await tool.execute({ root, action: 'start', idea: '个人四象限待办清单 App', projectName: '四象限待办' }, {})
+
+  const duplicateNames = quadrantPrototypeBrief()
+  duplicateNames.pages[1].name = duplicateNames.pages[0].name
+  let result = await tool.execute({
+    root, action: 'synthesize', sessionId: started.sessionId, revision: started.revision,
+    stopReason: '测试简报门禁。', brief: duplicateNames,
+  }, {})
+  assert.equal(result.error.code, 'brief_quality_invalid')
+  assert.match(result.error.message, /页面名称.*重复/)
+
+  const missingRelations = quadrantPrototypeBrief()
+  missingRelations.pageRelations = []
+  result = await tool.execute({
+    root, action: 'synthesize', sessionId: started.sessionId, revision: started.revision,
+    stopReason: '测试简报门禁。', brief: missingRelations,
+  }, {})
+  assert.equal(result.error.code, 'brief_quality_invalid')
+  assert.match(result.error.message, /多页面.*关系/)
+
+  const implementationDetails = quadrantPrototypeBrief()
+  implementationDetails.prototypePrinciples.push('使用 React 和 Tailwind 实现，并规定 16px 圆角与品牌字体。')
+  result = await tool.execute({
+    root, action: 'synthesize', sessionId: started.sessionId, revision: started.revision,
+    stopReason: '测试简报门禁。', brief: implementationDetails,
+  }, {})
+  assert.equal(result.error.code, 'brief_quality_invalid')
+  assert.match(result.error.message, /视觉|技术实现|Generate/)
+
+  const contradictoryAssumption = quadrantPrototypeBrief()
+  contradictoryAssumption.assumptions.push('首版包含团队协作，允许把任务分派给同事。')
+  result = await tool.execute({
+    root, action: 'synthesize', sessionId: started.sessionId, revision: started.revision,
+    stopReason: '测试简报门禁。', brief: contradictoryAssumption,
+  }, {})
+  assert.equal(result.error.code, 'brief_quality_invalid')
+  assert.match(result.error.message, /默认假设.*明确排除.*矛盾/)
 })
 
 test('draw2code_create requires the agent to infer a project name instead of clipping the idea', async () => {
@@ -2385,60 +3174,47 @@ test('draw2code_create uses the agent-inferred name without an 原型 suffix', a
     projectName: '衣历穿搭',
   }, {})
 
-  assert.equal(result.status, 'question')
+  assert.equal(result.status, 'discovery')
   assert.equal(result.nameProposal.suggestedName, '衣历穿搭')
-
-  let state = result
-  const answers = [
-    ['target-platform', ['web']],
-    ['core-user', ['consumer']],
-    ['core-goal', ['query']],
-    ['core-flow', ['daily-outfit']],
-    ['core-modules', ['calendar']],
-    ['core-pages', ['query', 'weather', 'recommendation']],
-  ]
-  for (const [questionId, values] of answers) {
-    state = await tool.execute({
-      root,
-      action: 'answer',
-      sessionId: state.sessionId,
-      revision: state.revision,
-      questionId,
-      values,
-    }, {})
-  }
-  assert.equal(state.status, 'ready')
-  const confirmed = await tool.execute({
-    root,
-    action: 'confirm',
-    sessionId: state.sessionId,
-    revision: state.revision,
-  }, {})
-  assert.equal(confirmed.boardName, '衣历穿搭')
+  assert.equal(result.projectName, '衣历穿搭')
 })
 
-test('draw2code_create persists answers, returns one next question, and is idempotent', async () => {
+test('draw2code_create persists one proposed question and is idempotent', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
   const started = await tool.execute({ root, action: 'start', idea: '万年历穿搭工具', projectName: '万年历穿搭' }, {})
 
-  const answerArgs = {
+  const proposeArgs = {
     root,
-    action: 'answer',
+    action: 'propose_question',
     sessionId: started.sessionId,
     revision: started.revision,
-    questionId: 'target-platform',
-    values: ['web'],
+    question: {
+      id: 'q1-recommendation-input', dimension: 'unique-mechanism', dependsOn: [],
+      insight: '穿搭产品的差异不在天气展示，而在推荐是否真正使用用户拥有的衣物。',
+      text: '首版穿搭推荐主要依据什么信息？',
+      decisionImpact: '决定推荐流程、衣橱录入成本和首轮原型页面。',
+      recommendedOptionId: 'wardrobe-weather',
+      options: [
+        { id: 'wardrobe-weather', label: '衣橱与天气', description: '推荐更可信，但需要先解决衣物录入成本。' },
+        { id: 'weather-only', label: '仅使用天气', description: '启动更轻，但推荐容易变成泛化穿搭文章。' },
+      ],
+    },
   }
-  const answered = await tool.execute(answerArgs, {})
-  assert.equal(answered.status, 'question')
-  assert.equal(answered.question.id, 'core-user')
-  assert.equal(answered.revision, started.revision + 1)
+  const proposed = await tool.execute(proposeArgs, {})
+  assert.equal(proposed.status, 'question')
+  assert.equal(proposed.question.id, 'q1-recommendation-input')
+  assert.equal(proposed.revision, started.revision + 1)
 
-  const duplicate = await tool.execute(answerArgs, {})
+  const duplicate = await tool.execute(proposeArgs, {})
   assert.equal(duplicate.idempotent, true)
   const { idempotent: _idempotent, ...duplicateWithoutMarker } = duplicate
-  assert.deepEqual(duplicateWithoutMarker, answered)
+  assert.deepEqual(duplicateWithoutMarker, proposed)
+
+  const stringDuplicate = await tool.execute({ ...proposeArgs, question: JSON.stringify(proposeArgs.question) }, {})
+  assert.equal(stringDuplicate.idempotent, true)
+  const { idempotent: _stringIdempotent, ...stringDuplicateWithoutMarker } = stringDuplicate
+  assert.deepEqual(stringDuplicateWithoutMarker, proposed)
 })
 
 test('draw2code_create stores free text directly and uses the final brief as the single confirmation', async () => {
@@ -2446,26 +3222,36 @@ test('draw2code_create stores free text directly and uses the final brief as the
   const tool = draw2codeCreateTool(projects, store)
   const started = await tool.execute({ root, action: 'start', idea: '一个生活工具', projectName: '生活助手' }, {})
 
-  const answered = await tool.execute({
+  const proposed = await tool.execute({
     root,
-    action: 'answer',
+    action: 'propose_question',
     sessionId: started.sessionId,
     revision: started.revision,
-    questionId: 'target-platform',
-    values: ['other'],
-    otherText: '先做小程序，后面再扩展到 Web',
+    question: {
+      id: 'q1-context', dimension: 'trigger-context', dependsOn: [],
+      insight: '生活工具只有绑定一个高频且具体的触发时刻，才不会变成用户想不起来打开的功能集合。',
+      text: '用户最需要这个生活助手的具体时刻是什么？',
+      decisionImpact: '决定首页首屏内容、主要操作和首版需要舍弃的功能。',
+      recommendedOptionId: 'morning',
+      options: [
+        { id: 'morning', label: '早晨安排一天', description: '使用频率稳定，适合聚焦今日信息和快速行动。' },
+        { id: 'before-going-out', label: '出门前做决定', description: '场景更紧迫，但产品能力需要围绕即时信息收缩。' },
+      ],
+    },
   }, {})
-
-  assert.equal(answered.status, 'question')
-  assert.equal(answered.question.id, 'core-user')
-  assert.equal(answered.question.kind, 'choice')
-  assert.equal(answered.revision, started.revision + 1)
+  const answered = await tool.execute({
+    root, action: 'answer', sessionId: proposed.sessionId, revision: proposed.revision,
+    questionId: proposed.question.id, values: ['other'], otherText: '每天下班后规划第二天',
+  }, {})
+  assert.equal(answered.status, 'discovery')
+  assert.ok(answered.discovery.resolvedDecisions.some((item) => /每天下班后规划第二天/.test(item)))
+  assert.equal(answered.question, undefined)
 })
 
-test('draw2code_create finishes a radar social app brief in five useful questions plus one final confirmation', async () => {
+test('draw2code_create keeps radar discovery product-specific instead of returning a fixed module and page sequence', async () => {
   const { root, store, projects } = await makeStore()
   const tool = draw2codeCreateTool(projects, store)
-  let state = await tool.execute({
+  const state = await tool.execute({
     root,
     action: 'start',
     idea: '我想做一个类似龙珠雷达的陌生人社交APP。',
@@ -2473,104 +3259,11 @@ test('draw2code_create finishes a radar social app brief in five useful question
   }, {})
 
   assert.equal(state.nameProposal.suggestedName, '龙珠雷达社交')
-  const questionIds = [state.question.id]
-  assert.equal(state.question.id, 'core-user')
-
-  state = await tool.execute({
-    root,
-    action: 'answer',
-    sessionId: state.sessionId,
-    revision: state.revision,
-    questionId: 'core-user',
-    values: ['consumer'],
-  }, {})
-  questionIds.push(state.question.id)
-  assert.equal(state.question.id, 'core-goal')
-  assert.ok(state.question.options.some((option) => option.id === 'discover-nearby'))
-
-  state = await tool.execute({
-    root,
-    action: 'answer',
-    sessionId: state.sessionId,
-    revision: state.revision,
-    questionId: 'core-goal',
-    values: ['other'],
-    otherText: '发现附近的陌生人，见面碰一碰后才能成为好友',
-  }, {})
-  questionIds.push(state.question.id)
-  assert.equal(state.question.id, 'core-flow')
-  assert.equal(state.question.kind, 'choice')
-  assert.ok(state.question.options.some((option) => option.id === 'radar-bump-chat'))
-
-  state = await tool.execute({
-    root,
-    action: 'answer',
-    sessionId: state.sessionId,
-    revision: state.revision,
-    questionId: 'core-flow',
-    values: ['radar-bump-chat'],
-  }, {})
-  questionIds.push(state.question.id)
-  assert.equal(state.question.id, 'core-modules')
-  assert.ok(state.question.options.some((option) => option.id === 'radar-home'))
-  assert.ok(state.question.options.some((option) => option.id === 'friends-chat'))
-
-  state = await tool.execute({
-    root,
-    action: 'answer',
-    sessionId: state.sessionId,
-    revision: state.revision,
-    questionId: 'core-modules',
-    values: ['radar-home', 'bump-connect', 'friends-chat', 'profile-history'],
-  }, {})
-  questionIds.push(state.question.id)
-  assert.equal(state.question.id, 'core-pages')
-  assert.ok(state.question.options.some((option) => option.id === 'bump-confirm'))
-
-  state = await tool.execute({
-    root,
-    action: 'answer',
-    sessionId: state.sessionId,
-    revision: state.revision,
-    questionId: 'core-pages',
-    values: ['radar-home', 'bump-confirm', 'friends-chat'],
-  }, {})
-
-  assert.deepEqual(questionIds, ['core-user', 'core-goal', 'core-flow', 'core-modules', 'core-pages'])
-  assert.equal(state.status, 'ready')
-  assert.equal(state.revision, 6)
-  assert.equal(state.brief.targetPlatform, 'App')
-  assert.equal(state.brief.goal, '发现附近的陌生人，见面碰一碰后才能成为好友')
-  assert.ok(state.brief.modules.includes('雷达首页（扫描附近的人）'))
-  assert.equal(state.brief.mockDataPolicy.minimumRecordsPerRepeatedComponent, 3)
-  assert.match(state.brief.mockDataPolicy.rule, /不能使用空白方框|真实示例内容/)
-  const radarMock = state.brief.pageMockData.find((page) => page.pageId === 'radar-home')
-  assert.deepEqual(radarMock.examples, ['林小满 · 300m', '周可乐 · 500m', '陈一川 · 800m'])
-  const friendsChatMock = state.brief.pageMockData.find((page) => page.pageId === 'friends-chat')
-  assert.equal(friendsChatMock.minimumRecords, 3)
-  assert.ok(friendsChatMock.requiredContent.some((item) => /最近消息和时间/.test(item)))
-  assert.ok(friendsChatMock.requiredContent.some((item) => /双方对话/.test(item)))
-  const radarBlueprint = state.brief.pageBlueprints.find((page) => page.pageId === 'radar-home')
-  assert.match(radarBlueprint.coreTask, /附近|扫描/)
-  assert.ok(radarBlueprint.aboveFold.some((item) => /附近|雷达|扫描/.test(item)))
-  assert.match(radarBlueprint.primaryAction, /扫描|碰一碰/)
-  assert.ok(radarBlueprint.semanticComponents.some((component) => component.kind === 'page-header'))
-  assert.ok(radarBlueprint.semanticComponents.some((component) => component.kind === 'primary-action'))
-  const chatBlueprint = state.brief.pageBlueprints.find((page) => page.pageId === 'friends-chat')
-  assert.ok(chatBlueprint.semanticComponents.some((component) => component.kind === 'conversation-list'))
-  assert.ok(!chatBlueprint.semanticComponents.some((component) => component.kind === 'task-card'))
-  assert.ok(state.brief.semanticComponentCatalog.some((component) => component.kind === 'bottom-navigation'))
-  assert.match(state.brief.prototypeQualityPolicy.completionRule, /writeVerified|视觉复核/)
-
-  const confirmed = await tool.execute({
-    root,
-    action: 'confirm',
-    sessionId: state.sessionId,
-    revision: state.revision,
-  }, {})
-  assert.equal(confirmed.status, 'confirmed')
-  assert.equal(confirmed.revision, 7)
-  assert.equal(confirmed.boardName, '龙珠雷达社交')
+  assert.equal(state.status, 'discovery')
+  assert.ok(state.discovery.explicitFacts.some((fact) => /App/.test(fact)))
+  assert.ok(state.discovery.explicitFacts.some((fact) => /陌生人社交/.test(fact)))
+  assert.equal(state.question, undefined)
+  assert.ok(!state.discovery.questions.some((question) => /核心模块|核心页面/.test(question.text)))
 })
 
 test('draw2code_create rejects stale answers without overwriting the draft', async () => {
@@ -2604,8 +3297,9 @@ test('draw2code_create lists and resumes drafts without guessing from silence', 
   assert.equal(listed.drafts[0].status, 'draft')
 
   const resumed = await tool.execute({ root, action: 'resume', sessionId: started.sessionId }, {})
-  assert.equal(resumed.status, 'question')
-  assert.equal(resumed.question.id, 'target-platform')
+  assert.equal(resumed.status, 'discovery')
+  assert.equal(resumed.question, undefined)
+  assert.equal(resumed.discovery.nextAction, 'propose_question')
 
   const abandoned = await tool.execute({
     root,
@@ -2628,32 +3322,21 @@ test('draw2code_create confirms an isolated board and hands off to update', asyn
     elements: [{ id: 'old-user-content', type: 'text', text: '用户保留内容' }],
   })
 
-  let state = await create.execute({ root, action: 'start', idea: '万年历穿搭工具', projectName: '万年历穿搭' }, {})
-  const answers = [
-    ['target-platform', ['web']],
-    ['core-user', ['consumer']],
-    ['core-goal', ['query']],
-    ['core-flow', ['daily-outfit']],
-    ['core-modules', ['calendar', 'weather', 'outfit']],
-    ['core-pages', ['query', 'weather', 'recommendation']],
-  ]
-  for (const [questionId, values] of answers) {
-    state = await create.execute({
-      root,
-      action: 'answer',
-      sessionId: state.sessionId,
-      revision: state.revision,
-      questionId,
-      values,
-    }, {})
-  }
+  let state = await create.execute({ root, action: 'start', idea: '个人四象限待办清单 App', projectName: '四象限待办' }, {})
+  state = await create.execute({
+    root,
+    action: 'synthesize',
+    sessionId: state.sessionId,
+    revision: state.revision,
+    stopReason: '核心场景、四象限机制、首版流程和范围已经明确。',
+    brief: quadrantPrototypeBrief(),
+  }, {})
 
   assert.equal(state.status, 'ready')
   assert.equal(state.brief.pages.length, 3)
   assert.equal(state.brief.deferredStyleNote, null)
-  assert.match(state.brief.mockDataPolicy.updateContract, /rectangle/u)
-  assert.match(state.brief.mockDataPolicy.updateContract, /pageName/u)
-  assert.doesNotMatch(state.brief.mockDataPolicy.updateContract, /页面 frame/u)
+  assert.equal(state.brief.briefSchemaVersion, 2)
+  assert.equal(state.brief.pageBlueprints[0].pageId, 'today')
 
   const confirmed = await create.execute({
     root,
@@ -2664,8 +3347,19 @@ test('draw2code_create confirms an isolated board and hands off to update', asyn
 
   assert.equal(confirmed.status, 'confirmed')
   assert.equal(confirmed.nextAction, 'draw2code_update')
-  assert.equal(confirmed.boardName, '万年历穿搭')
+  assert.equal(confirmed.boardName, '四象限待办')
   assert.equal(confirmed.activeBoard, confirmed.boardName)
+
+  const mutateConfirmed = await create.execute({
+    root,
+    action: 'synthesize',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    stopReason: '不应允许修改终态项目。',
+    brief: quadrantPrototypeBrief(),
+  }, {})
+  assert.equal(mutateConfirmed.status, 'error')
+  assert.equal(mutateConfirmed.error.code, 'project_not_editable')
 
   const oldBoard = await store.read(root, 'prototype')
   assert.equal(oldBoard.ok, true)
