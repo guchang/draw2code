@@ -9,7 +9,11 @@
  * @module dsh-draw2code/host/tools
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { open, realpath } from 'node:fs/promises'
+import { isAbsolute, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { inflateSync } from 'node:zlib'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
@@ -798,25 +802,88 @@ export function draw2codeUpdateTool(store: SceneStore) {
   })
 }
 
+interface GenerateVisualBrief {
+  direction: string
+  tone: string
+  background: string
+  primaryAction: string
+  semanticColors: string
+  density: string
+  typeHierarchy: string
+  layoutStrategy: string
+  motion: string
+  focalPoint: string
+}
+
+function visualBriefFor(direction: string, device: string | null, frameNames: string[]): GenerateVisualBrief {
+  const mobile = device === 'mobile' || device === '移动端 H5'
+  const focalPage = frameNames[0] ?? '核心页面'
+  const darkTech = /未来|科技|深色|赛博/iu.test(direction)
+  const warm = /温暖|友好|生活|亲切|轻松/iu.test(direction)
+  const professional = /专业|数据|稳重|效率/iu.test(direction)
+  const bold = /大胆|鲜明|活力|年轻/iu.test(direction)
+  return {
+    direction,
+    tone: darkTech
+      ? '沉浸、精确、有明确高亮焦点，避免把所有区域都做成发光面板'
+      : warm
+        ? '亲切、松弛、可信，使用克制装饰保持任务清晰'
+        : professional
+          ? '高效、可靠、层级清楚，数据与状态优先'
+          : bold
+            ? '轻快、主动、有识别度，以少量高对比焦点带动页面'
+            : '克制、清晰、有明确视觉重心，避免通用模板感',
+    background: darkTech ? '深色低噪声底色，内容区保持足够对比度' : '低饱和中性底色，卡片与主内容形成清楚层次',
+    primaryAction: bold || darkTech ? '主操作使用单一高对比强调色，每页只突出一个首要动作' : '主操作使用稳定强调色，次要操作降低对比度',
+    semanticColors: '成功、提醒、危险、信息状态使用可区分的语义色；不能用品牌色代替全部状态',
+    density: professional ? '信息密度适中偏紧凑，但保证触控面积和扫读间距' : '保持舒适留白，相关内容紧凑成组，不平均分配空间',
+    typeHierarchy: '至少建立页面标题、区块标题、正文、辅助信息四级层次，禁止所有文字同字号同字重',
+    layoutStrategy: mobile
+      ? '以内容流、CSS Grid/Flex 和响应式约束重排；适配 320–430px 手机宽度，不复制原型绝对坐标'
+      : '以内容流、CSS Grid/Flex 和容器约束重排；随视口响应，不复制原型绝对坐标',
+    motion: '只为页面切换、状态变化和操作反馈使用短动效，尊重 prefers-reduced-motion',
+    focalPoint: '让用户首先看到「' + focalPage + '」的核心任务或关键状态，而不是同时强调所有组件',
+  }
+}
+
 /**
  * The fixed constraint checklist returned with every draw2code_generate
  * result. Riding the tool result (not the system prompt) guarantees the
  * model has it in hand at the exact moment it starts writing pages.
  */
-function buildGenerateInstructions(board: string, frameNames: string[], existingPages: string[], visualDirection: string): string {
+function buildGenerateInstructions(
+  board: string,
+  frameNames: string[],
+  existingPages: string[],
+  visualBrief: GenerateVisualBrief,
+): string {
   const lines: string[] = [
     '按以下要求生成前端页面：',
-    `1. 严格按上面给出的画板原型结构、布局与文案实现${frameNames.length > 0 ? `「${frameNames.join('」「')}」这些范围` : '整块画板'}，禁止添加原型中不存在的元素、模块或页面。`,
-    '2. 若原型是移动端布局，生成 H5 页面本体，不要套手机边框。',
-    `3. 输出到 draw2code-pages/${board}/index.html：单文件、内联 CSS/JS、可直接在浏览器打开；多个页面放在同一文件内并互相导航。`,
+    '1. 画板原型是产品事实来源：必须保留'
+      + (frameNames.length > 0 ? '「' + frameNames.join('」「') + '」这些范围的' : '整块画板的')
+      + '页面、信息层级、文案、mock 数据、组件语义和交互关系；禁止添加原型中不存在的模块、页面、角色、流程或重大业务规则。',
+    '2. 原型不是像素模板。禁止照搬 Excalidraw 的绝对坐标、方框尺寸和低保真空白；使用语义化 HTML、内容流、CSS Grid、Flex 和容器约束重新排版。absolute/fixed 只用于确有必要的浮层、装饰或固定导航。',
+    '3. 若原型是移动端布局，生成 H5 页面本体，不要套手机边框；至少适配 320–430px 手机宽度，并保证桌面预览时内容稳定居中、无横向溢出。',
+    '4. 输出到 draw2code-pages/' + board + '/index.html：单文件、内联 CSS/JS、可直接在浏览器打开；多个页面放在同一文件内并互相导航。每个页面根节点前后必须保留 <!-- d2c-page:<页面原名>:start --> 和 <!-- d2c-page:<页面原名>:end -->，供后续重新生成时精确保护未选页面。',
     existingPages.length > 0
-      ? `4. draw2code-pages/${board}/ 已有页面（${existingPages.join('、')}）：沿用其现有风格与技术栈，只更新本次范围内的页面，保持其余页面不变。`
-      : `4. draw2code-pages/${board}/ 目前为空：从零生成，风格自定（简洁现代为默认）。`,
-    `5. 整体视觉方向：${visualDirection}。同一文件内的全部页面必须保持一致。`,
-    '6. 若本次用户消息附带了界面参考图：参考其配色、字体感觉与布局密度，但页面内容仍以画板原型为准。',
-    '7. 可以补充必填校验、加载、成功提示和选中态等通用交互反馈，但不得新增原型中不存在的页面、模块、角色、流程或重大业务规则。',
-    '8. 写入后必须自动打开真实预览，验证所选页面可见、页面切换与核心按钮可用、mock 数据显示正常、核心流程可走通；实现问题应直接修复并重新验证。',
-    '9. 只有真实预览验收通过后，才调用 draw2code_generate action=complete；在 complete 返回 completed 之前不得向用户报告生成完成。',
+      ? '5. draw2code-pages/' + board + '/ 已有页面（' + existingPages.join('、') + '）：先读取现有 index.html，沿用其技术实现，只更新本次范围内的页面，保持其余页面不变。'
+      : '5. draw2code-pages/' + board + '/ 目前为空：从零生成，但不能退化成无层级的通用模板。',
+    '6. 使用以下结构化视觉简报，而不是只把“' + visualBrief.direction + '”当作空泛形容词：\n'
+      + '   - 气质：' + visualBrief.tone + '\n'
+      + '   - 背景：' + visualBrief.background + '\n'
+      + '   - 主操作：' + visualBrief.primaryAction + '\n'
+      + '   - 语义色：' + visualBrief.semanticColors + '\n'
+      + '   - 密度：' + visualBrief.density + '\n'
+      + '   - 字体层级：' + visualBrief.typeHierarchy + '\n'
+      + '   - 布局策略：' + visualBrief.layoutStrategy + '\n'
+      + '   - 动效：' + visualBrief.motion + '\n'
+      + '   - 视觉焦点：' + visualBrief.focalPoint,
+    '7. 遵循专业前端设计规范：先建立 CSS 设计变量；每页只突出一个主要任务；避免无目的渐变、过度圆角、平均用力和千篇一律的 AI 模板感；真实 mock 数据必须参与排版。',
+    '8. 若本次用户消息附带了界面参考图：参考其配色、字体感觉与布局密度，但页面内容仍以画板原型为准。',
+    '9. 可以补充必填校验、加载、成功提示和选中态等通用交互反馈，但不得新增产品事实。',
+    '10. 写入后必须自动打开真实浏览器预览，逐页截图并实际验证：所选页面和 mock 数据可见、页面切换与核心按钮可用、核心流程走通、控制台无 error/warning、无横向溢出或内容裁切、按钮文案居中、底部导航完整。发现实现问题要直接修复并重新验证。',
+    '11. 调用 action=complete 时必须提交 verificationEvidence：本次浏览器验收唯一 captureId、生成入口 outputSha256、previewUrl、viewports；覆盖每个所选页面的 screenshots[{page,viewport,source,sha256,captureId}]；浏览器导出的 domSnapshots[{page,source,sha256,captureId}]；consoleErrors、consoleWarnings、domChecks、layoutChecks 和 interactionChecks。previewUrl 内容哈希必须等于 outputSha256；截图和 DOM 快照必须保存到 workspace 内、属于同一 captureId，sha256 必须与文件一致；不能再用几个自报布尔值代替证据。',
+    '12. 只有真实预览证据通过工具门禁后，才调用 draw2code_generate action=complete；在 complete 返回 completed 之前不得向用户报告生成完成。',
   ]
   return lines.join('\n')
 }
@@ -853,7 +920,11 @@ interface GenerateDraft {
   updatedAt: number
   currentQuestion: GenerateQuestion | null
   selectedFrames: string[]
+  allFrames?: string[]
+  unselectedFrames?: string[]
   recommendedFrames?: string[]
+  expectedPageTexts?: Record<string, string[]>
+  preservedPageHashes?: Record<string, string>
   visualDirection: string | null
   inheritedVisualDirection: string | null
   device: string | null
@@ -861,7 +932,7 @@ interface GenerateDraft {
   blockers: Array<Record<string, unknown>>
   warnings: Array<Record<string, unknown>>
   brief: Record<string, unknown> | null
-  validation: Record<string, boolean> | null
+  validation: Record<string, unknown> | null
   hadExistingIndex: boolean
 }
 
@@ -876,6 +947,7 @@ interface GenerateArgs {
   questionId?: string
   values?: string[]
   otherText?: string
+  verificationEvidence?: unknown
   previewOpened?: boolean
   selectedPagesVisible?: boolean
   coreFlowPassed?: boolean
@@ -1157,13 +1229,372 @@ function semanticMockDataIssues(frames: Array<Record<string, unknown>>, elements
   })
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> | null {
+  return Array.isArray(value) && value.every((item) => recordValue(item) !== null)
+    ? value as Array<Record<string, unknown>>
+    : null
+}
+
+function sha256(value: string | Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function pathIsInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+async function workspaceFile(
+  root: string,
+  source: unknown,
+): Promise<{ ok: true; bytes: Buffer; path: string } | { ok: false; reason: string }> {
+  const sourceText = str(source).trim()
+  if (sourceText === '') return { ok: false, reason: 'source' }
+  try {
+    const canonicalRoot = await realpath(root)
+    const candidate = isAbsolute(sourceText) ? sourceText : resolve(canonicalRoot, sourceText)
+    const canonicalPath = await realpath(candidate)
+    if (!pathIsInside(canonicalRoot, canonicalPath)) return { ok: false, reason: 'outside-workspace' }
+    const handle = await open(canonicalPath, 'r')
+    try {
+      const info = await handle.stat()
+      if (!info.isFile()) return { ok: false, reason: 'not-a-file' }
+      if (info.size === 0) return { ok: false, reason: 'empty-file' }
+      if (info.size > 20 * 1024 * 1024) return { ok: false, reason: 'file-too-large' }
+      const bytes = await handle.readFile()
+      return { ok: true, bytes, path: canonicalPath }
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return { ok: false, reason: 'file-unreadable' }
+  }
+}
+
+async function workspaceArtifact(
+  root: string,
+  source: unknown,
+  expectedHash: unknown,
+): Promise<{ ok: true; bytes: Buffer; path: string } | { ok: false; reason: string }> {
+  const hashText = str(expectedHash).trim().toLowerCase()
+  if (!/^[a-f0-9]{64}$/u.test(hashText)) return { ok: false, reason: 'sha256' }
+  const file = await workspaceFile(root, source)
+  if (!file.ok) return file
+  return sha256(file.bytes) === hashText ? file : { ok: false, reason: 'sha256-mismatch' }
+}
+
+function pngDimensions(bytes: Buffer): { width: number; height: number } | null {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  if (bytes.length < 45 || !bytes.subarray(0, 8).equals(signature)) return null
+  let offset = 8
+  let width = 0
+  let height = 0
+  let channels = 0
+  const imageData: Buffer[] = []
+  let ended = false
+  try {
+    while (offset + 12 <= bytes.length) {
+      const length = bytes.readUInt32BE(offset)
+      const type = bytes.subarray(offset + 4, offset + 8).toString('ascii')
+      const dataStart = offset + 8
+      const dataEnd = dataStart + length
+      if (dataEnd + 4 > bytes.length) return null
+      const data = bytes.subarray(dataStart, dataEnd)
+      if (type === 'IHDR') {
+        if (length !== 13) return null
+        width = data.readUInt32BE(0)
+        height = data.readUInt32BE(4)
+        const bitDepth = data[8]
+        const colorType = data[9]
+        const interlace = data[12]
+        channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 0
+        if (width <= 0 || height <= 0 || width * height > 10_000_000 || bitDepth !== 8 || channels === 0 || interlace !== 0) return null
+      } else if (type === 'IDAT') {
+        imageData.push(data)
+      } else if (type === 'IEND') {
+        ended = true
+        break
+      }
+      offset = dataEnd + 4
+    }
+    if (!ended || width === 0 || height === 0 || imageData.length === 0) return null
+    const expectedLength = height * (1 + width * channels)
+    const inflated = inflateSync(Buffer.concat(imageData), { maxOutputLength: expectedLength })
+    if (inflated.length !== expectedLength) return null
+    return { width, height }
+  } catch {
+    return null
+  }
+}
+
+async function previewHtml(root: string, previewUrl: string): Promise<{ ok: true; html: string } | { ok: false; reason: string }> {
+  try {
+    const url = new URL(previewUrl)
+    let html = ''
+    if (url.protocol === 'file:') {
+      const file = await workspaceFile(root, fileURLToPath(url))
+      if (!file.ok) return { ok: false, reason: file.reason }
+      html = file.bytes.toString('utf8')
+    } else if (url.protocol === 'http:' || url.protocol === 'https:') {
+      if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)) return { ok: false, reason: 'preview-not-loopback' }
+      const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(3_000) })
+      if (!response.ok) return { ok: false, reason: 'preview-http-' + response.status }
+      const declaredLength = Number(response.headers.get('content-length') ?? 0)
+      if (declaredLength > 2 * 1024 * 1024) return { ok: false, reason: 'preview-too-large' }
+      if (response.body === null) return { ok: false, reason: 'preview-empty-body' }
+      const reader = response.body.getReader()
+      const chunks: Uint8Array[] = []
+      let total = 0
+      while (true) {
+        const next = await reader.read()
+        if (next.done) break
+        total += next.value.byteLength
+        if (total > 2 * 1024 * 1024) {
+          await reader.cancel()
+          return { ok: false, reason: 'preview-too-large' }
+        }
+        chunks.push(next.value)
+      }
+      html = Buffer.concat(chunks).toString('utf8')
+    } else {
+      return { ok: false, reason: 'preview-protocol' }
+    }
+    if (Buffer.byteLength(html, 'utf8') > 2 * 1024 * 1024) return { ok: false, reason: 'preview-too-large' }
+    return /<!doctype html|<html[\s>]/iu.test(html)
+      ? { ok: true, html }
+      : { ok: false, reason: 'preview-not-html' }
+  } catch {
+    return { ok: false, reason: 'preview-unreachable' }
+  }
+}
+
+function normalizedVisibleText(value: string): string {
+  return value.replace(/\s+/gu, ' ').trim()
+}
+
+function expectedPageTexts(
+  frames: Array<Record<string, unknown>>,
+  elements: Array<Record<string, unknown>>,
+): Record<string, string[]> {
+  return Object.fromEntries(frames.map((frame) => {
+    const name = str(frame.name).trim()
+    const texts = elements
+      .filter((element) => str(element.type) === 'text' && elementBelongsToFrame(element, frame))
+      .flatMap((element) => str(element.text).split(/\r?\n/gu))
+      .map(normalizedVisibleText)
+      .filter((value) => value !== '')
+    return [name, [...new Set(texts)]]
+  }))
+}
+
+function pageBlock(html: string, page: string): string | null {
+  const start = '<!-- d2c-page:' + page + ':start -->'
+  const end = '<!-- d2c-page:' + page + ':end -->'
+  const startAt = html.indexOf(start)
+  if (startAt < 0) return null
+  const contentAt = startAt + start.length
+  const endAt = html.indexOf(end, contentAt)
+  return endAt < 0 ? null : html.slice(contentAt, endAt)
+}
+
+async function preparePagePreservation(root: string, draft: GenerateDraft): Promise<void> {
+  const allFrames = draft.allFrames ?? draft.selectedFrames
+  draft.unselectedFrames = allFrames.filter((name) => !draft.selectedFrames.includes(name))
+  draft.preservedPageHashes = {}
+  if (!draft.hadExistingIndex || draft.unselectedFrames.length === 0) return
+  const file = await workspaceFile(root, resolve(root, 'draw2code-pages', draft.board, 'index.html'))
+  if (!file.ok) return
+  const html = file.bytes.toString('utf8')
+  for (const page of draft.unselectedFrames) {
+    const block = pageBlock(html, page)
+    if (block !== null) draft.preservedPageHashes[page] = sha256(block)
+  }
+}
+
+async function preservedPagesStillMatch(root: string, draft: GenerateDraft): Promise<string[]> {
+  const hashes = draft.preservedPageHashes ?? {}
+  if (Object.keys(hashes).length === 0) return []
+  const file = await workspaceFile(root, resolve(root, 'draw2code-pages', draft.board, 'index.html'))
+  if (!file.ok) return Object.keys(hashes)
+  const html = file.bytes.toString('utf8')
+  return Object.entries(hashes)
+    .filter(([page, hash]) => {
+      const block = pageBlock(html, page)
+      return block === null || sha256(block) !== hash
+    })
+    .map(([page]) => page)
+}
+
+async function verificationEvidenceFor(
+  root: string,
+  raw: unknown,
+  draft: GenerateDraft,
+  outputHash: string,
+): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; code: string; message: string }> {
+  const evidence = recordValue(raw)
+  if (evidence === null) {
+    return {
+      ok: false,
+      code: 'verification-evidence-missing',
+      message: '缺少 verificationEvidence；必须提交真实浏览器 URL、视口、逐页截图、控制台、DOM、布局和核心交互证据',
+    }
+  }
+
+  const missing: string[] = []
+  const failures: string[] = []
+  const captureId = str(evidence.captureId).trim()
+  if (captureId === '') missing.push('captureId')
+  if (str(evidence.outputSha256).trim().toLowerCase() !== outputHash) failures.push('outputSha256')
+  const previewUrl = str(evidence.previewUrl).trim()
+  if (!/^(?:https?|file):\/\//iu.test(previewUrl)) {
+    missing.push('previewUrl')
+  } else {
+    const preview = await previewHtml(root, previewUrl)
+    if (!preview.ok) failures.push('previewUrl:' + preview.reason)
+    else if (sha256(preview.html) !== outputHash) failures.push('previewUrl:output-mismatch')
+  }
+
+  const viewportKeys = new Set<string>()
+  const viewports = recordArray(evidence.viewports)
+  if (viewports === null || viewports.length === 0) {
+    missing.push('viewports')
+  } else {
+    const validViewports = viewports.filter((viewport) => num(viewport.width) > 0 && num(viewport.height) > 0)
+    for (const viewport of validViewports) viewportKeys.add(num(viewport.width) + 'x' + num(viewport.height))
+    if (validViewports.length !== viewports.length) missing.push('viewports.width/height')
+    if ((draft.device === 'mobile' || draft.device === '移动端 H5')
+      && !validViewports.some((viewport) => num(viewport.width) >= 320 && num(viewport.width) <= 430 && num(viewport.height) > num(viewport.width))) {
+      missing.push('320-430px mobile viewport')
+    }
+    if (draft.device === 'desktop' && !validViewports.some((viewport) => num(viewport.width) >= 1024)) {
+      missing.push('desktop viewport >= 1024px')
+    }
+    if (draft.device === 'separate') {
+      if (!validViewports.some((viewport) => num(viewport.width) >= 320 && num(viewport.width) <= 430)) missing.push('mobile viewport')
+      if (!validViewports.some((viewport) => num(viewport.width) >= 1024)) missing.push('desktop viewport')
+    }
+  }
+
+  const unselectedEvidencePages = draft.hadExistingIndex
+    ? (draft.unselectedFrames ?? [])
+    : []
+  const evidencePages = [...new Set([...draft.selectedFrames, ...unselectedEvidencePages])]
+  const screenshots = recordArray(evidence.screenshots)
+  if (screenshots === null || screenshots.length === 0) {
+    missing.push('screenshots')
+  } else {
+    for (const page of evidencePages) {
+      const shot = screenshots.find((candidate) => str(candidate.page).trim() === page)
+      if (shot === undefined) {
+        missing.push('screenshot:' + page)
+        continue
+      }
+      if (str(shot.captureId).trim() !== captureId) failures.push('screenshot:' + page + ':captureId')
+      const viewport = str(shot.viewport).trim()
+      if (!viewportKeys.has(viewport)) missing.push('screenshot-viewport:' + page)
+      const artifact = await workspaceArtifact(root, shot.source, shot.sha256)
+      if (!artifact.ok) {
+        failures.push('screenshot:' + page + ':' + artifact.reason)
+        continue
+      }
+      const dimensions = pngDimensions(artifact.bytes)
+      const match = /^(\d+)x(\d+)$/u.exec(viewport)
+      if (dimensions === null || match === null
+        || dimensions.width !== Number(match[1]) || dimensions.height !== Number(match[2])) {
+        failures.push('screenshot:' + page + ':dimensions')
+      }
+    }
+  }
+
+  const domSnapshots = recordArray(evidence.domSnapshots)
+  if (domSnapshots === null || domSnapshots.length === 0) {
+    missing.push('domSnapshots')
+  } else {
+    for (const page of evidencePages) {
+      const snapshot = domSnapshots.find((candidate) => str(candidate.page).trim() === page)
+      if (snapshot === undefined) {
+        missing.push('domSnapshot:' + page)
+        continue
+      }
+      if (str(snapshot.captureId).trim() !== captureId) failures.push('domSnapshot:' + page + ':captureId')
+      const artifact = await workspaceArtifact(root, snapshot.source, snapshot.sha256)
+      if (!artifact.ok) {
+        failures.push('domSnapshot:' + page + ':' + artifact.reason)
+        continue
+      }
+      const bodyText = normalizedVisibleText(artifact.bytes.toString('utf8'))
+      for (const expected of draft.expectedPageTexts?.[page] ?? []) {
+        if (!bodyText.includes(normalizedVisibleText(expected))) {
+          failures.push('domText:' + page + ':' + expected.slice(0, 24))
+        }
+      }
+    }
+  }
+
+  if (!Array.isArray(evidence.consoleErrors)) {
+    missing.push('consoleErrors')
+  } else if (evidence.consoleErrors.length > 0) {
+    failures.push('consoleErrors')
+  }
+  if (!Array.isArray(evidence.consoleWarnings)) {
+    missing.push('consoleWarnings')
+  } else if (evidence.consoleWarnings.length > 0) {
+    failures.push('consoleWarnings')
+  }
+
+  const requiredChecks: Array<[string, string[]]> = [
+    ['domChecks', ['selected-pages', 'mock-data', ...(unselectedEvidencePages.length > 0 ? ['unselected-pages-preserved'] : [])]],
+    ['layoutChecks', ['no-horizontal-overflow', 'content-not-clipped', 'button-text-centered', 'bottom-navigation-complete']],
+    ['interactionChecks', ['core-flow', ...(draft.selectedFrames.length > 1 ? ['page-switching'] : [])]],
+  ]
+  for (const [field, requiredNames] of requiredChecks) {
+    const checks = recordArray(evidence[field])
+    if (checks === null || checks.length === 0) {
+      missing.push(field)
+      continue
+    }
+    for (const requiredName of requiredNames) {
+      const check = checks.find((item) => str(item.name) === requiredName)
+      if (check === undefined || str(check.details).trim() === '') missing.push(field + ':' + requiredName)
+      else if (check.passed !== true) failures.push(field + ':' + requiredName)
+    }
+    for (const check of checks) {
+      if (check.passed !== true) failures.push(field + ':' + (str(check.name) || 'unnamed'))
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      code: 'verification-evidence-incomplete',
+      message: '真实预览证据不完整：' + [...new Set(missing)].join('、'),
+    }
+  }
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      code: 'verification-evidence-failed',
+      message: '真实预览发现未修复问题：' + [...new Set(failures)].join('、') + '；先修复页面并重新验收',
+    }
+  }
+  return { ok: true, value: { ...evidence, verified: true } }
+}
+
 function briefFor(draft: GenerateDraft, existingPages: string[]): Record<string, unknown> {
+  const visualBrief = visualBriefFor(draft.visualDirection ?? '简洁现代', draft.device, draft.selectedFrames)
   return {
     board: draft.board,
     selectedPages: draft.selectedFrames,
     relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name) => !draft.selectedFrames.includes(name)),
     pageChanges: existingPages.includes('index.html') ? '只更新所选页面，未选择页面保持不变' : '首次生成所选页面',
     visualDirection: draft.visualDirection,
+    visualBrief,
     device: draft.device,
     prototypeCheck: draft.blockers.length === 0 ? '通过' : '有阻断问题',
     warnings: draft.warnings,
@@ -1248,6 +1679,10 @@ async function loadGeneration(store: SceneStore, root: string, sessionId: string
 async function runGeneratePreflight(store: SceneStore, root: string, draft: GenerateDraft): Promise<GenerateResponse> {
   const board = await store.read(root, draft.board)
   if (!board.ok) return generateError(board.error.code, board.error.message, draft)
+  const allFrames = namedFrames(board.value.scene.elements)
+  draft.allFrames = allFrames.map((frame) => str(frame.name).trim())
+  draft.unselectedFrames = draft.allFrames.filter((name) => !draft.selectedFrames.includes(name))
+  draft.expectedPageTexts = expectedPageTexts(allFrames, board.value.scene.elements)
   const scope = elementsInFrames(board.value.scene.elements, draft.selectedFrames)
   if (scope.frames.length !== draft.selectedFrames.length) {
     const found = new Set(scope.frames.map((frame) => str(frame.name)))
@@ -1288,8 +1723,9 @@ async function generationPayload(store: SceneStore, root: string, draft: Generat
     : [{ id: '__too_large__', type: 'text', text: `scoped elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); draw2code_read the board instead` }]
   const quality = inspectPrototypeLayout(scope.elements)
   const layoutIssues = [...quality.errors, ...quality.warnings]
-  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, draft.visualDirection ?? '简洁现代')
-    + (layoutIssues.length > 0 ? `\n10. 原型非阻断提醒：\n${formatLayoutIssues(layoutIssues)}` : '')
+  const visualBrief = visualBriefFor(draft.visualDirection ?? '简洁现代', draft.device, draft.selectedFrames)
+  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, visualBrief)
+    + (layoutIssues.length > 0 ? `\n13. 原型非阻断提醒：\n${formatLayoutIssues(layoutIssues)}` : '')
   return responseFromDraft(draft, {
     nextAction: 'write-html-then-preview-and-validate',
     scope: 'frames',
@@ -1311,7 +1747,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
     description: 'Turn selected 画码 frames into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. '
       + 'On any explicit “生成页面 / 根据画板生成前端 / 重新生成” request, call action=start immediately. The first result always asks the user to select pages from every frame; pass user-mentioned frames only as recommendations, never skip the choice. Use the host choice UI with all returned options. '
       + 'Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type “确认”. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. '
-      + 'After writing, automatically open the real preview and exercise the selected pages and core flow; fix implementation defects without asking. Call action=complete with truthful verification flags only after preview passes. Never report completion before status=completed. '
+      + 'After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. '
       + 'If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
@@ -1324,11 +1760,15 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
       questionId: { type: 'string', description: 'Current question ID for answer/revise.' },
       values: { type: 'array', items: { type: 'string' }, description: 'Selected option IDs.' },
       otherText: { type: 'string', description: 'Custom overall visual direction when custom is selected.' },
-      previewOpened: { type: 'boolean', description: 'True only when the generated index was opened in a real preview.' },
-      selectedPagesVisible: { type: 'boolean', description: 'True only when every selected page was visibly checked.' },
-      coreFlowPassed: { type: 'boolean', description: 'True only when the core interaction flow was exercised successfully.' },
-      mockDataVisible: { type: 'boolean', description: 'True only when meaningful mock data is visible in the preview.' },
-      unselectedPagesPreserved: { type: 'boolean', description: 'For regeneration, whether unselected existing pages remained intact.' },
+      verificationEvidence: {
+        type: 'json',
+        description: 'Required only for action=complete. Object with one captureId, outputSha256, reachable loopback/file previewUrl whose HTML hash matches the generated index, viewports[{width,height}], workspace PNG screenshots[{page,viewport,source,sha256,captureId}] and text domSnapshots[{page,source,sha256,captureId}] covering every related page, empty consoleErrors and consoleWarnings, DOM/layout/core-flow checks. Multiple pages also require page-switching. Every check needs passed=true and non-empty details. Unselected pages are verified by stored page-block hashes plus post-generation artifacts.',
+      },
+      previewOpened: { type: 'boolean', description: 'Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence.' },
+      selectedPagesVisible: { type: 'boolean', description: 'Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence.' },
+      coreFlowPassed: { type: 'boolean', description: 'Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence.' },
+      mockDataVisible: { type: 'boolean', description: 'Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence.' },
+      unselectedPagesPreserved: { type: 'boolean', description: 'Deprecated compatibility field. Unselected pages are now checked through page markers and evidence artifacts.' },
     },
     output: {
       schema: {
@@ -1367,7 +1807,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
         }
         if (value.status === 'blocked') return text(`[draw2code_generate continuation] sessionId=${value.sessionId ?? ''} revision=${value.revision ?? ''} status=blocked\n原型尚不可生成。先按 blockers 调用 draw2code_update，用户看到并检查后调用 action=recheck；不要重复询问页面和视觉方向。`)
         if (value.status === 'ready') return text(`[draw2code_generate continuation] sessionId=${value.sessionId ?? ''} revision=${value.revision ?? ''} status=ready\n只展示一次 brief，并立即用宿主 ask_user_question 原样复制 confirmation.askUserQuestionArgs，禁止让用户手动输入“确认”。选择 confirm 后调用 action=confirm；revise-scope 调 action=revise questionId=page-scope；revise-visual 调 action=revise questionId=visual-direction。`)
-        if (value.status === 'confirmed') return text(`[draw2code_generate continuation] sessionId=${value.sessionId ?? ''} revision=${value.revision ?? ''} status=confirmed\n按 instructions 写入单文件 index.html，然后自动打开真实预览并走通核心流程；验收通过后调用 action=complete，之前不得报告完成。`)
+        if (value.status === 'confirmed') return text(`[draw2code_generate continuation] sessionId=${value.sessionId ?? ''} revision=${value.revision ?? ''} status=confirmed\n按 instructions 写入单文件 index.html，然后自动打开真实预览，逐页截图，检查控制台、DOM、布局和核心流程；用结构化 verificationEvidence 调用 action=complete，之前不得报告完成。`)
         if (value.status === 'completed') return text(`draw2code_generate status=completed board=${value.board ?? ''}\n真实预览与核心流程已验收，generate 流程结束；后续普通修改不自动重新进入 generate。`)
         if (value.status === 'error') return text(`draw2code_generate 可恢复错误：${JSON.stringify(value.error)}${value.sessionId === undefined ? '' : `\nsessionId=${value.sessionId} revision=${value.revision ?? ''}`}`)
         return text(`draw2code_generate status=${value.status} sessionId=${value.sessionId ?? ''} revision=${value.revision ?? ''}`)
@@ -1423,7 +1863,11 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           updatedAt: now,
           currentQuestion: pageScopeQuestion(frames, recommended, recommendationReasons),
           selectedFrames: [],
+          allFrames: allNames,
+          unselectedFrames: [],
           recommendedFrames: [...new Set(recommended)],
+          expectedPageTexts: {},
+          preservedPageHashes: {},
           visualDirection: args.styleNote?.trim() || deferredStyle || null,
           inheritedVisualDirection: inherited,
           device: null,
@@ -1520,6 +1964,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
         if (draft.status !== 'ready') return generateError('invalid-state', '只有用户确认 ready 简报后才能生成', draft)
         const preflight = await runGeneratePreflight(store, args.root, draft)
         if (preflight.status !== 'ready') return preflight
+        await preparePagePreservation(args.root, draft)
         draft.status = 'confirmed'
         draft.currentQuestion = null
         const failed = await persistGeneration(store, args.root, draft)
@@ -1529,22 +1974,26 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
 
       if (action === 'complete') {
         if (draft.status !== 'confirmed') return generateError('invalid-state', '只有 confirmed 且 HTML 已写入后才能提交验收', draft)
-        const validation = {
-          previewOpened: args.previewOpened === true,
-          selectedPagesVisible: args.selectedPagesVisible === true,
-          coreFlowPassed: args.coreFlowPassed === true,
-          mockDataVisible: args.mockDataVisible === true,
-          ...(draft.hadExistingIndex ? { unselectedPagesPreserved: args.unselectedPagesPreserved === true } : {}),
+        const outputFile = await workspaceFile(args.root, resolve(args.root, 'draw2code-pages', draft.board, 'index.html'))
+        if (!outputFile.ok) return generateError('generated-index-missing', '生成入口不存在或不可读取：' + outputFile.reason, draft)
+        const outputHtml = outputFile.bytes.toString('utf8')
+        const missingMarkers = draft.selectedFrames.filter((page) => pageBlock(outputHtml, page) === null)
+        if (missingMarkers.length > 0) {
+          return generateError('generated-page-marker-missing', '生成页面缺少稳定边界标记：' + missingMarkers.join('、'), draft)
         }
-        const failedChecks = Object.entries(validation).filter(([, passed]) => !passed).map(([name]) => name)
-        if (failedChecks.length > 0) return generateError('verification-incomplete', `真实预览验收未通过：${failedChecks.join('、')}`, draft)
-        draft.validation = validation
+        const changedPages = await preservedPagesStillMatch(args.root, draft)
+        if (changedPages.length > 0) {
+          return generateError('unselected-pages-changed', '未选择页面被修改或丢失：' + changedPages.join('、') + '；恢复这些页面后重新验收', draft)
+        }
+        const evidence = await verificationEvidenceFor(args.root, args.verificationEvidence, draft, sha256(outputFile.bytes))
+        if (!evidence.ok) return generateError(evidence.code, evidence.message, draft)
+        draft.validation = evidence.value
         draft.status = 'completed'
         const failed = await persistGeneration(store, args.root, draft)
         if (failed !== null) return failed
         const settings = await store.writeGenerateSettings(args.root, draft.board, { visualDirection: draft.visualDirection })
         if (!settings.ok) return generateError(settings.error.code, settings.error.message, draft)
-        return responseFromDraft(draft, { validation: validation as unknown as JsonValue })
+        return responseFromDraft(draft, { validation: evidence.value as unknown as JsonValue })
       }
 
       return generateError('invalid-action', `不支持 action=${action}`, draft)

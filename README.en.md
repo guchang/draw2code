@@ -8,7 +8,7 @@ Draw2Code is a human-AI collaborative prototyping plugin for [DeepSeek Harness (
 
 1. **Create** — `draw2code_create` asks choice-first questions about the target platform, users, goal, core flow, modules, and first pages. It does not create a board until the final brief is confirmed.
 2. **Update** — `draw2code_update` writes to an editable Excalidraw board, protects manual edits and deletions, validates layout quality, verifies the disk write, and automatically reveals the updated board in DSH.
-3. **Generate** — `draw2code_generate` reads the latest board, lets the user choose page scope and visual direction, blocks incomplete prototypes, generates a single-file frontend demo, and requires a real preview walkthrough before completion.
+3. **Generate** — `draw2code_generate` reads the latest board, lets the user choose page scope and visual direction, blocks incomplete prototypes, translates prototype facts into responsive Grid/Flex layouts instead of copying canvas coordinates, and verifies workspace screenshot/DOM artifacts, hashes, viewport sizes, and preserved unselected page blocks before completion.
 
 ## Highlights
 

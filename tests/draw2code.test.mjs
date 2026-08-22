@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { build } from 'esbuild'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
+import { deflateSync } from 'node:zlib'
 import { ProjectStore, SceneStore, draw2codeCreateTool, draw2codeGenerateTool, draw2codeReadTool, draw2codeUpdateTool } from '../dist/index.js'
 
 const roots = []
@@ -43,6 +45,108 @@ async function makeStore() {
     logger: { warn() {} },
   }
   return { root, canonicalRoot, store: new SceneStore(ctx), projects: new ProjectStore(ctx) }
+}
+
+function artifactHash(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff
+  for (const byte of bytes) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type, data) {
+  const name = Buffer.from(type, 'ascii')
+  const chunk = Buffer.alloc(12 + data.length)
+  chunk.writeUInt32BE(data.length, 0)
+  name.copy(chunk, 4)
+  data.copy(chunk, 8)
+  chunk.writeUInt32BE(crc32(Buffer.concat([name, data])), 8 + data.length)
+  return chunk
+}
+
+function pngImage(width, height) {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8
+  header[9] = 6
+  const rows = Buffer.alloc(height * (1 + width * 4))
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', deflateSync(rows)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+async function browserEvidence(root, board, pageTexts, { preserveExisting = false, writeOutput = true } = {}) {
+  const pageNames = Object.keys(pageTexts)
+  const artifactDir = join(root, 'artifacts')
+  await mkdir(artifactDir, { recursive: true })
+  const previewPath = join(root, 'draw2code-pages', board, 'index.html')
+  await mkdir(dirname(previewPath), { recursive: true })
+  if (writeOutput) {
+    const pageBlocks = Object.entries(pageTexts).map(([page, texts]) => '<!-- d2c-page:' + page + ':start -->'
+      + '<section>' + texts.join(' ') + '</section>'
+      + '<!-- d2c-page:' + page + ':end -->').join('')
+    await writeFile(previewPath, '<!doctype html><html><body>' + pageBlocks + '</body></html>', 'utf8')
+  }
+  const outputSha256 = artifactHash(await readFile(previewPath))
+  const captureId = 'capture-' + outputSha256.slice(0, 16)
+  const screenshots = []
+  const domSnapshots = []
+  for (const [index, page] of pageNames.entries()) {
+    const imageBytes = pngImage(390, 844)
+    const imagePath = join(artifactDir, 'page-' + index + '.png')
+    await writeFile(imagePath, imageBytes)
+    screenshots.push({
+      page,
+      viewport: '390x844',
+      source: imagePath,
+      sha256: artifactHash(imageBytes),
+      captureId,
+    })
+    const domBytes = Buffer.from(pageTexts[page].join('\n'), 'utf8')
+    const domPath = join(artifactDir, 'page-' + index + '.txt')
+    await writeFile(domPath, domBytes)
+    domSnapshots.push({
+      page,
+      source: domPath,
+      sha256: artifactHash(domBytes),
+      captureId,
+    })
+  }
+  return {
+    captureId,
+    outputSha256,
+    previewUrl: pathToFileURL(previewPath).href,
+    viewports: [{ width: 390, height: 844 }],
+    screenshots,
+    domSnapshots,
+    consoleErrors: [],
+    consoleWarnings: [],
+    domChecks: [
+      { name: 'selected-pages', passed: true, details: '已检查：' + pageNames.join('、') },
+      { name: 'mock-data', passed: true, details: '页面真实 mock 数据均可见' },
+      ...(preserveExisting ? [{ name: 'unselected-pages-preserved', passed: true, details: '未选择页面仍可见且文案一致' }] : []),
+    ],
+    layoutChecks: [
+      { name: 'no-horizontal-overflow', passed: true, details: 'scrollWidth 未超过 clientWidth' },
+      { name: 'content-not-clipped', passed: true, details: '关键组件均在可视容器内' },
+      { name: 'button-text-centered', passed: true, details: '按钮文字中心与按钮中心一致' },
+      { name: 'bottom-navigation-complete', passed: true, details: '底部导航栏目完整且位置一致' },
+    ],
+    interactionChecks: [
+      { name: 'core-flow', passed: true, details: '已实际点击并走通核心成功流程' },
+      ...(pageNames.length > 1 ? [{ name: 'page-switching', passed: true, details: '已实际切换全部所选页面' }] : []),
+    ],
+  }
 }
 
 test.afterEach(async () => {
@@ -1191,7 +1295,14 @@ test('draw2code_generate resumes choices, confirms once, and refuses completion 
   assert.equal(confirmed.outputDir, 'draw2code-pages/generate-flow/')
   assert.match(confirmed.instructions, /单文件/)
   assert.match(confirmed.instructions, /action=complete/)
+  assert.doesNotMatch(confirmed.instructions, /严格按.*布局/)
+  assert.match(confirmed.instructions, /禁止照搬 Excalidraw.*绝对坐标/)
+  assert.match(confirmed.instructions, /CSS Grid.*Flex/)
+  assert.match(confirmed.instructions, /结构化视觉简报/)
+  assert.equal(confirmed.brief.visualBrief.direction, '年轻活力')
+  assert.match(confirmed.brief.visualBrief.layoutStrategy, /响应式/)
 
+  await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] })
   const premature = await tool.execute({
     root,
     action: 'complete',
@@ -1199,29 +1310,67 @@ test('draw2code_generate resumes choices, confirms once, and refuses completion 
     revision: confirmed.revision,
     previewOpened: true,
     selectedPagesVisible: true,
-    coreFlowPassed: false,
+    coreFlowPassed: true,
     mockDataVisible: true,
   }, {})
   assert.equal(premature.status, 'error')
-  assert.equal(premature.error.code, 'verification-incomplete')
+  assert.equal(premature.error.code, 'verification-evidence-missing')
+
+  const missingArtifact = await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] })
+  missingArtifact.screenshots[0].source = join(root, 'artifacts/missing.png')
+  const artifactRejected = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: missingArtifact,
+  }, {})
+  assert.equal(artifactRejected.status, 'error')
+  assert.equal(artifactRejected.error.code, 'verification-evidence-failed')
+  assert.match(artifactRejected.error.message, /screenshot:首页:file-unreadable/)
+
+  const wrongDom = await browserEvidence(root, 'generate-flow', { 首页: ['错误的页面文案'] })
+  const domRejected = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: wrongDom,
+  }, {})
+  assert.equal(domRejected.status, 'error')
+  assert.equal(domRejected.error.code, 'verification-evidence-failed')
+  assert.match(domRejected.error.message, /domText:首页:附近的人/)
+
+  const failedEvidence = await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] })
+  failedEvidence.consoleErrors.push('TypeError: navigation target is missing')
+  failedEvidence.consoleWarnings.push('A form control has no accessible label')
+  failedEvidence.layoutChecks.find((check) => check.name === 'button-text-centered').passed = false
+  const rejected = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: failedEvidence,
+  }, {})
+  assert.equal(rejected.status, 'error')
+  assert.equal(rejected.error.code, 'verification-evidence-failed')
+  assert.match(rejected.error.message, /consoleErrors/)
+  assert.match(rejected.error.message, /consoleWarnings/)
+  assert.match(rejected.error.message, /button-text-centered/)
 
   const completed = await tool.execute({
     root,
     action: 'complete',
     sessionId: confirmed.sessionId,
     revision: confirmed.revision,
-    previewOpened: true,
-    selectedPagesVisible: true,
-    coreFlowPassed: true,
-    mockDataVisible: true,
+    verificationEvidence: await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] }),
   }, {})
   assert.equal(completed.status, 'completed')
-  assert.deepEqual(completed.validation, {
-    previewOpened: true,
-    selectedPagesVisible: true,
-    coreFlowPassed: true,
-    mockDataVisible: true,
-  })
+  assert.equal(completed.validation.verified, true)
+  assert.match(completed.validation.previewUrl, /^file:/)
+  assert.equal(completed.validation.screenshots.length, 1)
+  assert.equal(completed.validation.consoleErrors.length, 0)
+  assert.equal(completed.validation.consoleWarnings.length, 0)
 
   const regenerated = await tool.execute({ root, action: 'start', name: 'generate-flow' }, {})
   const inherited = await tool.execute({
@@ -1272,6 +1421,60 @@ test('draw2code_generate rechecks a repaired prototype without repeating complet
   assert.equal(ready.question, undefined)
   assert.deepEqual(ready.brief.selectedPages, ['日历页'])
   assert.equal(ready.brief.visualDirection, '数据清晰')
+})
+
+test('draw2code_generate requires an exercised page switch when multiple pages are selected', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'generate-page-switch', {
+    elements: [
+      { id: 'home', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 },
+      { id: 'home-title', type: 'text', text: '今日重点任务', frameId: 'home', x: 24, y: 80, width: 200, height: 32 },
+      { id: 'settings', type: 'frame', name: '设置页', x: 460, y: 0, width: 420, height: 860 },
+      { id: 'settings-title', type: 'text', text: '通知与隐私设置', frameId: 'settings', x: 484, y: 80, width: 220, height: 32 },
+    ],
+  })
+  const tool = draw2codeGenerateTool(store)
+  const started = await tool.execute({ root, action: 'start', name: 'generate-page-switch', styleNote: '简洁现代' }, {})
+  const ready = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    questionId: 'page-scope',
+    values: ['首页', '设置页'],
+  }, {})
+  const confirmed = await tool.execute({
+    root,
+    action: 'confirm',
+    sessionId: ready.sessionId,
+    revision: ready.revision,
+  }, {})
+  const pageSwitchEvidence = {
+    首页: ['今日重点任务'],
+    设置页: ['通知与隐私设置'],
+  }
+  const incompleteEvidence = await browserEvidence(root, 'generate-page-switch', pageSwitchEvidence)
+  incompleteEvidence.interactionChecks = incompleteEvidence.interactionChecks.filter((check) => check.name !== 'page-switching')
+  const incomplete = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: incompleteEvidence,
+  }, {})
+
+  assert.equal(incomplete.status, 'error')
+  assert.equal(incomplete.error.code, 'verification-evidence-incomplete')
+  assert.match(incomplete.error.message, /page-switching/)
+
+  const completed = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: await browserEvidence(root, 'generate-page-switch', pageSwitchEvidence),
+  }, {})
+  assert.equal(completed.status, 'completed')
 })
 
 test('draw2code_generate blocks a hand-drawn repeated-content page without readable mock data', async () => {
@@ -1328,8 +1531,12 @@ test('draw2code_generate requires proof that unselected pages survived regenerat
   const { root, canonicalRoot, store } = await makeStore()
   await store.write(root, 'generate-existing', {
     elements: [
-      { id: 'stats', type: 'frame', name: '统计页', x: 0, y: 0, width: 420, height: 860 },
-      { id: 'stats-data', type: 'text', text: '本周完成 18 项\n完成率 78%\n连续打卡 7 天', frameId: 'stats', x: 24, y: 100, width: 280, height: 100 },
+      { id: 'home', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 },
+      { id: 'home-data', type: 'text', text: '今日重点 3 项', frameId: 'home', x: 24, y: 100, width: 280, height: 32 },
+      { id: 'list', type: 'frame', name: '清单页', x: 460, y: 0, width: 420, height: 860 },
+      { id: 'list-data', type: 'text', text: '工作清单 6 项', frameId: 'list', x: 484, y: 100, width: 280, height: 32 },
+      { id: 'stats', type: 'frame', name: '统计页', x: 920, y: 0, width: 420, height: 860 },
+      { id: 'stats-data', type: 'text', text: '本周完成 18 项\n完成率 78%\n连续打卡 7 天', frameId: 'stats', x: 944, y: 100, width: 280, height: 100 },
     ],
   })
   await mkdir(join(canonicalRoot, 'draw2code-pages/generate-existing'), { recursive: true })
@@ -1353,13 +1560,92 @@ test('draw2code_generate requires proof that unselected pages survived regenerat
     action: 'complete',
     sessionId: confirmed.sessionId,
     revision: confirmed.revision,
-    previewOpened: true,
-    selectedPagesVisible: true,
-    coreFlowPassed: true,
-    mockDataVisible: true,
+    verificationEvidence: await browserEvidence(root, 'generate-existing', {
+      统计页: ['本周完成 18 项', '完成率 78%', '连续打卡 7 天'],
+    }),
   }, {})
   assert.equal(incomplete.status, 'error')
-  assert.match(incomplete.error.message, /unselectedPagesPreserved/)
+  assert.equal(incomplete.error.code, 'verification-evidence-incomplete')
+  assert.match(incomplete.error.message, /首页/)
+
+  const completed = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: await browserEvidence(root, 'generate-existing', {
+      首页: ['今日重点 3 项'],
+      清单页: ['工作清单 6 项'],
+      统计页: ['本周完成 18 项', '完成率 78%', '连续打卡 7 天'],
+    }, { preserveExisting: true }),
+  }, {})
+  assert.equal(completed.status, 'completed')
+})
+
+test('draw2code_generate hashes marked unselected pages and does not require preservation when every page is selected', async () => {
+  const { root, canonicalRoot, store } = await makeStore()
+  await store.write(root, 'generate-marked-pages', {
+    elements: [
+      { id: 'home', type: 'frame', name: '首页', x: 0, y: 0, width: 420, height: 860 },
+      { id: 'home-data', type: 'text', text: '今日重点 3 项', frameId: 'home', x: 24, y: 100, width: 280, height: 32 },
+      { id: 'stats', type: 'frame', name: '统计页', x: 460, y: 0, width: 420, height: 860 },
+      { id: 'stats-data', type: 'text', text: '本周完成 18 项\n完成率 78%\n连续打卡 7 天', frameId: 'stats', x: 484, y: 100, width: 280, height: 100 },
+    ],
+  })
+  const outputDir = join(canonicalRoot, 'draw2code-pages/generate-marked-pages')
+  await mkdir(outputDir, { recursive: true })
+  const original = '<!doctype html><html><body>'
+    + '<!-- d2c-page:首页:start --><section>今日重点 3 项</section><!-- d2c-page:首页:end -->'
+    + '<!-- d2c-page:统计页:start --><section>本周完成 18 项 完成率 78% 连续打卡 7 天</section><!-- d2c-page:统计页:end -->'
+    + '</body></html>'
+  await writeFile(join(outputDir, 'index.html'), original, 'utf8')
+  const tool = draw2codeGenerateTool(store)
+  const started = await tool.execute({ root, action: 'start', name: 'generate-marked-pages', styleNote: '数据清晰' }, {})
+  const ready = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    questionId: 'page-scope',
+    values: ['统计页'],
+  }, {})
+  const confirmed = await tool.execute({ root, action: 'confirm', sessionId: ready.sessionId, revision: ready.revision }, {})
+  await writeFile(join(outputDir, 'index.html'), original.replace('今日重点 3 项', '首页被错误覆盖'), 'utf8')
+  const changed = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: await browserEvidence(root, 'generate-marked-pages', {
+      统计页: ['本周完成 18 项', '完成率 78%', '连续打卡 7 天'],
+    }, { writeOutput: false }),
+  }, {})
+  assert.equal(changed.status, 'error')
+  assert.equal(changed.error.code, 'unselected-pages-changed')
+  assert.match(changed.error.message, /首页/)
+
+  await writeFile(join(outputDir, 'index.html'), original, 'utf8')
+  const allStarted = await tool.execute({ root, action: 'start', name: 'generate-marked-pages', styleNote: '数据清晰' }, {})
+  const allReady = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: allStarted.sessionId,
+    revision: allStarted.revision,
+    questionId: 'page-scope',
+    values: ['首页', '统计页'],
+  }, {})
+  const allConfirmed = await tool.execute({ root, action: 'confirm', sessionId: allReady.sessionId, revision: allReady.revision }, {})
+  const completed = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: allConfirmed.sessionId,
+    revision: allConfirmed.revision,
+    verificationEvidence: await browserEvidence(root, 'generate-marked-pages', {
+      首页: ['今日重点 3 项'],
+      统计页: ['本周完成 18 项', '完成率 78%', '连续打卡 7 天'],
+    }),
+  }, {})
+  assert.equal(completed.status, 'completed')
 })
 
 test('draw2code_generate inherits create brief page recommendations and deferred visual intent', async () => {

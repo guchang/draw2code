@@ -271,6 +271,13 @@ Feature: 画码原型板的人机协作
     And 用户可以选择方向、附参考图或自定义补充
     But 不应分别追问颜色、字体、圆角和阴影
 
+  Scenario: 整体视觉方向应在内部展开而不增加用户问题
+    Given 用户已经选择“简洁现代”
+    When generate 建立最终生成简报
+    Then 简报应包含气质、背景、主操作、语义色和信息密度
+    And 简报应包含字体层级、响应式布局策略、动效和视觉焦点
+    But 不应继续逐项询问这些实现细节
+
   Scenario: 后续重新生成默认继承视觉方向
     Given 项目第一次生成时已选择“年轻活力”视觉方向
     When 用户明确要求按照最新画板重新生成“统计页”
@@ -316,6 +323,8 @@ Feature: 画码原型板的人机协作
     And 多个页面应能在同一文件中切换
     And CSS、JavaScript 和非敏感 mock 数据应包含在该文件中
     And 核心按钮、表单和页面跳转应有实际反馈
+    And 页面应使用内容流、CSS Grid 或 Flex 重新排版
+    And 不应照搬 Excalidraw 的绝对坐标和低保真方框尺寸
     But 不应询问 React、Vue、路由或状态管理技术栈
 
   Scenario: 再次生成只更新用户选中的页面
@@ -332,8 +341,34 @@ Feature: 画码原型板的人机协作
     When Agent 准备报告生成完成
     Then 应先自动打开页面预览
     And 应实际检查所选页面可见、页面切换、核心按钮和 mock 数据
+    And 应为每个所选页面保留目标视口截图
+    And 应检查控制台 error/warning、横向溢出、内容裁切、按钮文字居中和底部导航完整
     And 应按画板的核心成功流程走一遍
     But 仅有文件写入成功时不得报告“生成完成”
+
+  Scenario: 几个自报布尔值不能替代真实预览证据
+    Given generate 已写出页面但没有提交逐页截图、视口和控制台检查
+    When Agent 调用 `action=complete`
+    Then 工具应返回 verification-evidence-missing 或 verification-evidence-incomplete
+    And generate 会话应保持 confirmed
+    When Agent 提交覆盖全部页面且所有检查通过的结构化 verificationEvidence
+    Then 工具才应返回 completed
+    But 证据包含控制台 error/warning 或失败的布局检查时应返回 verification-evidence-failed
+
+  Scenario: 预览证据必须指向可核验的真实产物
+    Given Agent 提交了同一 captureId 的截图路径、DOM 快照路径和对应 SHA-256
+    And previewUrl 内容哈希等于当前生成入口的 outputSha256
+    When 截图文件不存在、位于 workspace 外、哈希不一致或 PNG 尺寸与视口不符
+    Then 工具应返回 verification-evidence-failed
+    When DOM 快照遗漏原型中的关键文案或 mock 数据
+    Then 工具也应拒绝完成
+
+  Scenario: 重新生成时工具直接保护未选页面
+    Given 已有 HTML 用 d2c-page 起止注释标记“首页”和“统计页”
+    And 用户只选择重新生成“统计页”
+    When Agent 修改或删除“首页”页面块
+    Then 工具应返回 unselected-pages-changed
+    But 用户选择了全部页面时不应要求 unselectedPagesPreserved
 
   Scenario: 实现问题自动修复而产品变化才询问用户
     Given 自动预览发现按钮无响应和页面跳转错误

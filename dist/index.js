@@ -432,8 +432,8 @@ var SceneStore = class {
   async withWriteLock(path, task) {
     const previous = this.writeQueues.get(path) ?? Promise.resolve();
     let release = () => void 0;
-    const current = new Promise((resolve) => {
-      release = resolve;
+    const current = new Promise((resolve2) => {
+      release = resolve2;
     });
     const tail = previous.catch(() => void 0).then(() => current);
     this.writeQueues.set(path, tail);
@@ -932,8 +932,8 @@ var ProjectStore = class {
   async withMutationLock(path, task) {
     const previous = this.mutationQueues.get(path) ?? Promise.resolve();
     let release = () => void 0;
-    const current = new Promise((resolve) => {
-      release = resolve;
+    const current = new Promise((resolve2) => {
+      release = resolve2;
     });
     const tail = previous.catch(() => void 0).then(() => current);
     this.mutationQueues.set(path, tail);
@@ -1075,13 +1075,13 @@ import { execFile } from "node:child_process";
 import { writeFile as writeFile3 } from "node:fs/promises";
 var MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
 function runNative(command, args) {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     execFile(command, args, { encoding: "utf8" }, (error2, stdout, stderr) => {
       if (error2 !== null) {
-        resolve({ stdout, stderr, code: error2.code });
+        resolve2({ stdout, stderr, code: error2.code });
         return;
       }
-      resolve({ stdout, stderr });
+      resolve2({ stdout, stderr });
     });
   });
 }
@@ -2237,7 +2237,11 @@ ${summary}`);
 }
 
 // src/tools.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { open, realpath as realpath3 } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 import { defineTool as defineTool2 } from "@deepseek-ai/dsh-tools";
 
 // src/layout.ts
@@ -3128,18 +3132,41 @@ ${formatLayoutIssues(layoutReport.errors)}
     }
   });
 }
-function buildGenerateInstructions(board, frameNames, existingPages, visualDirection) {
+function visualBriefFor(direction, device, frameNames) {
+  const mobile = device === "mobile" || device === "\u79FB\u52A8\u7AEF H5";
+  const focalPage = frameNames[0] ?? "\u6838\u5FC3\u9875\u9762";
+  const darkTech = /未来|科技|深色|赛博/iu.test(direction);
+  const warm = /温暖|友好|生活|亲切|轻松/iu.test(direction);
+  const professional = /专业|数据|稳重|效率/iu.test(direction);
+  const bold = /大胆|鲜明|活力|年轻/iu.test(direction);
+  return {
+    direction,
+    tone: darkTech ? "\u6C89\u6D78\u3001\u7CBE\u786E\u3001\u6709\u660E\u786E\u9AD8\u4EAE\u7126\u70B9\uFF0C\u907F\u514D\u628A\u6240\u6709\u533A\u57DF\u90FD\u505A\u6210\u53D1\u5149\u9762\u677F" : warm ? "\u4EB2\u5207\u3001\u677E\u5F1B\u3001\u53EF\u4FE1\uFF0C\u4F7F\u7528\u514B\u5236\u88C5\u9970\u4FDD\u6301\u4EFB\u52A1\u6E05\u6670" : professional ? "\u9AD8\u6548\u3001\u53EF\u9760\u3001\u5C42\u7EA7\u6E05\u695A\uFF0C\u6570\u636E\u4E0E\u72B6\u6001\u4F18\u5148" : bold ? "\u8F7B\u5FEB\u3001\u4E3B\u52A8\u3001\u6709\u8BC6\u522B\u5EA6\uFF0C\u4EE5\u5C11\u91CF\u9AD8\u5BF9\u6BD4\u7126\u70B9\u5E26\u52A8\u9875\u9762" : "\u514B\u5236\u3001\u6E05\u6670\u3001\u6709\u660E\u786E\u89C6\u89C9\u91CD\u5FC3\uFF0C\u907F\u514D\u901A\u7528\u6A21\u677F\u611F",
+    background: darkTech ? "\u6DF1\u8272\u4F4E\u566A\u58F0\u5E95\u8272\uFF0C\u5185\u5BB9\u533A\u4FDD\u6301\u8DB3\u591F\u5BF9\u6BD4\u5EA6" : "\u4F4E\u9971\u548C\u4E2D\u6027\u5E95\u8272\uFF0C\u5361\u7247\u4E0E\u4E3B\u5185\u5BB9\u5F62\u6210\u6E05\u695A\u5C42\u6B21",
+    primaryAction: bold || darkTech ? "\u4E3B\u64CD\u4F5C\u4F7F\u7528\u5355\u4E00\u9AD8\u5BF9\u6BD4\u5F3A\u8C03\u8272\uFF0C\u6BCF\u9875\u53EA\u7A81\u51FA\u4E00\u4E2A\u9996\u8981\u52A8\u4F5C" : "\u4E3B\u64CD\u4F5C\u4F7F\u7528\u7A33\u5B9A\u5F3A\u8C03\u8272\uFF0C\u6B21\u8981\u64CD\u4F5C\u964D\u4F4E\u5BF9\u6BD4\u5EA6",
+    semanticColors: "\u6210\u529F\u3001\u63D0\u9192\u3001\u5371\u9669\u3001\u4FE1\u606F\u72B6\u6001\u4F7F\u7528\u53EF\u533A\u5206\u7684\u8BED\u4E49\u8272\uFF1B\u4E0D\u80FD\u7528\u54C1\u724C\u8272\u4EE3\u66FF\u5168\u90E8\u72B6\u6001",
+    density: professional ? "\u4FE1\u606F\u5BC6\u5EA6\u9002\u4E2D\u504F\u7D27\u51D1\uFF0C\u4F46\u4FDD\u8BC1\u89E6\u63A7\u9762\u79EF\u548C\u626B\u8BFB\u95F4\u8DDD" : "\u4FDD\u6301\u8212\u9002\u7559\u767D\uFF0C\u76F8\u5173\u5185\u5BB9\u7D27\u51D1\u6210\u7EC4\uFF0C\u4E0D\u5E73\u5747\u5206\u914D\u7A7A\u95F4",
+    typeHierarchy: "\u81F3\u5C11\u5EFA\u7ACB\u9875\u9762\u6807\u9898\u3001\u533A\u5757\u6807\u9898\u3001\u6B63\u6587\u3001\u8F85\u52A9\u4FE1\u606F\u56DB\u7EA7\u5C42\u6B21\uFF0C\u7981\u6B62\u6240\u6709\u6587\u5B57\u540C\u5B57\u53F7\u540C\u5B57\u91CD",
+    layoutStrategy: mobile ? "\u4EE5\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u6392\uFF1B\u9002\u914D 320\u2013430px \u624B\u673A\u5BBD\u5EA6\uFF0C\u4E0D\u590D\u5236\u539F\u578B\u7EDD\u5BF9\u5750\u6807" : "\u4EE5\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u5BB9\u5668\u7EA6\u675F\u91CD\u6392\uFF1B\u968F\u89C6\u53E3\u54CD\u5E94\uFF0C\u4E0D\u590D\u5236\u539F\u578B\u7EDD\u5BF9\u5750\u6807",
+    motion: "\u53EA\u4E3A\u9875\u9762\u5207\u6362\u3001\u72B6\u6001\u53D8\u5316\u548C\u64CD\u4F5C\u53CD\u9988\u4F7F\u7528\u77ED\u52A8\u6548\uFF0C\u5C0A\u91CD prefers-reduced-motion",
+    focalPoint: "\u8BA9\u7528\u6237\u9996\u5148\u770B\u5230\u300C" + focalPage + "\u300D\u7684\u6838\u5FC3\u4EFB\u52A1\u6216\u5173\u952E\u72B6\u6001\uFF0C\u800C\u4E0D\u662F\u540C\u65F6\u5F3A\u8C03\u6240\u6709\u7EC4\u4EF6"
+  };
+}
+function buildGenerateInstructions(board, frameNames, existingPages, visualBrief) {
   const lines = [
     "\u6309\u4EE5\u4E0B\u8981\u6C42\u751F\u6210\u524D\u7AEF\u9875\u9762\uFF1A",
-    `1. \u4E25\u683C\u6309\u4E0A\u9762\u7ED9\u51FA\u7684\u753B\u677F\u539F\u578B\u7ED3\u6784\u3001\u5E03\u5C40\u4E0E\u6587\u6848\u5B9E\u73B0${frameNames.length > 0 ? `\u300C${frameNames.join("\u300D\u300C")}\u300D\u8FD9\u4E9B\u8303\u56F4` : "\u6574\u5757\u753B\u677F"}\uFF0C\u7981\u6B62\u6DFB\u52A0\u539F\u578B\u4E2D\u4E0D\u5B58\u5728\u7684\u5143\u7D20\u3001\u6A21\u5757\u6216\u9875\u9762\u3002`,
-    "2. \u82E5\u539F\u578B\u662F\u79FB\u52A8\u7AEF\u5E03\u5C40\uFF0C\u751F\u6210 H5 \u9875\u9762\u672C\u4F53\uFF0C\u4E0D\u8981\u5957\u624B\u673A\u8FB9\u6846\u3002",
-    `3. \u8F93\u51FA\u5230 draw2code-pages/${board}/index.html\uFF1A\u5355\u6587\u4EF6\u3001\u5185\u8054 CSS/JS\u3001\u53EF\u76F4\u63A5\u5728\u6D4F\u89C8\u5668\u6253\u5F00\uFF1B\u591A\u4E2A\u9875\u9762\u653E\u5728\u540C\u4E00\u6587\u4EF6\u5185\u5E76\u4E92\u76F8\u5BFC\u822A\u3002`,
-    existingPages.length > 0 ? `4. draw2code-pages/${board}/ \u5DF2\u6709\u9875\u9762\uFF08${existingPages.join("\u3001")}\uFF09\uFF1A\u6CBF\u7528\u5176\u73B0\u6709\u98CE\u683C\u4E0E\u6280\u672F\u6808\uFF0C\u53EA\u66F4\u65B0\u672C\u6B21\u8303\u56F4\u5185\u7684\u9875\u9762\uFF0C\u4FDD\u6301\u5176\u4F59\u9875\u9762\u4E0D\u53D8\u3002` : `4. draw2code-pages/${board}/ \u76EE\u524D\u4E3A\u7A7A\uFF1A\u4ECE\u96F6\u751F\u6210\uFF0C\u98CE\u683C\u81EA\u5B9A\uFF08\u7B80\u6D01\u73B0\u4EE3\u4E3A\u9ED8\u8BA4\uFF09\u3002`,
-    `5. \u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF1A${visualDirection}\u3002\u540C\u4E00\u6587\u4EF6\u5185\u7684\u5168\u90E8\u9875\u9762\u5FC5\u987B\u4FDD\u6301\u4E00\u81F4\u3002`,
-    "6. \u82E5\u672C\u6B21\u7528\u6237\u6D88\u606F\u9644\u5E26\u4E86\u754C\u9762\u53C2\u8003\u56FE\uFF1A\u53C2\u8003\u5176\u914D\u8272\u3001\u5B57\u4F53\u611F\u89C9\u4E0E\u5E03\u5C40\u5BC6\u5EA6\uFF0C\u4F46\u9875\u9762\u5185\u5BB9\u4ECD\u4EE5\u753B\u677F\u539F\u578B\u4E3A\u51C6\u3002",
-    "7. \u53EF\u4EE5\u8865\u5145\u5FC5\u586B\u6821\u9A8C\u3001\u52A0\u8F7D\u3001\u6210\u529F\u63D0\u793A\u548C\u9009\u4E2D\u6001\u7B49\u901A\u7528\u4EA4\u4E92\u53CD\u9988\uFF0C\u4F46\u4E0D\u5F97\u65B0\u589E\u539F\u578B\u4E2D\u4E0D\u5B58\u5728\u7684\u9875\u9762\u3001\u6A21\u5757\u3001\u89D2\u8272\u3001\u6D41\u7A0B\u6216\u91CD\u5927\u4E1A\u52A1\u89C4\u5219\u3002",
-    "8. \u5199\u5165\u540E\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u9884\u89C8\uFF0C\u9A8C\u8BC1\u6240\u9009\u9875\u9762\u53EF\u89C1\u3001\u9875\u9762\u5207\u6362\u4E0E\u6838\u5FC3\u6309\u94AE\u53EF\u7528\u3001mock \u6570\u636E\u663E\u793A\u6B63\u5E38\u3001\u6838\u5FC3\u6D41\u7A0B\u53EF\u8D70\u901A\uFF1B\u5B9E\u73B0\u95EE\u9898\u5E94\u76F4\u63A5\u4FEE\u590D\u5E76\u91CD\u65B0\u9A8C\u8BC1\u3002",
-    "9. \u53EA\u6709\u771F\u5B9E\u9884\u89C8\u9A8C\u6536\u901A\u8FC7\u540E\uFF0C\u624D\u8C03\u7528 draw2code_generate action=complete\uFF1B\u5728 complete \u8FD4\u56DE completed \u4E4B\u524D\u4E0D\u5F97\u5411\u7528\u6237\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002"
+    "1. \u753B\u677F\u539F\u578B\u662F\u4EA7\u54C1\u4E8B\u5B9E\u6765\u6E90\uFF1A\u5FC5\u987B\u4FDD\u7559" + (frameNames.length > 0 ? "\u300C" + frameNames.join("\u300D\u300C") + "\u300D\u8FD9\u4E9B\u8303\u56F4\u7684" : "\u6574\u5757\u753B\u677F\u7684") + "\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\uFF1B\u7981\u6B62\u6DFB\u52A0\u539F\u578B\u4E2D\u4E0D\u5B58\u5728\u7684\u6A21\u5757\u3001\u9875\u9762\u3001\u89D2\u8272\u3001\u6D41\u7A0B\u6216\u91CD\u5927\u4E1A\u52A1\u89C4\u5219\u3002",
+    "2. \u539F\u578B\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u7981\u6B62\u7167\u642C Excalidraw \u7684\u7EDD\u5BF9\u5750\u6807\u3001\u65B9\u6846\u5C3A\u5BF8\u548C\u4F4E\u4FDD\u771F\u7A7A\u767D\uFF1B\u4F7F\u7528\u8BED\u4E49\u5316 HTML\u3001\u5185\u5BB9\u6D41\u3001CSS Grid\u3001Flex \u548C\u5BB9\u5668\u7EA6\u675F\u91CD\u65B0\u6392\u7248\u3002absolute/fixed \u53EA\u7528\u4E8E\u786E\u6709\u5FC5\u8981\u7684\u6D6E\u5C42\u3001\u88C5\u9970\u6216\u56FA\u5B9A\u5BFC\u822A\u3002",
+    "3. \u82E5\u539F\u578B\u662F\u79FB\u52A8\u7AEF\u5E03\u5C40\uFF0C\u751F\u6210 H5 \u9875\u9762\u672C\u4F53\uFF0C\u4E0D\u8981\u5957\u624B\u673A\u8FB9\u6846\uFF1B\u81F3\u5C11\u9002\u914D 320\u2013430px \u624B\u673A\u5BBD\u5EA6\uFF0C\u5E76\u4FDD\u8BC1\u684C\u9762\u9884\u89C8\u65F6\u5185\u5BB9\u7A33\u5B9A\u5C45\u4E2D\u3001\u65E0\u6A2A\u5411\u6EA2\u51FA\u3002",
+    "4. \u8F93\u51FA\u5230 draw2code-pages/" + board + "/index.html\uFF1A\u5355\u6587\u4EF6\u3001\u5185\u8054 CSS/JS\u3001\u53EF\u76F4\u63A5\u5728\u6D4F\u89C8\u5668\u6253\u5F00\uFF1B\u591A\u4E2A\u9875\u9762\u653E\u5728\u540C\u4E00\u6587\u4EF6\u5185\u5E76\u4E92\u76F8\u5BFC\u822A\u3002\u6BCF\u4E2A\u9875\u9762\u6839\u8282\u70B9\u524D\u540E\u5FC5\u987B\u4FDD\u7559 <!-- d2c-page:<\u9875\u9762\u539F\u540D>:start --> \u548C <!-- d2c-page:<\u9875\u9762\u539F\u540D>:end -->\uFF0C\u4F9B\u540E\u7EED\u91CD\u65B0\u751F\u6210\u65F6\u7CBE\u786E\u4FDD\u62A4\u672A\u9009\u9875\u9762\u3002",
+    existingPages.length > 0 ? "5. draw2code-pages/" + board + "/ \u5DF2\u6709\u9875\u9762\uFF08" + existingPages.join("\u3001") + "\uFF09\uFF1A\u5148\u8BFB\u53D6\u73B0\u6709 index.html\uFF0C\u6CBF\u7528\u5176\u6280\u672F\u5B9E\u73B0\uFF0C\u53EA\u66F4\u65B0\u672C\u6B21\u8303\u56F4\u5185\u7684\u9875\u9762\uFF0C\u4FDD\u6301\u5176\u4F59\u9875\u9762\u4E0D\u53D8\u3002" : "5. draw2code-pages/" + board + "/ \u76EE\u524D\u4E3A\u7A7A\uFF1A\u4ECE\u96F6\u751F\u6210\uFF0C\u4F46\u4E0D\u80FD\u9000\u5316\u6210\u65E0\u5C42\u7EA7\u7684\u901A\u7528\u6A21\u677F\u3002",
+    "6. \u4F7F\u7528\u4EE5\u4E0B\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u800C\u4E0D\u662F\u53EA\u628A\u201C" + visualBrief.direction + "\u201D\u5F53\u4F5C\u7A7A\u6CDB\u5F62\u5BB9\u8BCD\uFF1A\n   - \u6C14\u8D28\uFF1A" + visualBrief.tone + "\n   - \u80CC\u666F\uFF1A" + visualBrief.background + "\n   - \u4E3B\u64CD\u4F5C\uFF1A" + visualBrief.primaryAction + "\n   - \u8BED\u4E49\u8272\uFF1A" + visualBrief.semanticColors + "\n   - \u5BC6\u5EA6\uFF1A" + visualBrief.density + "\n   - \u5B57\u4F53\u5C42\u7EA7\uFF1A" + visualBrief.typeHierarchy + "\n   - \u5E03\u5C40\u7B56\u7565\uFF1A" + visualBrief.layoutStrategy + "\n   - \u52A8\u6548\uFF1A" + visualBrief.motion + "\n   - \u89C6\u89C9\u7126\u70B9\uFF1A" + visualBrief.focalPoint,
+    "7. \u9075\u5FAA\u4E13\u4E1A\u524D\u7AEF\u8BBE\u8BA1\u89C4\u8303\uFF1A\u5148\u5EFA\u7ACB CSS \u8BBE\u8BA1\u53D8\u91CF\uFF1B\u6BCF\u9875\u53EA\u7A81\u51FA\u4E00\u4E2A\u4E3B\u8981\u4EFB\u52A1\uFF1B\u907F\u514D\u65E0\u76EE\u7684\u6E10\u53D8\u3001\u8FC7\u5EA6\u5706\u89D2\u3001\u5E73\u5747\u7528\u529B\u548C\u5343\u7BC7\u4E00\u5F8B\u7684 AI \u6A21\u677F\u611F\uFF1B\u771F\u5B9E mock \u6570\u636E\u5FC5\u987B\u53C2\u4E0E\u6392\u7248\u3002",
+    "8. \u82E5\u672C\u6B21\u7528\u6237\u6D88\u606F\u9644\u5E26\u4E86\u754C\u9762\u53C2\u8003\u56FE\uFF1A\u53C2\u8003\u5176\u914D\u8272\u3001\u5B57\u4F53\u611F\u89C9\u4E0E\u5E03\u5C40\u5BC6\u5EA6\uFF0C\u4F46\u9875\u9762\u5185\u5BB9\u4ECD\u4EE5\u753B\u677F\u539F\u578B\u4E3A\u51C6\u3002",
+    "9. \u53EF\u4EE5\u8865\u5145\u5FC5\u586B\u6821\u9A8C\u3001\u52A0\u8F7D\u3001\u6210\u529F\u63D0\u793A\u548C\u9009\u4E2D\u6001\u7B49\u901A\u7528\u4EA4\u4E92\u53CD\u9988\uFF0C\u4F46\u4E0D\u5F97\u65B0\u589E\u4EA7\u54C1\u4E8B\u5B9E\u3002",
+    "10. \u5199\u5165\u540E\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\u5E76\u5B9E\u9645\u9A8C\u8BC1\uFF1A\u6240\u9009\u9875\u9762\u548C mock \u6570\u636E\u53EF\u89C1\u3001\u9875\u9762\u5207\u6362\u4E0E\u6838\u5FC3\u6309\u94AE\u53EF\u7528\u3001\u6838\u5FC3\u6D41\u7A0B\u8D70\u901A\u3001\u63A7\u5236\u53F0\u65E0 error/warning\u3001\u65E0\u6A2A\u5411\u6EA2\u51FA\u6216\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u3001\u5E95\u90E8\u5BFC\u822A\u5B8C\u6574\u3002\u53D1\u73B0\u5B9E\u73B0\u95EE\u9898\u8981\u76F4\u63A5\u4FEE\u590D\u5E76\u91CD\u65B0\u9A8C\u8BC1\u3002",
+    "11. \u8C03\u7528 action=complete \u65F6\u5FC5\u987B\u63D0\u4EA4 verificationEvidence\uFF1A\u672C\u6B21\u6D4F\u89C8\u5668\u9A8C\u6536\u552F\u4E00 captureId\u3001\u751F\u6210\u5165\u53E3 outputSha256\u3001previewUrl\u3001viewports\uFF1B\u8986\u76D6\u6BCF\u4E2A\u6240\u9009\u9875\u9762\u7684 screenshots[{page,viewport,source,sha256,captureId}]\uFF1B\u6D4F\u89C8\u5668\u5BFC\u51FA\u7684 domSnapshots[{page,source,sha256,captureId}]\uFF1BconsoleErrors\u3001consoleWarnings\u3001domChecks\u3001layoutChecks \u548C interactionChecks\u3002previewUrl \u5185\u5BB9\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\uFF1B\u622A\u56FE\u548C DOM \u5FEB\u7167\u5FC5\u987B\u4FDD\u5B58\u5230 workspace \u5185\u3001\u5C5E\u4E8E\u540C\u4E00 captureId\uFF0Csha256 \u5FC5\u987B\u4E0E\u6587\u4EF6\u4E00\u81F4\uFF1B\u4E0D\u80FD\u518D\u7528\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4EE3\u66FF\u8BC1\u636E\u3002",
+    "12. \u53EA\u6709\u771F\u5B9E\u9884\u89C8\u8BC1\u636E\u901A\u8FC7\u5DE5\u5177\u95E8\u7981\u540E\uFF0C\u624D\u8C03\u7528 draw2code_generate action=complete\uFF1B\u5728 complete \u8FD4\u56DE completed \u4E4B\u524D\u4E0D\u5F97\u5411\u7528\u6237\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002"
   ];
   return lines.join("\n");
 }
@@ -3357,13 +3384,320 @@ function semanticMockDataIssues(frames, elements) {
     }];
   });
 }
+function recordValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function recordArray(value) {
+  return Array.isArray(value) && value.every((item) => recordValue(item) !== null) ? value : null;
+}
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+function pathIsInside(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+async function workspaceFile(root, source) {
+  const sourceText = str2(source).trim();
+  if (sourceText === "") return { ok: false, reason: "source" };
+  try {
+    const canonicalRoot = await realpath3(root);
+    const candidate = isAbsolute(sourceText) ? sourceText : resolve(canonicalRoot, sourceText);
+    const canonicalPath = await realpath3(candidate);
+    if (!pathIsInside(canonicalRoot, canonicalPath)) return { ok: false, reason: "outside-workspace" };
+    const handle = await open(canonicalPath, "r");
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return { ok: false, reason: "not-a-file" };
+      if (info.size === 0) return { ok: false, reason: "empty-file" };
+      if (info.size > 20 * 1024 * 1024) return { ok: false, reason: "file-too-large" };
+      const bytes = await handle.readFile();
+      return { ok: true, bytes, path: canonicalPath };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return { ok: false, reason: "file-unreadable" };
+  }
+}
+async function workspaceArtifact(root, source, expectedHash) {
+  const hashText = str2(expectedHash).trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(hashText)) return { ok: false, reason: "sha256" };
+  const file = await workspaceFile(root, source);
+  if (!file.ok) return file;
+  return sha256(file.bytes) === hashText ? file : { ok: false, reason: "sha256-mismatch" };
+}
+function pngDimensions(bytes) {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (bytes.length < 45 || !bytes.subarray(0, 8).equals(signature)) return null;
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let channels = 0;
+  const imageData = [];
+  let ended = false;
+  try {
+    while (offset + 12 <= bytes.length) {
+      const length = bytes.readUInt32BE(offset);
+      const type = bytes.subarray(offset + 4, offset + 8).toString("ascii");
+      const dataStart = offset + 8;
+      const dataEnd = dataStart + length;
+      if (dataEnd + 4 > bytes.length) return null;
+      const data = bytes.subarray(dataStart, dataEnd);
+      if (type === "IHDR") {
+        if (length !== 13) return null;
+        width = data.readUInt32BE(0);
+        height = data.readUInt32BE(4);
+        const bitDepth = data[8];
+        const colorType = data[9];
+        const interlace = data[12];
+        channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
+        if (width <= 0 || height <= 0 || width * height > 1e7 || bitDepth !== 8 || channels === 0 || interlace !== 0) return null;
+      } else if (type === "IDAT") {
+        imageData.push(data);
+      } else if (type === "IEND") {
+        ended = true;
+        break;
+      }
+      offset = dataEnd + 4;
+    }
+    if (!ended || width === 0 || height === 0 || imageData.length === 0) return null;
+    const expectedLength = height * (1 + width * channels);
+    const inflated = inflateSync(Buffer.concat(imageData), { maxOutputLength: expectedLength });
+    if (inflated.length !== expectedLength) return null;
+    return { width, height };
+  } catch {
+    return null;
+  }
+}
+async function previewHtml(root, previewUrl) {
+  try {
+    const url = new URL(previewUrl);
+    let html = "";
+    if (url.protocol === "file:") {
+      const file = await workspaceFile(root, fileURLToPath(url));
+      if (!file.ok) return { ok: false, reason: file.reason };
+      html = file.bytes.toString("utf8");
+    } else if (url.protocol === "http:" || url.protocol === "https:") {
+      if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)) return { ok: false, reason: "preview-not-loopback" };
+      const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(3e3) });
+      if (!response.ok) return { ok: false, reason: "preview-http-" + response.status };
+      const declaredLength = Number(response.headers.get("content-length") ?? 0);
+      if (declaredLength > 2 * 1024 * 1024) return { ok: false, reason: "preview-too-large" };
+      if (response.body === null) return { ok: false, reason: "preview-empty-body" };
+      const reader = response.body.getReader();
+      const chunks = [];
+      let total = 0;
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        total += next.value.byteLength;
+        if (total > 2 * 1024 * 1024) {
+          await reader.cancel();
+          return { ok: false, reason: "preview-too-large" };
+        }
+        chunks.push(next.value);
+      }
+      html = Buffer.concat(chunks).toString("utf8");
+    } else {
+      return { ok: false, reason: "preview-protocol" };
+    }
+    if (Buffer.byteLength(html, "utf8") > 2 * 1024 * 1024) return { ok: false, reason: "preview-too-large" };
+    return /<!doctype html|<html[\s>]/iu.test(html) ? { ok: true, html } : { ok: false, reason: "preview-not-html" };
+  } catch {
+    return { ok: false, reason: "preview-unreachable" };
+  }
+}
+function normalizedVisibleText(value) {
+  return value.replace(/\s+/gu, " ").trim();
+}
+function expectedPageTexts(frames, elements) {
+  return Object.fromEntries(frames.map((frame) => {
+    const name2 = str2(frame.name).trim();
+    const texts = elements.filter((element) => str2(element.type) === "text" && elementBelongsToFrame(element, frame)).flatMap((element) => str2(element.text).split(/\r?\n/gu)).map(normalizedVisibleText).filter((value) => value !== "");
+    return [name2, [...new Set(texts)]];
+  }));
+}
+function pageBlock(html, page) {
+  const start = "<!-- d2c-page:" + page + ":start -->";
+  const end = "<!-- d2c-page:" + page + ":end -->";
+  const startAt = html.indexOf(start);
+  if (startAt < 0) return null;
+  const contentAt = startAt + start.length;
+  const endAt = html.indexOf(end, contentAt);
+  return endAt < 0 ? null : html.slice(contentAt, endAt);
+}
+async function preparePagePreservation(root, draft) {
+  const allFrames = draft.allFrames ?? draft.selectedFrames;
+  draft.unselectedFrames = allFrames.filter((name2) => !draft.selectedFrames.includes(name2));
+  draft.preservedPageHashes = {};
+  if (!draft.hadExistingIndex || draft.unselectedFrames.length === 0) return;
+  const file = await workspaceFile(root, resolve(root, "draw2code-pages", draft.board, "index.html"));
+  if (!file.ok) return;
+  const html = file.bytes.toString("utf8");
+  for (const page of draft.unselectedFrames) {
+    const block = pageBlock(html, page);
+    if (block !== null) draft.preservedPageHashes[page] = sha256(block);
+  }
+}
+async function preservedPagesStillMatch(root, draft) {
+  const hashes = draft.preservedPageHashes ?? {};
+  if (Object.keys(hashes).length === 0) return [];
+  const file = await workspaceFile(root, resolve(root, "draw2code-pages", draft.board, "index.html"));
+  if (!file.ok) return Object.keys(hashes);
+  const html = file.bytes.toString("utf8");
+  return Object.entries(hashes).filter(([page, hash]) => {
+    const block = pageBlock(html, page);
+    return block === null || sha256(block) !== hash;
+  }).map(([page]) => page);
+}
+async function verificationEvidenceFor(root, raw, draft, outputHash) {
+  const evidence = recordValue(raw);
+  if (evidence === null) {
+    return {
+      ok: false,
+      code: "verification-evidence-missing",
+      message: "\u7F3A\u5C11 verificationEvidence\uFF1B\u5FC5\u987B\u63D0\u4EA4\u771F\u5B9E\u6D4F\u89C8\u5668 URL\u3001\u89C6\u53E3\u3001\u9010\u9875\u622A\u56FE\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u5E03\u5C40\u548C\u6838\u5FC3\u4EA4\u4E92\u8BC1\u636E"
+    };
+  }
+  const missing = [];
+  const failures = [];
+  const captureId = str2(evidence.captureId).trim();
+  if (captureId === "") missing.push("captureId");
+  if (str2(evidence.outputSha256).trim().toLowerCase() !== outputHash) failures.push("outputSha256");
+  const previewUrl = str2(evidence.previewUrl).trim();
+  if (!/^(?:https?|file):\/\//iu.test(previewUrl)) {
+    missing.push("previewUrl");
+  } else {
+    const preview = await previewHtml(root, previewUrl);
+    if (!preview.ok) failures.push("previewUrl:" + preview.reason);
+    else if (sha256(preview.html) !== outputHash) failures.push("previewUrl:output-mismatch");
+  }
+  const viewportKeys = /* @__PURE__ */ new Set();
+  const viewports = recordArray(evidence.viewports);
+  if (viewports === null || viewports.length === 0) {
+    missing.push("viewports");
+  } else {
+    const validViewports = viewports.filter((viewport) => num2(viewport.width) > 0 && num2(viewport.height) > 0);
+    for (const viewport of validViewports) viewportKeys.add(num2(viewport.width) + "x" + num2(viewport.height));
+    if (validViewports.length !== viewports.length) missing.push("viewports.width/height");
+    if ((draft.device === "mobile" || draft.device === "\u79FB\u52A8\u7AEF H5") && !validViewports.some((viewport) => num2(viewport.width) >= 320 && num2(viewport.width) <= 430 && num2(viewport.height) > num2(viewport.width))) {
+      missing.push("320-430px mobile viewport");
+    }
+    if (draft.device === "desktop" && !validViewports.some((viewport) => num2(viewport.width) >= 1024)) {
+      missing.push("desktop viewport >= 1024px");
+    }
+    if (draft.device === "separate") {
+      if (!validViewports.some((viewport) => num2(viewport.width) >= 320 && num2(viewport.width) <= 430)) missing.push("mobile viewport");
+      if (!validViewports.some((viewport) => num2(viewport.width) >= 1024)) missing.push("desktop viewport");
+    }
+  }
+  const unselectedEvidencePages = draft.hadExistingIndex ? draft.unselectedFrames ?? [] : [];
+  const evidencePages = [.../* @__PURE__ */ new Set([...draft.selectedFrames, ...unselectedEvidencePages])];
+  const screenshots = recordArray(evidence.screenshots);
+  if (screenshots === null || screenshots.length === 0) {
+    missing.push("screenshots");
+  } else {
+    for (const page of evidencePages) {
+      const shot = screenshots.find((candidate) => str2(candidate.page).trim() === page);
+      if (shot === void 0) {
+        missing.push("screenshot:" + page);
+        continue;
+      }
+      if (str2(shot.captureId).trim() !== captureId) failures.push("screenshot:" + page + ":captureId");
+      const viewport = str2(shot.viewport).trim();
+      if (!viewportKeys.has(viewport)) missing.push("screenshot-viewport:" + page);
+      const artifact = await workspaceArtifact(root, shot.source, shot.sha256);
+      if (!artifact.ok) {
+        failures.push("screenshot:" + page + ":" + artifact.reason);
+        continue;
+      }
+      const dimensions = pngDimensions(artifact.bytes);
+      const match = /^(\d+)x(\d+)$/u.exec(viewport);
+      if (dimensions === null || match === null || dimensions.width !== Number(match[1]) || dimensions.height !== Number(match[2])) {
+        failures.push("screenshot:" + page + ":dimensions");
+      }
+    }
+  }
+  const domSnapshots = recordArray(evidence.domSnapshots);
+  if (domSnapshots === null || domSnapshots.length === 0) {
+    missing.push("domSnapshots");
+  } else {
+    for (const page of evidencePages) {
+      const snapshot = domSnapshots.find((candidate) => str2(candidate.page).trim() === page);
+      if (snapshot === void 0) {
+        missing.push("domSnapshot:" + page);
+        continue;
+      }
+      if (str2(snapshot.captureId).trim() !== captureId) failures.push("domSnapshot:" + page + ":captureId");
+      const artifact = await workspaceArtifact(root, snapshot.source, snapshot.sha256);
+      if (!artifact.ok) {
+        failures.push("domSnapshot:" + page + ":" + artifact.reason);
+        continue;
+      }
+      const bodyText = normalizedVisibleText(artifact.bytes.toString("utf8"));
+      for (const expected of draft.expectedPageTexts?.[page] ?? []) {
+        if (!bodyText.includes(normalizedVisibleText(expected))) {
+          failures.push("domText:" + page + ":" + expected.slice(0, 24));
+        }
+      }
+    }
+  }
+  if (!Array.isArray(evidence.consoleErrors)) {
+    missing.push("consoleErrors");
+  } else if (evidence.consoleErrors.length > 0) {
+    failures.push("consoleErrors");
+  }
+  if (!Array.isArray(evidence.consoleWarnings)) {
+    missing.push("consoleWarnings");
+  } else if (evidence.consoleWarnings.length > 0) {
+    failures.push("consoleWarnings");
+  }
+  const requiredChecks = [
+    ["domChecks", ["selected-pages", "mock-data", ...unselectedEvidencePages.length > 0 ? ["unselected-pages-preserved"] : []]],
+    ["layoutChecks", ["no-horizontal-overflow", "content-not-clipped", "button-text-centered", "bottom-navigation-complete"]],
+    ["interactionChecks", ["core-flow", ...draft.selectedFrames.length > 1 ? ["page-switching"] : []]]
+  ];
+  for (const [field, requiredNames] of requiredChecks) {
+    const checks = recordArray(evidence[field]);
+    if (checks === null || checks.length === 0) {
+      missing.push(field);
+      continue;
+    }
+    for (const requiredName of requiredNames) {
+      const check = checks.find((item) => str2(item.name) === requiredName);
+      if (check === void 0 || str2(check.details).trim() === "") missing.push(field + ":" + requiredName);
+      else if (check.passed !== true) failures.push(field + ":" + requiredName);
+    }
+    for (const check of checks) {
+      if (check.passed !== true) failures.push(field + ":" + (str2(check.name) || "unnamed"));
+    }
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      code: "verification-evidence-incomplete",
+      message: "\u771F\u5B9E\u9884\u89C8\u8BC1\u636E\u4E0D\u5B8C\u6574\uFF1A" + [...new Set(missing)].join("\u3001")
+    };
+  }
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      code: "verification-evidence-failed",
+      message: "\u771F\u5B9E\u9884\u89C8\u53D1\u73B0\u672A\u4FEE\u590D\u95EE\u9898\uFF1A" + [...new Set(failures)].join("\u3001") + "\uFF1B\u5148\u4FEE\u590D\u9875\u9762\u5E76\u91CD\u65B0\u9A8C\u6536"
+    };
+  }
+  return { ok: true, value: { ...evidence, verified: true } };
+}
 function briefFor(draft, existingPages) {
+  const visualBrief = visualBriefFor(draft.visualDirection ?? "\u7B80\u6D01\u73B0\u4EE3", draft.device, draft.selectedFrames);
   return {
     board: draft.board,
     selectedPages: draft.selectedFrames,
     relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name2) => !draft.selectedFrames.includes(name2)),
     pageChanges: existingPages.includes("index.html") ? "\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\uFF0C\u672A\u9009\u62E9\u9875\u9762\u4FDD\u6301\u4E0D\u53D8" : "\u9996\u6B21\u751F\u6210\u6240\u9009\u9875\u9762",
     visualDirection: draft.visualDirection,
+    visualBrief,
     device: draft.device,
     prototypeCheck: draft.blockers.length === 0 ? "\u901A\u8FC7" : "\u6709\u963B\u65AD\u95EE\u9898",
     warnings: draft.warnings,
@@ -3441,6 +3775,10 @@ async function loadGeneration(store, root, sessionId) {
 async function runGeneratePreflight(store, root, draft) {
   const board = await store.read(root, draft.board);
   if (!board.ok) return generateError(board.error.code, board.error.message, draft);
+  const allFrames = namedFrames(board.value.scene.elements);
+  draft.allFrames = allFrames.map((frame) => str2(frame.name).trim());
+  draft.unselectedFrames = draft.allFrames.filter((name2) => !draft.selectedFrames.includes(name2));
+  draft.expectedPageTexts = expectedPageTexts(allFrames, board.value.scene.elements);
   const scope = elementsInFrames(board.value.scene.elements, draft.selectedFrames);
   if (scope.frames.length !== draft.selectedFrames.length) {
     const found = new Set(scope.frames.map((frame) => str2(frame.name)));
@@ -3476,8 +3814,9 @@ async function generationPayload(store, root, draft) {
   const payload = elementsBytes <= MAX_ELEMENTS_JSON ? scope.elements : [{ id: "__too_large__", type: "text", text: `scoped elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); draw2code_read the board instead` }];
   const quality = inspectPrototypeLayout(scope.elements);
   const layoutIssues = [...quality.errors, ...quality.warnings];
-  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, draft.visualDirection ?? "\u7B80\u6D01\u73B0\u4EE3") + (layoutIssues.length > 0 ? `
-10. \u539F\u578B\u975E\u963B\u65AD\u63D0\u9192\uFF1A
+  const visualBrief = visualBriefFor(draft.visualDirection ?? "\u7B80\u6D01\u73B0\u4EE3", draft.device, draft.selectedFrames);
+  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, visualBrief) + (layoutIssues.length > 0 ? `
+13. \u539F\u578B\u975E\u963B\u65AD\u63D0\u9192\uFF1A
 ${formatLayoutIssues(layoutIssues)}` : "");
   return responseFromDraft(draft, {
     nextAction: "write-html-then-preview-and-validate",
@@ -3495,7 +3834,7 @@ ${formatLayoutIssues(layoutIssues)}` : "");
 function draw2codeGenerateTool(store, projects) {
   return defineTool2({
     name: "draw2code_generate",
-    description: "Turn selected \u753B\u7801 frames into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. On any explicit \u201C\u751F\u6210\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u91CD\u65B0\u751F\u6210\u201D request, call action=start immediately. The first result always asks the user to select pages from every frame; pass user-mentioned frames only as recommendations, never skip the choice. Use the host choice UI with all returned options. Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type \u201C\u786E\u8BA4\u201D. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. After writing, automatically open the real preview and exercise the selected pages and core flow; fix implementation defects without asking. Call action=complete with truthful verification flags only after preview passes. Never report completion before status=completed. If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.",
+    description: "Turn selected \u753B\u7801 frames into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. On any explicit \u201C\u751F\u6210\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u91CD\u65B0\u751F\u6210\u201D request, call action=start immediately. The first result always asks the user to select pages from every frame; pass user-mentioned frames only as recommendations, never skip the choice. Use the host choice UI with all returned options. Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type \u201C\u786E\u8BA4\u201D. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       action: { type: "string", enum: ["start", "answer", "revise", "resume", "recheck", "confirm", "complete", "abandon"], description: "Generate state-machine action. Omit only for legacy callers; omission behaves as start." },
@@ -3507,11 +3846,15 @@ function draw2codeGenerateTool(store, projects) {
       questionId: { type: "string", description: "Current question ID for answer/revise." },
       values: { type: "array", items: { type: "string" }, description: "Selected option IDs." },
       otherText: { type: "string", description: "Custom overall visual direction when custom is selected." },
-      previewOpened: { type: "boolean", description: "True only when the generated index was opened in a real preview." },
-      selectedPagesVisible: { type: "boolean", description: "True only when every selected page was visibly checked." },
-      coreFlowPassed: { type: "boolean", description: "True only when the core interaction flow was exercised successfully." },
-      mockDataVisible: { type: "boolean", description: "True only when meaningful mock data is visible in the preview." },
-      unselectedPagesPreserved: { type: "boolean", description: "For regeneration, whether unselected existing pages remained intact." }
+      verificationEvidence: {
+        type: "json",
+        description: "Required only for action=complete. Object with one captureId, outputSha256, reachable loopback/file previewUrl whose HTML hash matches the generated index, viewports[{width,height}], workspace PNG screenshots[{page,viewport,source,sha256,captureId}] and text domSnapshots[{page,source,sha256,captureId}] covering every related page, empty consoleErrors and consoleWarnings, DOM/layout/core-flow checks. Multiple pages also require page-switching. Every check needs passed=true and non-empty details. Unselected pages are verified by stored page-block hashes plus post-generation artifacts."
+      },
+      previewOpened: { type: "boolean", description: "Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence." },
+      selectedPagesVisible: { type: "boolean", description: "Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence." },
+      coreFlowPassed: { type: "boolean", description: "Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence." },
+      mockDataVisible: { type: "boolean", description: "Deprecated compatibility field. It no longer satisfies action=complete without verificationEvidence." },
+      unselectedPagesPreserved: { type: "boolean", description: "Deprecated compatibility field. Unselected pages are now checked through page markers and evidence artifacts." }
     },
     output: {
       schema: {
@@ -3556,7 +3899,7 @@ ${options}
         if (value.status === "ready") return text2(`[draw2code_generate continuation] sessionId=${value.sessionId ?? ""} revision=${value.revision ?? ""} status=ready
 \u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u590D\u5236 confirmation.askUserQuestionArgs\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\u3002\u9009\u62E9 confirm \u540E\u8C03\u7528 action=confirm\uFF1Brevise-scope \u8C03 action=revise questionId=page-scope\uFF1Brevise-visual \u8C03 action=revise questionId=visual-direction\u3002`);
         if (value.status === "confirmed") return text2(`[draw2code_generate continuation] sessionId=${value.sessionId ?? ""} revision=${value.revision ?? ""} status=confirmed
-\u6309 instructions \u5199\u5165\u5355\u6587\u4EF6 index.html\uFF0C\u7136\u540E\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u9884\u89C8\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u9A8C\u6536\u901A\u8FC7\u540E\u8C03\u7528 action=complete\uFF0C\u4E4B\u524D\u4E0D\u5F97\u62A5\u544A\u5B8C\u6210\u3002`);
+\u6309 instructions \u5199\u5165\u5355\u6587\u4EF6 index.html\uFF0C\u7136\u540E\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u63A7\u5236\u53F0\u3001DOM\u3001\u5E03\u5C40\u548C\u6838\u5FC3\u6D41\u7A0B\uFF1B\u7528\u7ED3\u6784\u5316 verificationEvidence \u8C03\u7528 action=complete\uFF0C\u4E4B\u524D\u4E0D\u5F97\u62A5\u544A\u5B8C\u6210\u3002`);
         if (value.status === "completed") return text2(`draw2code_generate status=completed board=${value.board ?? ""}
 \u771F\u5B9E\u9884\u89C8\u4E0E\u6838\u5FC3\u6D41\u7A0B\u5DF2\u9A8C\u6536\uFF0Cgenerate \u6D41\u7A0B\u7ED3\u675F\uFF1B\u540E\u7EED\u666E\u901A\u4FEE\u6539\u4E0D\u81EA\u52A8\u91CD\u65B0\u8FDB\u5165 generate\u3002`);
         if (value.status === "error") return text2(`draw2code_generate \u53EF\u6062\u590D\u9519\u8BEF\uFF1A${JSON.stringify(value.error)}${value.sessionId === void 0 ? "" : `
@@ -3606,7 +3949,11 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
           updatedAt: now2,
           currentQuestion: pageScopeQuestion(frames, recommended, recommendationReasons),
           selectedFrames: [],
+          allFrames: allNames,
+          unselectedFrames: [],
           recommendedFrames: [...new Set(recommended)],
+          expectedPageTexts: {},
+          preservedPageHashes: {},
           visualDirection: args.styleNote?.trim() || deferredStyle || null,
           inheritedVisualDirection: inherited,
           device: null,
@@ -3695,6 +4042,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         if (draft.status !== "ready") return generateError("invalid-state", "\u53EA\u6709\u7528\u6237\u786E\u8BA4 ready \u7B80\u62A5\u540E\u624D\u80FD\u751F\u6210", draft);
         const preflight = await runGeneratePreflight(store, args.root, draft);
         if (preflight.status !== "ready") return preflight;
+        await preparePagePreservation(args.root, draft);
         draft.status = "confirmed";
         draft.currentQuestion = null;
         const failed = await persistGeneration(store, args.root, draft);
@@ -3703,22 +4051,26 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
       }
       if (action === "complete") {
         if (draft.status !== "confirmed") return generateError("invalid-state", "\u53EA\u6709 confirmed \u4E14 HTML \u5DF2\u5199\u5165\u540E\u624D\u80FD\u63D0\u4EA4\u9A8C\u6536", draft);
-        const validation = {
-          previewOpened: args.previewOpened === true,
-          selectedPagesVisible: args.selectedPagesVisible === true,
-          coreFlowPassed: args.coreFlowPassed === true,
-          mockDataVisible: args.mockDataVisible === true,
-          ...draft.hadExistingIndex ? { unselectedPagesPreserved: args.unselectedPagesPreserved === true } : {}
-        };
-        const failedChecks = Object.entries(validation).filter(([, passed]) => !passed).map(([name2]) => name2);
-        if (failedChecks.length > 0) return generateError("verification-incomplete", `\u771F\u5B9E\u9884\u89C8\u9A8C\u6536\u672A\u901A\u8FC7\uFF1A${failedChecks.join("\u3001")}`, draft);
-        draft.validation = validation;
+        const outputFile = await workspaceFile(args.root, resolve(args.root, "draw2code-pages", draft.board, "index.html"));
+        if (!outputFile.ok) return generateError("generated-index-missing", "\u751F\u6210\u5165\u53E3\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BFB\u53D6\uFF1A" + outputFile.reason, draft);
+        const outputHtml = outputFile.bytes.toString("utf8");
+        const missingMarkers = draft.selectedFrames.filter((page) => pageBlock(outputHtml, page) === null);
+        if (missingMarkers.length > 0) {
+          return generateError("generated-page-marker-missing", "\u751F\u6210\u9875\u9762\u7F3A\u5C11\u7A33\u5B9A\u8FB9\u754C\u6807\u8BB0\uFF1A" + missingMarkers.join("\u3001"), draft);
+        }
+        const changedPages = await preservedPagesStillMatch(args.root, draft);
+        if (changedPages.length > 0) {
+          return generateError("unselected-pages-changed", "\u672A\u9009\u62E9\u9875\u9762\u88AB\u4FEE\u6539\u6216\u4E22\u5931\uFF1A" + changedPages.join("\u3001") + "\uFF1B\u6062\u590D\u8FD9\u4E9B\u9875\u9762\u540E\u91CD\u65B0\u9A8C\u6536", draft);
+        }
+        const evidence = await verificationEvidenceFor(args.root, args.verificationEvidence, draft, sha256(outputFile.bytes));
+        if (!evidence.ok) return generateError(evidence.code, evidence.message, draft);
+        draft.validation = evidence.value;
         draft.status = "completed";
         const failed = await persistGeneration(store, args.root, draft);
         if (failed !== null) return failed;
         const settings = await store.writeGenerateSettings(args.root, draft.board, { visualDirection: draft.visualDirection });
         if (!settings.ok) return generateError(settings.error.code, settings.error.message, draft);
-        return responseFromDraft(draft, { validation });
+        return responseFromDraft(draft, { validation: evidence.value });
       }
       return generateError("invalid-action", `\u4E0D\u652F\u6301 action=${action}`, draft);
     }
@@ -3733,7 +4085,8 @@ var DRAW2CODE_GUIDANCE = [
   '\u672C\u673A\u5DF2\u5B89\u88C5 dsh-draw2code \u63D2\u4EF6\uFF08\u753B\u7801 \xB7 Draw2Code\uFF09\uFF1ADSH Web GUI \u53F3\u4FA7 better-sidebar \u8FB9\u680F\u91CC\u7684\u300C\u753B\u7801\u300D\u6807\u7B7E\u9875\uFF08Excalidraw \u753B\u677F\uFF0C\u4ECE + \u83DC\u5355\u6216\u6807\u7B7E\u680F\u6253\u5F00\uFF09\u3002\u65B0\u9879\u76EE\u5DE5\u4F5C\u6D41\uFF1A\u7528\u6237\u8868\u8FBE\u201C\u6211\u60F3\u505A/\u521B\u5EFA/\u5F00\u53D1\u4E00\u4E2A\u65B0\u7684\u2026\u2026\u201D\u65F6\uFF0C\u5148\u8C03\u7528 draw2code_create action=start \u8FDB\u5165 choice-first grilling\uFF0C\u4E0D\u80FD\u76F4\u63A5\u8C03\u7528 draw2code_update\uFF1Bidea \u5FC5\u987B\u5FE0\u5B9E\u4F20\u5165\u7528\u6237\u539F\u8BDD\uFF0C\u4E0D\u8981\u5148\u66FF\u7528\u6237\u6269\u5199\u9700\u6C42\u3002\u6BCF\u6B21\u8FD4\u56DE question \u65F6\uFF0C\u4F18\u5148\u8C03\u7528\u5BBF\u4E3B ask_user_question\uFF0C\u4EE5\u4E00\u4E2A\u95EE\u9898\u548C\u5168\u90E8\u7ED3\u6784\u5316 options \u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\uFF0C\u5FC5\u987B\u4FDD\u7559\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u548C\u201C\u5176\u4ED6\u201D\u7B49\u9009\u9879\uFF0C\u7981\u6B62\u622A\u65AD\u9009\u9879\u6216\u53EA\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\uFF1B\u6536\u5230\u9009\u62E9\u540E\u628A label \u6620\u5C04\u56DE option id\uFF0C\u518D\u8C03\u7528 draw2code_create action=answer\u3002\u53EA\u6709\u5BBF\u4E3B\u6CA1\u6709 ask_user_question \u65F6\uFF0C\u624D\u9000\u5316\u4E3A\u7F16\u53F7\u6587\u672C\u3002\u7528\u6237\u8BF4\u201C\u7EE7\u7EED\u4E4B\u524D\u7684\u9879\u76EE\u201D\u4F46\u6CA1\u6709\u660E\u786E\u9879\u76EE\u65F6\uFF0C\u5148\u8C03\u7528 draw2code_create action=list\uFF0C\u8BA9\u7528\u6237\u9009\u62E9\u8349\u7A3F\uFF1B\u660E\u786E\u9879\u76EE\u540E\u7528 action=resume\u3002\u7528\u6237\u786E\u8BA4 ready \u7684\u9879\u76EE\u7B80\u62A5\u540E\uFF0C\u8C03\u7528 draw2code_create action=confirm\uFF1B\u53EA\u6709\u62FF\u5230 nextAction=draw2code_update \u548C boardName \u540E\uFF0C\u624D\u8C03\u7528 draw2code_update \u628A\u7B2C\u4E00\u8F6E\u6838\u5FC3\u539F\u578B\u753B\u5230\u8FD9\u4E2A\u65B0\u753B\u677F\u3002\u5DF2\u6709\u9879\u76EE\u5DE5\u4F5C\u6D41\uFF1A\u7528\u6237\u76F4\u63A5\u5728\u753B\u677F\u4E0A\u62D6\u6539\u3001\u5220\u6A21\u5757\u3001\u52A0\u6587\u6848\uFF1B\u4F60\u5148\u7528 draw2code_read \u8BFB\u53D6\u6700\u65B0\u753B\u677F\uFF0C\u518D\u7EE7\u7EED draw2code_update \u8FED\u4EE3\uFF1B\u6253\u78E8\u597D\u540E\u7528\u6237\u8BF4"\u6839\u636E\u753B\u677F\u751F\u6210\u9875\u9762"\uFF0C\u4F60\u8C03\u7528 draw2code_generate \u62FF\u5230\u8303\u56F4\u4E0E\u7EA6\u675F\u540E\u751F\u6210\u524D\u7AEF\u9875\u9762\u3002',
   "draw2code_create \u7684 grilling SOP\uFF1A\u4F9D\u6B21\u8865\u9F50\u76EE\u6807\u7AEF\u3001\u6838\u5FC3\u7528\u6237\u3001\u6838\u5FC3\u76EE\u6807\u3001\u6700\u91CD\u8981\u7684\u7528\u6237\u6D41\u7A0B\u3001\u9996\u7248\u6838\u5FC3\u6A21\u5757\u3001\u9996\u8F6E\u6838\u5FC3\u9875\u9762\uFF1B\u7528\u6237\u539F\u8BDD\u5DF2\u7ECF\u660E\u786E App/Web/\u5C0F\u7A0B\u5E8F\u65F6\u5DE5\u5177\u4F1A\u9884\u586B\u5E76\u8DF3\u8FC7\u76EE\u6807\u7AEF\uFF0C\u7981\u6B62\u91CD\u590D\u8FFD\u95EE\u3002\u5E73\u53F0/\u7528\u6237/\u76EE\u6807/\u6D41\u7A0B\u9ED8\u8BA4\u5355\u9009\uFF0C\u6A21\u5757\u548C\u9875\u9762\u53EF\u591A\u9009\u3002\u5019\u9009\u9009\u9879\u662F\u5E2E\u52A9\u601D\u8003\u7684\u811A\u624B\u67B6\uFF0C\u4E0D\u9650\u5236\u7528\u6237\uFF1A\u7528\u6237\u53EF\u4EE5\u9009\u201C\u5176\u4ED6\u201D\u5E76\u8865\u5145\u6587\u5B57\uFF1B\u81EA\u7531\u6587\u5B57\u7531\u5DE5\u5177\u76F4\u63A5\u8BB0\u5F55\uFF0Cready \u7B80\u62A5\u662F\u552F\u4E00\u7EDF\u4E00\u786E\u8BA4\u70B9\uFF0C\u4E0D\u8981\u9010\u9879\u590D\u8FF0\u539F\u8BDD\u518D\u95EE\u201C\u8FD9\u6837\u7406\u89E3\u5BF9\u5417\u201D\u3002\u201C\u8FD8\u6CA1\u60F3\u597D\u201D\u53EF\u4EE5\u8DF3\u8FC7\uFF0C\u4F46\u8981\u4F5C\u4E3A\u663E\u5F0F\u5F85\u5B9A\u9879\u6216\u9ED8\u8BA4\u5047\u8BBE\u8BB0\u5F55\u3002\u9879\u76EE\u540D\u53EA\u4FDD\u7559\u6838\u5FC3\u4EA7\u54C1\u540D\uFF0C\u4E0D\u8981\u628A\u201C\u7C7B\u4F3C\u3001\u98CE\u683C\u3001\u901A\u8FC7\u3001\u529F\u80FD\u63CF\u8FF0\u201D\u7B49\u6574\u53E5\u585E\u8FDB\u9879\u76EE\u540D\u6216\u753B\u677F\u540D\uFF1BAPP/Web/\u5C0F\u7A0B\u5E8F/\u5E73\u53F0/\u7CFB\u7EDF\u7B49\u5B8C\u6574\u4EA7\u54C1\u7C7B\u578B\u4E0D\u80FD\u518D\u8FFD\u52A0\u201C\u5DE5\u5177\u201D\u3002draw2code_update \u7ED8\u5236\u65F6\uFF0C\u9875\u9762\u5FC5\u987B\u4F7F\u7528 frame\uFF0C\u7EC4\u4EF6\u5FC5\u987B\u6709\u6E05\u6670\u7684 text \u6807\u7B7E\u6216\u8BED\u4E49 customData\uFF1B\u4E0D\u8981\u628A\u6240\u6709\u63A7\u4EF6\u753B\u6210\u65E0\u6807\u7B7E\u7684\u65B9\u6846\u3002\u5FC5\u987B\u9010\u9875\u843D\u5B9E brief.pageMockData\uFF1A\u5217\u8868\u3001\u96F7\u8FBE\u3001\u804A\u5929\u3001\u56FE\u8868\u3001\u8BE6\u60C5\u548C\u72B6\u6001\u7EC4\u4EF6\u81F3\u5C11\u653E\u5165 3 \u6761\u5177\u6709\u771F\u5B9E\u8BED\u4E49\u7684\u793A\u4F8B\u5185\u5BB9\uFF0C\u5305\u542B\u7406\u89E3\u4EA7\u54C1\u6240\u9700\u7684\u5BF9\u8C61\u3001\u6570\u503C\u3001\u72B6\u6001\u3001\u65F6\u95F4\u6216\u6D88\u606F\uFF1B\u7981\u6B62\u7528\u7A7A\u767D\u65B9\u6846\u3001Lorem ipsum\u3001\u201C\u7528\u6237A\u201D\u201C\u6807\u9898\u201D\u201C\u5185\u5BB9\u201D\u7B49\u65E0\u610F\u4E49\u5360\u4F4D\u7B26\u4EE3\u66FF\u3002\u5B8C\u6574\u9875\u9762 frame \u8BBE\u7F6E customData.role=prototype-page \u548C customData.mockDataMin\uFF08\u901A\u5E38\u4E3A 3\uFF09\uFF0C\u6BCF\u6761\u627F\u8F7D mock \u6570\u636E\u7684\u53EF\u89C1 text \u8BBE\u7F6E customData.role=mock-data\uFF1Bdraw2code_update \u4F1A\u636E\u6B64\u6267\u884C\u5185\u5BB9\u53EF\u8BFB\u6027\u95E8\u7981\u3002\u4F18\u5148\u8868\u8FBE\u6309\u94AE\u3001\u8F93\u5165\u6846\u3001Tab\u3001\u5217\u8868\u3001\u5361\u7247\u3001\u5BFC\u822A\u548C\u7BAD\u5934\u7B49\u4EA7\u54C1\u8BED\u4E49\uFF0C\u4F4E\u4FDD\u771F\u53EA\u964D\u4F4E\u89C6\u89C9\u7CBE\u5EA6\uFF0C\u4E0D\u964D\u4F4E\u4FE1\u606F\u53EF\u8BFB\u6027\u3002\u5177\u4F53\u51E0\u4F55\u89C4\u5219\uFF1A\u9875\u9762\u5185\u5143\u7D20\u7528 frameId \u6307\u5411\u9875\u9762 frame\uFF0C\u7EDD\u4E0D\u80FD\u7528 containerId \u8868\u793A\u9875\u9762\u5F52\u5C5E\uFF1BcontainerId \u53EA\u7528\u4E8E\u7ED1\u5B9A rectangle/diamond/ellipse \u7684\u552F\u4E00\u6587\u5B57\u6807\u7B7E\u3002\u82E5 Agent \u8BEF\u628A text.containerId \u6307\u5411 frame\uFF0Cdraw2code_update \u4F1A\u81EA\u52A8\u4FEE\u590D\u4E3A frameId\uFF0C\u907F\u514D mock \u6570\u636E\u5199\u8FDB JSON \u5374\u5728\u753B\u5E03\u4E0A\u4E0D\u53EF\u89C1\u3002\u591A\u884C\u6216\u9884\u8BA1\u6362\u884C\u7684 text \u5FC5\u987B\u7ED9\u8DB3 height\uFF1B\u6309\u94AE\u3001\u5361\u7247\u548C\u8F93\u5165\u6846\u7684\u5916\u6846\u4E0D\u80FD\u643A\u5E26 text\uFF0C\u5FC5\u987B\u7528\u72EC\u7ACB text \u5B50\u5143\u7D20\uFF1B\u4E00\u4E2A\u5916\u6846\u53EA\u6709\u4E00\u4E2A\u6807\u7B7E\u65F6\u7ED9 text \u8BBE\u7F6E containerId\uFF0C\u5E76\u5728\u5916\u6846\u6216\u6587\u5B57\u7684 customData.role \u58F0\u660E button/primary-action/select/input/chip/card \u7B49\u7EC4\u4EF6\u8BED\u4E49\uFF0C\u7F3A\u5931 role \u4F1A\u88AB\u62D2\u7EDD\u3002draw2code_update \u4F1A\u8865\u9F50\u5916\u6846\u7684 boundElements\uFF1Bbutton/primary-action/chip/tab \u6587\u6848\u4F1A\u89C4\u8303\u4E3A center/middle\uFF0C\u5E76\u628A\u6587\u5B57\u76D2\u7F29\u81F3\u771F\u5B9E\u884C\u9AD8\u540E\u6309\u5916\u6846\u51E0\u4F55\u5782\u76F4\u5C45\u4E2D\uFF1Binput/select/dropdown/search-field \u6587\u6848\u89C4\u8303\u4E3A left/middle\u3002\u4E00\u4E2A\u5916\u6846\u6709\u591A\u4E2A\u6807\u7B7E\uFF08\u4F8B\u5982\u5E95\u90E8\u5BFC\u822A\uFF09\u65F6\u4E0D\u8981\u628A\u591A\u4E2A text \u7ED1\u5B9A\u5230\u540C\u4E00 containerId\uFF0C\u53EF\u7528\u76F8\u540C groupIds \u8868\u8FBE\u5206\u7EC4\u3002\u79FB\u52A8\u7AEF frame \u5148\u9884\u7559\u5E95\u90E8\u5B89\u5168\u533A\uFF0C\u5E95\u90E8\u5BFC\u822A\u7528 customData.role=bottom-navigation \u7684\u77E9\u5F62 shell \u52A0\u72EC\u7ACB\u6807\u7B7E\uFF0C\u6BCF\u4E2A\u6807\u7B7E\u8BBE\u7F6E customData.role=bottom-navigation-item\uFF1B\u5373\u4F7F\u8BEF\u7ED1 shell\uFF0C\u5DE5\u5177\u4E5F\u4F1A\u62C6\u4E3A\u72EC\u7ACB\u680F\u76EE\u5E76\u5C45\u4E2D\u3002\u5BFC\u822A\u8D34\u8FD1 frame \u5E95\u90E8\uFF0C\u680F\u76EE\u69FD\u4F4D\u4E0D\u5F97\u91CD\u53E0\uFF0C\u4E0D\u80FD\u53EA\u6709\u7A7A shell\uFF0C\u4E5F\u4E0D\u8981\u7528\u4E00\u884C\u666E\u901A\u6587\u5B57\u4EE3\u66FF\u3002\u7EC4\u4EF6\u4E0D\u8981\u88AB frame \u8FB9\u754C\u622A\u65AD\u3002draw2code_update \u4F1A\u5728\u5199\u76D8\u524D\u6267\u884C layout-invalid \u9884\u68C0\uFF0C\u5931\u8D25\u65F6\u6309\u9519\u8BEF\u4FE1\u606F\u4FEE\u6B63\u5E76\u91CD\u8BD5\uFF0C\u4E0D\u8981\u628A\u5931\u8D25\u7ED3\u679C\u62A5\u544A\u4E3A\u5DF2\u753B\u597D\u3002\u539F\u578B\u9636\u6BB5\u4E0D\u8BE2\u95EE\u54C1\u724C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u3001\u9634\u5F71\u30013D/2D\u3001\u6241\u5E73/\u62DF\u7269\u7B49\u89C6\u89C9\u98CE\u683C\uFF1B\u4F46\u539F\u578B\u4E5F\u4E0D\u80FD\u53EA\u6709\u9ED1\u767D\u7A7A\u6846\uFF0C\u5E94\u4F7F\u7528\u514B\u5236\u7684\u8BED\u4E49\u8272\u5E2E\u52A9\u626B\u8BFB\uFF1A\u4E3B\u8981\u64CD\u4F5C/\u9009\u4E2D\u6001\u7528 primary\uFF0C\u5B8C\u6210/\u6B63\u5411\u72B6\u6001\u7528 success\uFF0C\u63D0\u9192\u7528 warning\uFF0C\u903E\u671F/\u9519\u8BEF\u7528 danger\uFF0C\u6B21\u7EA7\u5206\u7C7B\u53EF\u7528 info\uFF0C\u5F31\u4FE1\u606F\u7528 neutral\u3002\u901A\u8FC7\u5F62\u72B6 customData.tone=primary|success|warning|danger|info|neutral \u83B7\u53D6\u6D45\u5E95\u8272\u548C\u5BF9\u5E94\u63CF\u8FB9\uFF1B\u6BCF\u9875\u53EA\u5728\u7C7B\u522B\u3001\u72B6\u6001\u3001\u4E3B\u8981\u64CD\u4F5C\u7B49\u6709\u610F\u4E49\u7684\u4F4D\u7F6E\u4F7F\u7528\uFF0C\u6B63\u6587\u548C\u5927\u9762\u79EF\u5BB9\u5668\u4FDD\u6301\u4E2D\u6027\u3002\u7528\u6237\u4E3B\u52A8\u63D0\u5230\u7684\u54C1\u724C\u6216\u89C6\u89C9\u98CE\u683C\u53EA\u4F5C\u4E3A styleNote \u5EF6\u8FDF\u7ED9 draw2code_generate\u3002\u4E13\u4E1A\u7528\u6237\u56DE\u7B54\u5177\u4F53\u65F6\u51CF\u5C11\u8FFD\u95EE\uFF0C\u975E\u4E13\u4E1A\u7528\u6237\u6A21\u7CCA\u65F6\u7528\u4F8B\u5B50\u548C\u9009\u9879\u5F15\u5BFC\u3002",
   "\u8981\u70B9\uFF1A\u753B\u677F\u6587\u4EF6\u662F\u5DE5\u4F5C\u533A\u91CC\u7684 draw2code/<name>.excalidraw.json\uFF08\u7528\u6237\u53EF\u5728\u753B\u677F\u5DE5\u5177\u680F\u5207\u6362/\u65B0\u5EFA\u591A\u5757\u753B\u677F\uFF0C\u5982 prototype / \u987E\u5BA2\u7AEF / \u5E97\u5BB6\u7AEF\uFF09\uFF1B\u753B\u677F\u4F1A\u628A\u5F53\u524D\u9009\u4E2D\u7684\u540D\u5B57\u540C\u6B65\u5230\u5DE5\u4F5C\u533A\uFF0CAgent \u5DE5\u5177\u7701\u7565 name \u65F6\u5FC5\u987B\u66F4\u65B0\u7528\u6237\u5F53\u524D\u6B63\u5728\u770B\u7684\u753B\u677F\uFF0C\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u4F20 name\u3002draw2code_list \u4F1A\u8FD4\u56DE\u5F53\u524D\u753B\u677F\u3002\u5DE5\u5177 root \u53C2\u6570\u586B\u4F1A\u8BDD\u5DE5\u4F5C\u76EE\u5F55\u3002draw2code_update \u7528 ops \u6279\u91CF upsert/delete\uFF08\u6309 id \u5E42\u7B49\uFF09\uFF0C\u5143\u7D20\u5750\u6807\u4E3A\u753B\u5E03\u50CF\u7D20\uFF08y \u5411\u4E0B\uFF09\uFF0Ctext \u5143\u7D20\u9700\u7ED9 text \u5B57\u6BB5\uFF0C\u6A21\u5757\u5206\u7EC4\u7528 frame\uFF0C\u6D41\u7A0B\u7528 arrow\uFF08points \u76F8\u5BF9\u5750\u6807 [[0,0],[dx,dy]]\uFF09\u3002\u4E25\u7981\u7528 Bash\u3001\u811A\u672C\u6216\u76F4\u63A5\u6587\u4EF6\u5199\u5165\u4FEE\u6539 .excalidraw.json\uFF0C\u5FC5\u987B\u8D70 draw2code_update\uFF0C\u5426\u5219\u65E0\u6CD5\u8FDB\u884C\u51B2\u7A81\u548C\u5199\u5165\u9A8C\u8BC1\u3002\u753B\u5B8C\u539F\u578B\u4E3B\u52A8\u63D0\u793A\u7528\u6237\uFF1A\u53EF\u4EE5\u5728\u53F3\u4FA7\u753B\u677F\u4E0A\u76F4\u63A5\u62D6\u6539\u3001\u5220\u6539\u6216\u8865\u5145\u6587\u6848\u3002",
-  "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002frames \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684 frame\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1B\u5DE5\u5177\u59CB\u7EC8\u8FD4\u56DE\u753B\u677F\u5168\u90E8 frame\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u9884\u89C8\uFF0C\u68C0\u67E5\u6240\u9009\u9875\u9762\u3001\u5207\u6362\u3001\u6838\u5FC3\u6309\u94AE\u3001mock \u6570\u636E\u548C\u6210\u529F\u6D41\u7A0B\uFF0C\u81EA\u52A8\u4FEE\u590D\u5B9E\u73B0\u95EE\u9898\u5E76\u91CD\u9A8C\uFF1B\u5168\u90E8\u901A\u8FC7\u540E\u5982\u5B9E\u8C03\u7528 action=complete\uFF0C\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
+  "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002frames \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684 frame\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1B\u5DE5\u5177\u59CB\u7EC8\u8FD4\u56DE\u753B\u677F\u5168\u90E8 frame\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\uFF1B\u5DE5\u5177\u4F1A\u628A\u8FD9\u4E00\u9009\u62E9\u5C55\u5F00\u4E3A\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u4E0D\u8981\u518D\u5411\u7528\u6237\u9010\u9879\u786E\u8BA4\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u753B\u677F\u662F\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\u7684\u4E8B\u5B9E\u6765\u6E90\uFF0C\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u6700\u7EC8\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u65B0\u6392\u7248\uFF0C\u7981\u6B62\u7167\u642C Excalidraw \u7EDD\u5BF9\u5750\u6807\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u76EE\u6807\u89C6\u53E3\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u6A2A\u5411\u6EA2\u51FA\u3001\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u548C\u5E95\u90E8\u5BFC\u822A\uFF0C\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u5B9E\u73B0\u95EE\u9898\u81EA\u52A8\u4FEE\u590D\u5E76\u91CD\u9A8C\u3002\u5168\u90E8\u901A\u8FC7\u540E\u63D0\u4EA4\u5305\u542B previewUrl\u3001viewports\u3001\u9010\u9875 screenshots\u3001consoleErrors\u3001domChecks\u3001layoutChecks \u548C interactionChecks \u7684 verificationEvidence\uFF0C\u518D\u8C03\u7528 action=complete\uFF1B\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4E0D\u80FD\u66FF\u4EE3\u8BC1\u636E\u3002\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
+  "generate \u8BC1\u636E\u4E0E\u9875\u9762\u4FDD\u62A4\u8865\u5145\uFF1A\u6BCF\u4E2A\u9875\u9762\u5FC5\u987B\u7528 <!-- d2c-page:<\u9875\u9762\u539F\u540D>:start/end --> \u6CE8\u91CA\u5305\u4F4F\uFF0C\u91CD\u65B0\u751F\u6210\u65F6\u5DE5\u5177\u4F1A\u76F4\u63A5\u6BD4\u8F83\u672A\u9009\u9875\u9762\u5757\u7684\u54C8\u5E0C\u3002verificationEvidence \u5FC5\u987B\u5E26\u672C\u6B21\u9A8C\u6536\u552F\u4E00 captureId \u548C\u5F53\u524D\u751F\u6210\u5165\u53E3 outputSha256\uFF1BpreviewUrl \u8FD4\u56DE\u5185\u5BB9\u7684\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\u3002screenshots \u548C domSnapshots \u90FD\u5FC5\u987B\u4FDD\u5B58\u4E3A workspace \u5185\u771F\u5B9E\u6587\u4EF6\uFF0C\u643A\u5E26\u540C\u4E00\u4E2A captureId \u4E0E\u5404\u81EA sha256\uFF1B\u622A\u56FE\u5FC5\u987B\u662F\u4E0E viewport \u5C3A\u5BF8\u4E00\u81F4\u7684\u53EF\u89E3\u538B PNG\uFF0CDOM \u5FEB\u7167\u5FC5\u987B\u5305\u542B\u539F\u578B\u4E2D\u7684\u5173\u952E\u6587\u6848\u548C mock \u6570\u636E\u3002consoleErrors \u4E0E consoleWarnings \u90FD\u5FC5\u987B\u662F\u7A7A\u6570\u7EC4\uFF1B\u591A\u9875\u9762\u751F\u6210\u8FD8\u5FC5\u987B\u63D0\u4EA4 page-switching \u68C0\u67E5\u3002\u65E7\u7684 previewOpened\u3001selectedPagesVisible\u3001coreFlowPassed\u3001mockDataVisible \u548C unselectedPagesPreserved \u53EA\u4FDD\u7559\u53C2\u6570\u517C\u5BB9\uFF0C\u4E0D\u518D\u80FD\u5355\u72EC\u5B8C\u6210\u9A8C\u6536\u3002",
   "\u753B\u7F16\u8F91\u534F\u4F5C\u89C4\u5219\uFF1A\u6BCF\u6B21 draw2code_update \u90FD\u5E94\u5148\u8F93\u51FA\u4E00\u6BB5\u201C\u66F4\u65B0\u6458\u8981\u201D\uFF08\u4E0D\u662F\u6A21\u677F\u5316\u63D0\u95EE\uFF09\uFF1A1) \u4E0A\u4E00\u8F6E\u7528\u6237\u624B\u5DE5\u6539\u52A8\uFF1B2) \u8FD9\u4E00\u8F6E\u8BA1\u5212\u6539\u52A8\uFF1B3) \u51B2\u7A81\u68C0\u67E5\uFF08\u662F\u5426\u89E6\u53CA\u624B\u5DE5\u6539\u52A8\u6216\u66FF\u6362/\u6E05\u7A7A\uFF09\u3002\u53EA\u6709\u201C\u51B2\u7A81\u201D\u65F6\u624D\u8981\u6C42\u786E\u8BA4\uFF0C\u8FD4\u56DE pending \u540E\u8BF7\u53EA\u8BE2\u95EE\u76F8\u5173\u53D8\u66F4\u662F\u5426\u8986\u76D6\uFF1B\u6CA1\u51B2\u7A81\u5219\u76F4\u63A5\u6267\u884C\u5E76\u6C47\u62A5\u7ED3\u679C\uFF08\u4E0D\u6253\u65AD\u7528\u6237\uFF09\u3002\u5DE5\u5177\u8FD4\u56DE\u524D\u4F1A\u91CD\u65B0\u8BFB\u53D6\u540C\u4E00\u753B\u677F\u9A8C\u8BC1\u5199\u5165\uFF1B\u53EA\u6709\u8FD4\u56DE verified=true \u4E14 targetBoard \u4E0E activeBoard \u76F8\u540C\uFF0C\u624D\u80FD\u8BF4\u201C\u7528\u6237\u5F53\u524D\u753B\u677F\u5DF2\u753B\u597D\u201D\uFF1B\u82E5 verified=true \u4F46\u4E24\u8005\u4E0D\u540C\uFF0C\u5FC5\u987B\u660E\u786E\u8BF4\u201C\u76EE\u6807\u753B\u677F\u5DF2\u5199\u5165\u3001\u5F53\u524D\u754C\u9762\u4E0D\u53EF\u89C1\u201D\uFF0C\u4E0D\u80FD\u58F0\u79F0\u7528\u6237\u5DF2\u770B\u5230\u3002\u82E5\u68C0\u6D4B\u5230\u624B\u5DE5\u6539\u52A8\u4E0E\u672C\u8F6E upsert/delete \u540C id\u3001\u6216\u6267\u884C clear/replace \u4E14\u9762\u677F\u975E\u7A7A\uFF0C\u5C31\u5E94\u8FDB\u5165\u786E\u8BA4\u6D41\u7A0B\uFF1B\u786E\u8BA4\u540E\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002",
   "\u9650\u5236\uFF1A\u5355\u753B\u677F \u22642000 \u5143\u7D20\u3001\u2264512KB\uFF1B\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u5148 draw2code_read \u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5E26\u81EA\u52A8\u7248\u672C\u5B58\u6863\uFF1A\u4F60\u7684\u6BCF\u6B21 draw2code_update \u90FD\u4F1A\u5148\u5FEB\u7167\u65E7\u72B6\u6001\uFF08\u7528\u6237\u53EF\u5728\u300C\u5386\u53F2\u300D\u83DC\u5355\u56DE\u6EDA\u4EFB\u610F\u7248\u672C\uFF09\uFF0C\u56E0\u6B64\u5927\u6539\u4E0D\u5FC5\u72B9\u8C6B\u3002\u7528\u6237\u63D0\u5230\u300C\u753B\u677F / \u539F\u578B / \u753B\u4E00\u4E0B / draw2code / \u753B\u7801\u300D\u65F6\u5373\u6307\u672C\u63D2\u4EF6\uFF0C\u8BF7\u636E\u6B64\u534F\u4F5C\u3002"
 ].join("\n\n");
