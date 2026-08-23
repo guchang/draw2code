@@ -11,12 +11,12 @@
 ## 工具顺序
 
 - 新产品先走 `draw2code_create` 的可恢复状态机。`start` 返回 `discovery` 后，Agent 根据已明确事实、历史回答和 `recommendedDimensions` 选择当前最高影响的未知项；第一题必须优先采用推荐维度，不能先问模块、页面或通用信息架构。普通待办优先深挖触发场景或现有替代，雷达社交优先深挖信任与独特连接机制，穿搭产品优先深挖推荐依据或使用时刻。信息不足时调用 `propose_question`，每次只展示一个带 insight、取舍说明和推荐项的结构化问题；信息足够或用户要求停止时调用 `synthesize`。禁止固定询问平台、用户、目标、流程、模块和页面，最多提问 10 次。
-- `synthesize` 提交一份结构化 `PrototypeBrief`；工具校验后确定性生成完整 `briefMarkdown`、`pageBlueprints` 和 `pageMockData`。`ready` 时必须完整展示该 Markdown，不能自行缩写，只进行一次“确认并绘制 / 调整产品方向 / 调整首版范围”确认。
+- `synthesize` 提交一份结构化 `PrototypeBrief`；工具校验后确定性生成完整 `briefMarkdown`、`pageBlueprints` 和 `pageMockData`。`ready` 时必须完整展示该 Markdown，不能自行缩写；随后用最后一张页面范围确认卡明确列出将绘制的页面，只进行一次“确认这些页面并绘制 / 调整页面范围 / 调整产品方向”确认。
 - 每道原生问题卡片都保留“直接整理项目简报”；选择后按 `synthesize-now` 回答，工具明确返回 `nextAction=synthesize`。用户跳过当前问题时调用 `skip` 并把该项保留为待验证假设；即使已有待答问题也可调用 `synthesize`。`ready` 后选择调整时直接调用 `propose_question` 追问受影响的一项，旧简报失效，回答后必须重新生成完整简报。
 - Create 返回 `confirmed` 后，按 `boardName` 和同一份 `brief` 调用 `draw2code_update`。首轮有 3 个及以上页面时先画一个代表页并在可见画板检查，再带 `phase=representative` 的 `visualReview` 添加其余页面；复核必须携带最近一次 update 返回的 `rev` 与 `revealRequestId`，不能重放旧结果。全部页面完成后用空 ops 提交覆盖所有 page id 的 `phase=final` 复核。已有画板修改必须先 `draw2code_read` 再 `draw2code_update`。
 - 省略 `board` / DSH 的 `name` 始终表示用户当前可见 active board。只有用户明确点名另一块画板时才显式传入。
 - Update 返回 `requiresConfirmation=true` 时停止写入并只询问冲突覆盖；得到确认后才以 `force=true` 重试。不得直接写 `.excalidraw.json` 绕过 CAS、布局门禁和回读验证。
-- Generate 必须沿用工具返回的 session、revision、question 与 confirmation；只有 `status=completed` 且验证证据通过后才能报告生成完成。
+- Generate 开始前先用普通对话询问用户是否有参考风格图片，不使用宿主选择题；用户已附图时不重复问。有图则查看后把简洁摘要或路径传为 `referenceStyle`，没有则传 `none`。随后必须沿用工具返回的 session、revision、question 与 confirmation；第一张结构化选择题仍然是页面多选，只有 `status=completed` 且验证证据通过后才能报告生成完成。
 
 ## 展示与共同编辑
 

@@ -81,6 +81,7 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   assert.ok(generate.inputSchema.properties.pages)
   assert.ok(generate.inputSchema.properties.frames)
   assert.ok(generate.inputSchema.properties.styleNote)
+  assert.ok(generate.inputSchema.properties.referenceStyle)
   assert.ok(generate.inputSchema.properties.board)
   assert.equal(generate.inputSchema.properties.name, undefined)
   assert.deepEqual(generate.inputSchema.properties.action.enum, [

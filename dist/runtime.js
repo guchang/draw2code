@@ -2455,23 +2455,38 @@ function displayedQuestionText(question) {
 
 \u95EE\u9898\uFF1A${question.text}`;
 }
-function createConfirmation() {
+function readyPageNames(brief) {
+  if (typeof brief !== "object" || brief === null || Array.isArray(brief)) return [];
+  const pages = brief.pages;
+  if (!Array.isArray(pages)) return [];
+  return pages.flatMap((page) => {
+    if (typeof page !== "object" || page === null || Array.isArray(page)) return [];
+    const name = page.name;
+    return typeof name === "string" && name.trim() !== "" ? [name.trim()] : [];
+  });
+}
+function createConfirmation(brief) {
+  const pageNames = readyPageNames(brief);
+  const pageSummary = pageNames.length === 0 ? "\u9879\u76EE\u7B80\u62A5\u4E2D\u7684\u9875\u9762\u8303\u56F4" : `${pageNames.length} \u4E2A\u9875\u9762\uFF1A${pageNames.join("\u3001")}`;
+  const question = `\u8BA1\u5212\u7ED8\u5236${pageSummary}\u3002\u8FD9\u4E9B\u5C31\u662F\u9996\u7248\u539F\u578B\u9700\u8981\u751F\u6210\u7684\u9875\u9762\u5417\uFF1F`;
   return {
     id: "create-brief-confirm",
+    pageNames,
+    question,
     options: [
-      { id: "confirm", label: "\u786E\u8BA4\u5E76\u7ED8\u5236", description: "\u4F7F\u7528\u521A\u521A\u5C55\u793A\u7684\u540C\u4E00\u4EFD\u9879\u76EE\u7B80\u62A5\u521B\u5EFA\u72EC\u7ACB\u753B\u677F\u3002" },
-      { id: "adjust-direction", label: "\u8C03\u6574\u4EA7\u54C1\u65B9\u5411", description: "\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4EA7\u54C1\u51B3\u7B56\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" },
-      { id: "adjust-scope", label: "\u8C03\u6574\u9996\u7248\u8303\u56F4", description: "\u53EA\u8C03\u6574\u9996\u7248\u5305\u542B\u4E0E\u6392\u9664\u8303\u56F4\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" }
+      { id: "confirm", label: "\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236", description: "\u4F7F\u7528\u521A\u521A\u5C55\u793A\u7684\u540C\u4E00\u4EFD\u9879\u76EE\u7B80\u62A5\u548C\u9875\u9762\u8303\u56F4\u521B\u5EFA\u72EC\u7ACB\u753B\u677F\u3002" },
+      { id: "adjust-pages", label: "\u8C03\u6574\u9875\u9762\u8303\u56F4", description: "\u589E\u5220\u3001\u5408\u5E76\u6216\u62C6\u5206\u9875\u9762\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u9879\u76EE\u7B80\u62A5\u3002" },
+      { id: "adjust-direction", label: "\u8C03\u6574\u4EA7\u54C1\u65B9\u5411", description: "\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4EA7\u54C1\u51B3\u7B56\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" }
     ],
     askUserQuestionArgs: {
       questions: [{
         id: "create-brief-confirm",
-        question: "\u8FD9\u4EFD\u9879\u76EE\u7B80\u62A5\u662F\u5426\u51C6\u786E\uFF0C\u53EF\u4EE5\u5F00\u59CB\u7ED8\u5236\u539F\u578B\u5417\uFF1F",
-        header: "\u7B80\u62A5\u786E\u8BA4",
+        question,
+        header: "\u9875\u9762\u786E\u8BA4",
         options: [
-          { label: "\u786E\u8BA4\u5E76\u7ED8\u5236", description: "\u4F7F\u7528\u521A\u521A\u5C55\u793A\u7684\u540C\u4E00\u4EFD\u9879\u76EE\u7B80\u62A5\u521B\u5EFA\u72EC\u7ACB\u753B\u677F\u3002" },
-          { label: "\u8C03\u6574\u4EA7\u54C1\u65B9\u5411", description: "\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4EA7\u54C1\u51B3\u7B56\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" },
-          { label: "\u8C03\u6574\u9996\u7248\u8303\u56F4", description: "\u53EA\u8C03\u6574\u9996\u7248\u5305\u542B\u4E0E\u6392\u9664\u8303\u56F4\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" }
+          { label: "\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236", description: "\u4F7F\u7528\u521A\u521A\u5C55\u793A\u7684\u540C\u4E00\u4EFD\u9879\u76EE\u7B80\u62A5\u548C\u9875\u9762\u8303\u56F4\u521B\u5EFA\u72EC\u7ACB\u753B\u677F\u3002" },
+          { label: "\u8C03\u6574\u9875\u9762\u8303\u56F4", description: "\u589E\u5220\u3001\u5408\u5E76\u6216\u62C6\u5206\u9875\u9762\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u9879\u76EE\u7B80\u62A5\u3002" },
+          { label: "\u8C03\u6574\u4EA7\u54C1\u65B9\u5411", description: "\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4EA7\u54C1\u51B3\u7B56\uFF0C\u518D\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002" }
         ],
         multi_select: false
       }]
@@ -2543,7 +2558,7 @@ function responseFor(projects, draft, extras = {}) {
     ...draft.brief === null ? {} : { brief: draft.brief, assumptions: draft.brief.assumptions ?? [] },
     ...draft.briefMarkdown === void 0 || draft.briefMarkdown === null ? {} : { briefMarkdown: draft.briefMarkdown },
     ...draft.flowVersion === CREATE_FLOW_VERSION && draft.status === "draft" ? { briefContract: prototypeBriefContract() } : {},
-    ...status === "ready" ? { confirmation: createConfirmation() } : {},
+    ...status === "ready" ? { confirmation: createConfirmation(draft.brief) } : {},
     ...draft.boardName === null ? {} : { boardName: draft.boardName },
     ...extras
   };
@@ -2682,7 +2697,7 @@ function migrateLegacyDraft(draft) {
 function draw2codeCreateTool(projects, scenes) {
   return defineTool({
     name: "draw2code_create",
-    description: "Create a new \u753B\u7801 project through adaptive product discovery and one executable prototype brief. This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. Call action=start as soon as a new-project intent is clear; pass the user's idea faithfully, infer a concise semantic projectName from the entire idea, and never call draw2code_update first. Explicit facts returned in discovery must not be asked again. A discovery result means the Agent must choose the single highest-impact unresolved product decision. If information is insufficient, call action=propose_question with a product-specific insight, one decision question, 2\u20134 tradeoff-rich options, a recommendation, decisionImpact and dependencies. To make the native card lossless, question.text itself must be \u201C\u5224\u65AD\uFF1A{insight}\\n\\n\u95EE\u9898\uFF1A{self-contained insight + decision question}\u201D; the text after \u201C\u95EE\u9898\uFF1A\u201D must repeat the product judgment so it remains meaningful even if an Agent extracts only that part. question.options must already include synthesize-now/\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5, unknown/\u8FD8\u6CA1\u60F3\u597D and other/\u5176\u4ED6 in addition to the product directions. question.dimension must use one returned openDimensions ID exactly: trigger-context, existing-alternative, core-outcome, unique-mechanism, core-loop, critical-risk, scope-proof, target-user, target-platform, or product-architecture. Never invent shorter aliases such as mechanism or risk. Never use the old fixed platform/user/goal/flow/modules/pages sequence, and never ask modules and pages as separate checklist questions. After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D, \u201C\u8FD8\u6CA1\u60F3\u597D\u201D and \u201C\u5176\u4ED6\u201D; never truncate or silently replace options. Map the selected label back to its option id and call action=answer. The synthesize-now choice returns discovery.nextAction=synthesize. When the core scenario, outcome, unique mechanism, first-version flow and scope are clear\u2014or the user asks to stop\u2014call action=synthesize with stopReason and a complete PrototypeBrief. Discovery may stop early and must stop after ten questions. The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim before the single \u201C\u786E\u8BA4\u5E76\u7ED8\u5236 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411 / \u8C03\u6574\u9996\u7248\u8303\u56F4\u201D confirmation; do not summarize it. Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4\u201312 Chinese characters, and becomes the board name directly; never append \u201C\u539F\u578B\u201D or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. Options are structured for native choice cards when available; otherwise render them as numbered choices. \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D ends discovery without requiring a hidden chat input; \u201COther\u201D requires text and is stored directly; silence or \u201C\u8FD8\u6CA1\u60F3\u597D\u201D is an explicit pending decision, not pause or cancellation.",
+    description: "Create a new \u753B\u7801 project through adaptive product discovery and one executable prototype brief. This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. Call action=start as soon as a new-project intent is clear; pass the user's idea faithfully, infer a concise semantic projectName from the entire idea, and never call draw2code_update first. Explicit facts returned in discovery must not be asked again. A discovery result means the Agent must choose the single highest-impact unresolved product decision. If information is insufficient, call action=propose_question with a product-specific insight, one decision question, 2\u20134 tradeoff-rich options, a recommendation, decisionImpact and dependencies. To make the native card lossless, question.text itself must be \u201C\u5224\u65AD\uFF1A{insight}\\n\\n\u95EE\u9898\uFF1A{self-contained insight + decision question}\u201D; the text after \u201C\u95EE\u9898\uFF1A\u201D must repeat the product judgment so it remains meaningful even if an Agent extracts only that part. question.options must already include synthesize-now/\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5, unknown/\u8FD8\u6CA1\u60F3\u597D and other/\u5176\u4ED6 in addition to the product directions. question.dimension must use one returned openDimensions ID exactly: trigger-context, existing-alternative, core-outcome, unique-mechanism, core-loop, critical-risk, scope-proof, target-user, target-platform, or product-architecture. Never invent shorter aliases such as mechanism or risk. Never use the old fixed platform/user/goal/flow/modules/pages sequence, and never ask modules and pages as separate checklist questions. After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D, \u201C\u8FD8\u6CA1\u60F3\u597D\u201D and \u201C\u5176\u4ED6\u201D; never truncate or silently replace options. Map the selected label back to its option id and call action=answer. The synthesize-now choice returns discovery.nextAction=synthesize. When the core scenario, outcome, unique mechanism, first-version flow and scope are clear\u2014or the user asks to stop\u2014call action=synthesize with stopReason and a complete PrototypeBrief. Discovery may stop early and must stop after ten questions. The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim, then show one explicit page-range confirmation card listing every page: \u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D; do not summarize it. Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4\u201312 Chinese characters, and becomes the board name directly; never append \u201C\u539F\u578B\u201D or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. Options are structured for native choice cards when available; otherwise render them as numbered choices. \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D ends discovery without requiring a hidden chat input; \u201COther\u201D requires text and is stored directly; silence or \u201C\u8FD8\u6CA1\u60F3\u597D\u201D is an explicit pending decision, not pause or cancellation.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       action: {
@@ -2762,7 +2777,7 @@ ${options}${recommendation}${impact}${question.allowOther ? "\n\uFF08\u53EF\u900
           return text(`${continuation(value)} status=ready
 ${markdown}
 
-\u8BF7\u5B8C\u6574\u5C55\u793A\u4EE5\u4E0A\u9879\u76EE\u7B80\u62A5\uFF0C\u4E0D\u8981\u81EA\u884C\u7F29\u5199\u6216\u91CD\u65B0\u603B\u7ED3\u3002\u968F\u540E\u4F7F\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u590D\u5236 confirmation.askUserQuestionArgs\uFF0C\u5176\u4E2D\u4EC5\u5305\u542B\u201C\u786E\u8BA4\u5E76\u7ED8\u5236 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411 / \u8C03\u6574\u9996\u7248\u8303\u56F4\u201D\uFF1B\u786E\u8BA4\u540E\u8C03\u7528 action=confirm\u3002\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 action=propose_question \u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u4F1A\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0 synthesize \u5B8C\u6574\u7B80\u62A5\u3002`);
+\u8BF7\u5B8C\u6574\u5C55\u793A\u4EE5\u4E0A\u9879\u76EE\u7B80\u62A5\uFF0C\u4E0D\u8981\u81EA\u884C\u7F29\u5199\u6216\u91CD\u65B0\u603B\u7ED3\u3002\u968F\u540E\u4F7F\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u590D\u5236 confirmation.askUserQuestionArgs\uFF1B\u8FD9\u5F20\u5361\u4F1A\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u5E76\u4E14\u4EC5\u5305\u542B\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u3002\u786E\u8BA4\u540E\u8C03\u7528 action=confirm\u3002\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 action=propose_question\uFF0C\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF1B\u65E7\u7B80\u62A5\u4F1A\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0 synthesize \u5B8C\u6574\u7B80\u62A5\u3002`);
         }
         if (value.status === "confirmed") return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ""} activeBoard=${value.activeBoard ?? ""} nextAction=${value.nextAction ?? "draw2code_update"}
 \u9879\u76EE\u300C${value.projectName ?? ""}\u300D\u5DF2\u786E\u8BA4\uFF0C\u72EC\u7ACB\u753B\u677F\u5DF2\u521B\u5EFA\u3002\u4E0B\u4E00\u6B65\u5FC5\u987B\u540C\u65F6\u6309 brief.pageBlueprints \u548C brief.pageMockData \u8C03\u7528 draw2code_update\uFF0C\u5E76\u660E\u786E\u4F20\u5165\u4E0A\u9762\u7684 boardName\uFF1B\u9996\u8F6E\u6709 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\u5148\u753B\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u67E5\u770B\u771F\u5B9E\u753B\u677F\uFF0C\u518D\u63D0\u4EA4 representative visualReview \u540E\u6DFB\u52A0\u5176\u4F59\u9875\u9762\uFF0C\u6700\u7EC8\u53EA\u6709 completionReady=true \u624D\u80FD\u62A5\u544A\u5B8C\u6210\u3002\u6BCF\u4E2A\u91CD\u590D\u5185\u5BB9\u7EC4\u4EF6\u81F3\u5C11\u63D0\u4F9B 3 \u6761\u53EF\u89C1 mock \u6570\u636E\uFF0C\u4E0D\u8981\u56DE\u5199\u65E7\u753B\u677F\u3002`);
@@ -4596,7 +4611,7 @@ function visualBriefFor(direction, device, frameNames) {
     focalPoint: "\u8BA9\u7528\u6237\u9996\u5148\u770B\u5230\u300C" + focalPage + "\u300D\u7684\u6838\u5FC3\u4EFB\u52A1\u6216\u5173\u952E\u72B6\u6001\uFF0C\u800C\u4E0D\u662F\u540C\u65F6\u5F3A\u8C03\u6240\u6709\u7EC4\u4EF6"
   };
 }
-function buildGenerateInstructions(board, frameNames, existingPages, visualBrief) {
+function buildGenerateInstructions(board, frameNames, existingPages, visualBrief, referenceStyle) {
   const lines = [
     "\u6309\u4EE5\u4E0B\u8981\u6C42\u751F\u6210\u524D\u7AEF\u9875\u9762\uFF1A",
     "1. \u753B\u677F\u539F\u578B\u662F\u4EA7\u54C1\u4E8B\u5B9E\u6765\u6E90\uFF1A\u5FC5\u987B\u4FDD\u7559" + (frameNames.length > 0 ? "\u300C" + frameNames.join("\u300D\u300C") + "\u300D\u8FD9\u4E9B\u8303\u56F4\u7684" : "\u6574\u5757\u753B\u677F\u7684") + "\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\uFF1B\u7981\u6B62\u6DFB\u52A0\u539F\u578B\u4E2D\u4E0D\u5B58\u5728\u7684\u6A21\u5757\u3001\u9875\u9762\u3001\u89D2\u8272\u3001\u6D41\u7A0B\u6216\u91CD\u5927\u4E1A\u52A1\u89C4\u5219\u3002",
@@ -4606,13 +4621,18 @@ function buildGenerateInstructions(board, frameNames, existingPages, visualBrief
     existingPages.length > 0 ? "5. draw2code-pages/" + board + "/ \u5DF2\u6709\u9875\u9762\uFF08" + existingPages.join("\u3001") + "\uFF09\uFF1A\u5148\u8BFB\u53D6\u73B0\u6709 index.html\uFF0C\u6CBF\u7528\u5176\u6280\u672F\u5B9E\u73B0\uFF0C\u53EA\u66F4\u65B0\u672C\u6B21\u8303\u56F4\u5185\u7684\u9875\u9762\uFF0C\u4FDD\u6301\u5176\u4F59\u9875\u9762\u4E0D\u53D8\u3002" : "5. draw2code-pages/" + board + "/ \u76EE\u524D\u4E3A\u7A7A\uFF1A\u4ECE\u96F6\u751F\u6210\uFF0C\u4F46\u4E0D\u80FD\u9000\u5316\u6210\u65E0\u5C42\u7EA7\u7684\u901A\u7528\u6A21\u677F\u3002",
     "6. \u4F7F\u7528\u4EE5\u4E0B\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u800C\u4E0D\u662F\u53EA\u628A\u201C" + visualBrief.direction + "\u201D\u5F53\u4F5C\u7A7A\u6CDB\u5F62\u5BB9\u8BCD\uFF1A\n   - \u6C14\u8D28\uFF1A" + visualBrief.tone + "\n   - \u80CC\u666F\uFF1A" + visualBrief.background + "\n   - \u4E3B\u64CD\u4F5C\uFF1A" + visualBrief.primaryAction + "\n   - \u8BED\u4E49\u8272\uFF1A" + visualBrief.semanticColors + "\n   - \u5BC6\u5EA6\uFF1A" + visualBrief.density + "\n   - \u5B57\u4F53\u5C42\u7EA7\uFF1A" + visualBrief.typeHierarchy + "\n   - \u5E03\u5C40\u7B56\u7565\uFF1A" + visualBrief.layoutStrategy + "\n   - \u52A8\u6548\uFF1A" + visualBrief.motion + "\n   - \u89C6\u89C9\u7126\u70B9\uFF1A" + visualBrief.focalPoint,
     "7. \u9075\u5FAA\u4E13\u4E1A\u524D\u7AEF\u8BBE\u8BA1\u89C4\u8303\uFF1A\u5148\u5EFA\u7ACB CSS \u8BBE\u8BA1\u53D8\u91CF\uFF1B\u6BCF\u9875\u53EA\u7A81\u51FA\u4E00\u4E2A\u4E3B\u8981\u4EFB\u52A1\uFF1B\u907F\u514D\u65E0\u76EE\u7684\u6E10\u53D8\u3001\u8FC7\u5EA6\u5706\u89D2\u3001\u5E73\u5747\u7528\u529B\u548C\u5343\u7BC7\u4E00\u5F8B\u7684 AI \u6A21\u677F\u611F\uFF1B\u771F\u5B9E mock \u6570\u636E\u5FC5\u987B\u53C2\u4E0E\u6392\u7248\u3002",
-    "8. \u82E5\u672C\u6B21\u7528\u6237\u6D88\u606F\u9644\u5E26\u4E86\u754C\u9762\u53C2\u8003\u56FE\uFF1A\u53C2\u8003\u5176\u914D\u8272\u3001\u5B57\u4F53\u611F\u89C9\u4E0E\u5E03\u5C40\u5BC6\u5EA6\uFF0C\u4F46\u9875\u9762\u5185\u5BB9\u4ECD\u4EE5\u753B\u677F\u539F\u578B\u4E3A\u51C6\u3002",
+    referenceStyle === null ? "8. \u7528\u6237\u672C\u6B21\u672A\u63D0\u4F9B\u53C2\u8003\u98CE\u683C\u56FE\uFF1B\u4EE5\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\u4E3A\u51C6\uFF0C\u4E0D\u5F97\u9000\u5316\u4E3A\u65E0\u5DEE\u522B\u7684\u901A\u7528\u6A21\u677F\u3002" : "8. \u7528\u6237\u63D0\u4F9B\u7684\u53C2\u8003\u98CE\u683C\u4FE1\u606F\u662F\uFF1A" + referenceStyle + "\u3002\u63D0\u53D6\u5176\u914D\u8272\u5173\u7CFB\u3001\u5B57\u4F53\u611F\u89C9\u3001\u7559\u767D\u3001\u5E03\u5C40\u5BC6\u5EA6\u548C\u7EC4\u4EF6\u6C14\u8D28\uFF0C\u4F46\u9875\u9762\u5185\u5BB9\u4E0E\u6D41\u7A0B\u4ECD\u4EE5\u753B\u677F\u539F\u578B\u4E3A\u51C6\uFF0C\u7981\u6B62\u50CF\u7D20\u7167\u6284\u3002",
     "9. \u53EF\u4EE5\u8865\u5145\u5FC5\u586B\u6821\u9A8C\u3001\u52A0\u8F7D\u3001\u6210\u529F\u63D0\u793A\u548C\u9009\u4E2D\u6001\u7B49\u901A\u7528\u4EA4\u4E92\u53CD\u9988\uFF0C\u4F46\u4E0D\u5F97\u65B0\u589E\u4EA7\u54C1\u4E8B\u5B9E\u3002",
     "10. \u5199\u5165\u540E\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\u5E76\u5B9E\u9645\u9A8C\u8BC1\uFF1A\u6240\u9009\u9875\u9762\u548C mock \u6570\u636E\u53EF\u89C1\u3001\u9875\u9762\u5207\u6362\u4E0E\u6838\u5FC3\u6309\u94AE\u53EF\u7528\u3001\u6838\u5FC3\u6D41\u7A0B\u8D70\u901A\u3001\u63A7\u5236\u53F0\u65E0 error/warning\u3001\u65E0\u6A2A\u5411\u6EA2\u51FA\u6216\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u3001\u5E95\u90E8\u5BFC\u822A\u5B8C\u6574\u3002\u53D1\u73B0\u5B9E\u73B0\u95EE\u9898\u8981\u76F4\u63A5\u4FEE\u590D\u5E76\u91CD\u65B0\u9A8C\u8BC1\u3002",
     "11. \u8C03\u7528 action=complete \u65F6\u5FC5\u987B\u63D0\u4EA4 verificationEvidence\uFF1A\u672C\u6B21\u6D4F\u89C8\u5668\u9A8C\u6536\u552F\u4E00 captureId\u3001\u751F\u6210\u5165\u53E3 outputSha256\u3001previewUrl\u3001viewports\uFF1B\u8986\u76D6\u6BCF\u4E2A\u6240\u9009\u9875\u9762\u7684 screenshots[{page,viewport,source,sha256,captureId}]\uFF1B\u6D4F\u89C8\u5668\u5BFC\u51FA\u7684 domSnapshots[{page,source,sha256,captureId}]\uFF1BconsoleErrors\u3001consoleWarnings\u3001domChecks\u3001layoutChecks \u548C interactionChecks\u3002previewUrl \u5185\u5BB9\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\uFF1B\u622A\u56FE\u548C DOM \u5FEB\u7167\u5FC5\u987B\u4FDD\u5B58\u5230 workspace \u5185\u3001\u5C5E\u4E8E\u540C\u4E00 captureId\uFF0Csha256 \u5FC5\u987B\u4E0E\u6587\u4EF6\u4E00\u81F4\uFF1B\u4E0D\u80FD\u518D\u7528\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4EE3\u66FF\u8BC1\u636E\u3002",
     "12. \u53EA\u6709\u771F\u5B9E\u9884\u89C8\u8BC1\u636E\u901A\u8FC7\u5DE5\u5177\u95E8\u7981\u540E\uFF0C\u624D\u8C03\u7528 draw2code_generate action=complete\uFF1B\u5728 complete \u8FD4\u56DE completed \u4E4B\u524D\u4E0D\u5F97\u5411\u7528\u6237\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002"
   ];
   return lines.join("\n");
+}
+var REFERENCE_STYLE_PROMPT = "\u751F\u6210\u524D\u60F3\u786E\u8BA4\u4E00\u4E0B\uFF1A\u4F60\u6709\u6CA1\u6709\u53C2\u8003\u98CE\u683C\u7684\u56FE\u7247\uFF1F\u6709\u7684\u8BDD\u76F4\u63A5\u53D1\u56FE\u5373\u53EF\uFF1B\u6CA1\u6709\u4E5F\u6CA1\u5173\u7CFB\uFF0C\u6211\u4F1A\u7ED3\u5408\u539F\u578B\u667A\u80FD\u63A8\u8350\u89C6\u89C9\u65B9\u5411\u3002";
+function normalizeReferenceStyle(value) {
+  const normalized = value.trim();
+  return /^(?:none|no|没有|无|不需要|暂无)$/iu.test(normalized) ? null : normalized;
 }
 function generateError(code, message, draft) {
   return {
@@ -4692,7 +4712,7 @@ function deviceQuestion() {
     recommendedValues: ["mobile"]
   };
 }
-function visualQuestion(elements) {
+function visualQuestion(elements, referenceStyle = null) {
   const corpus = elements.map((element) => `${str3(element.name)} ${str3(element.text)}`).join(" ");
   const social = /社交|雷达|好友|聊天|附近|碰一碰/u.test(corpus);
   const dataTool = /统计|日历|万年历|图表|清单|任务|管理/u.test(corpus);
@@ -4715,14 +4735,23 @@ function visualQuestion(elements) {
     { id: "bold", label: "\u9C9C\u660E\u5927\u80C6", description: "\u66F4\u5F3A\u5BF9\u6BD4\u4E0E\u89C6\u89C9\u7126\u70B9" },
     { id: "custom", label: "\u81EA\u5B9A\u4E49", description: "\u8865\u5145\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411" }
   ];
+  const referenceOption = referenceStyle === null ? null : {
+    id: "reference-image",
+    label: "\u6CBF\u7528\u53C2\u8003\u56FE\uFF08\u63A8\u8350\uFF09",
+    valueLabel: `\u53C2\u8003\u56FE\u98CE\u683C\uFF1A${referenceStyle}`,
+    description: "\u63D0\u53D6\u53C2\u8003\u56FE\u7684\u89C6\u89C9\u8BED\u8A00\uFF0C\u9875\u9762\u5185\u5BB9\u548C\u4EA4\u4E92\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6",
+    recommended: true,
+    reason: "\u7528\u6237\u5DF2\u7ECF\u63D0\u4F9B\u4E86\u660E\u786E\u7684\u89C6\u89C9\u53C2\u8003"
+  };
+  const normalizedOptions = referenceOption === null ? options : [referenceOption, ...options.map((option) => ({ ...option, recommended: false, reason: void 0 }))];
   return {
     id: "visual-direction",
     text: "\u9996\u6B21\u751F\u6210\u60F3\u91C7\u7528\u54EA\u4E00\u79CD\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF1F",
     selectionMode: "single",
     minSelections: 1,
     allowOther: true,
-    options,
-    recommendedValues: [options.find((option) => option.recommended)?.id ?? options[0].id]
+    options: normalizedOptions,
+    recommendedValues: [normalizedOptions.find((option) => option.recommended)?.id ?? normalizedOptions[0].id]
   };
 }
 function elementsInPages(elements, pageNames) {
@@ -4788,6 +4817,14 @@ function semanticMockDataIssues(pages, elements) {
 }
 function recordValue(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function jsonRecordValue(value) {
+  if (typeof value !== "string") return recordValue(value);
+  try {
+    return recordValue(JSON.parse(value));
+  } catch {
+    return null;
+  }
 }
 function recordArray(value) {
   return Array.isArray(value) && value.every((item) => recordValue(item) !== null) ? value : null;
@@ -4954,7 +4991,7 @@ async function preservedPagesStillMatch(root, draft) {
   }).map(([page]) => page);
 }
 async function verificationEvidenceFor(root, raw, draft, outputHash) {
-  const evidence = recordValue(raw);
+  const evidence = jsonRecordValue(raw);
   if (evidence === null) {
     return {
       ok: false,
@@ -5037,7 +5074,12 @@ async function verificationEvidenceFor(root, raw, draft, outputHash) {
         failures.push("domSnapshot:" + page + ":" + artifact.reason);
         continue;
       }
-      const bodyText = normalizedVisibleText(artifact.bytes.toString("utf8"));
+      const domHtml = artifact.bytes.toString("utf8");
+      if (!/<html(?:\s|>)/iu.test(domHtml) || !/<body(?:\s|>)/iu.test(domHtml)) {
+        failures.push("domSnapshot:" + page + ":not-browser-dom");
+        continue;
+      }
+      const bodyText = normalizedVisibleText(domHtml);
       for (const expected of draft.expectedPageTexts?.[page] ?? []) {
         if (!bodyText.includes(normalizedVisibleText(expected))) {
           failures.push("domText:" + page + ":" + expected.slice(0, 24));
@@ -5099,6 +5141,7 @@ function briefFor(draft, existingPages) {
     relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name) => !draft.selectedFrames.includes(name)),
     pageChanges: existingPages.includes("index.html") ? "\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\uFF0C\u672A\u9009\u62E9\u9875\u9762\u4FDD\u6301\u4E0D\u53D8" : "\u9996\u6B21\u751F\u6210\u6240\u9009\u9875\u9762",
     visualDirection: draft.visualDirection,
+    referenceStyle: draft.referenceStyle ?? null,
     visualBrief,
     device: draft.device,
     prototypeCheck: draft.blockers.length === 0 ? "\u901A\u8FC7" : "\u6709\u963B\u65AD\u95EE\u9898",
@@ -5220,7 +5263,7 @@ async function generationPayload(store, root, draft) {
   const quality = inspectPrototypeLayout(scope.elements);
   const layoutIssues = [...quality.errors, ...quality.warnings];
   const visualBrief = visualBriefFor(draft.visualDirection ?? "\u7B80\u6D01\u73B0\u4EE3", draft.device, draft.selectedFrames);
-  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, visualBrief) + (layoutIssues.length > 0 ? `
+  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, visualBrief, draft.referenceStyle ?? null) + (layoutIssues.length > 0 ? `
 13. \u539F\u578B\u975E\u963B\u65AD\u63D0\u9192\uFF1A
 ${formatLayoutIssues(layoutIssues)}` : "");
   return responseFromDraft(draft, {
@@ -5242,7 +5285,7 @@ ${formatLayoutIssues(layoutIssues)}` : "");
 function draw2codeGenerateTool(store, projects) {
   return defineTool2({
     name: "draw2code_generate",
-    description: "Turn selected \u753B\u7801 prototype pages into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. New pages use ordinary rectangle page shells; named Excalidraw Frames remain supported as legacy pages. On any explicit \u201C\u751F\u6210\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u91CD\u65B0\u751F\u6210\u201D request, call action=start immediately. The first result always asks the user to select pages from every recognized page boundary; pass user-mentioned pages only as recommendations, never skip the choice. Use the host choice UI with all returned options. Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type \u201C\u786E\u8BA4\u201D. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.",
+    description: "Turn selected \u753B\u7801 prototype pages into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. New pages use ordinary rectangle page shells; named Excalidraw Frames remain supported as legacy pages. On any explicit \u201C\u751F\u6210\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u91CD\u65B0\u751F\u6210\u201D request, first ask once in ordinary chat whether the user has a reference-style image; do not use ask_user_question for that sentence. If the request already includes a reference image, do not ask again. Then call action=start with referenceStyle set to \u201Cnone\u201D or a concise description/path of the inspected reference. Calls missing referenceStyle return a non-native reference-style-prompt instead of creating a session. The first structured question always asks the user to select pages from every recognized page boundary; pass user-mentioned pages only as recommendations, never skip the choice. Use the host choice UI with all returned options. Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type \u201C\u786E\u8BA4\u201D. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       action: { type: "string", enum: ["start", "answer", "revise", "resume", "recheck", "confirm", "complete", "abandon"], description: "Generate state-machine action. Omit only for legacy callers; omission behaves as start." },
@@ -5250,6 +5293,7 @@ function draw2codeGenerateTool(store, projects) {
       pages: { type: "array", items: { type: "string" }, description: "User-mentioned prototype page names, used only as recommended defaults on action=start." },
       frames: { type: "array", items: { type: "string" }, description: "Deprecated compatibility alias for pages. If both are supplied they must contain the same names." },
       styleNote: { type: "string", description: "An explicit overall visual request; skips the first-time visual choice." },
+      referenceStyle: { type: "string", description: "Required for action=start after the ordinary-chat reference-image prompt. Use \u201Cnone\u201D when the user has no reference; otherwise pass a concise inspected-image description or local reference path. This prompt must not use ask_user_question." },
       sessionId: { type: "string", description: "Generation session ID from a prior result." },
       revision: { type: "integer", description: "Expected generation revision for mutation actions." },
       questionId: { type: "string", description: "Current question ID for answer/revise." },
@@ -5294,10 +5338,15 @@ function draw2codeGenerateTool(store, projects) {
           existingPages: { type: "array", items: { type: "string" } },
           outputDir: { type: "string" },
           instructions: { type: "string" },
-          validation: { type: "json" }
+          validation: { type: "json" },
+          prompt: { type: "string" }
         }
       },
       render: (_args, value) => {
+        if (value.status === "reference-style-prompt") {
+          return text2(`${value.prompt ?? REFERENCE_STYLE_PROMPT}
+\u8FD9\u662F\u4E00\u53E5\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\uFF0C\u4E0D\u5F97\u8C03\u7528 ask_user_question\u3002\u7528\u6237\u56DE\u7B54\u540E\uFF0C\u7528 referenceStyle=none \u6216\u53C2\u8003\u56FE\u6458\u8981\u91CD\u65B0\u8C03\u7528 action=start\u3002`);
+        }
         if (value.status === "question") {
           const question = value.question;
           const options = question.options.map((option, index) => `${index + 1}. ${option.id} \u2014 ${option.label}${option.recommended ? `\uFF08\u63A8\u8350\uFF1A${option.reason ?? ""}\uFF09` : ""}`).join("\n");
@@ -5322,6 +5371,14 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
     async execute(args) {
       const action = args.action ?? "start";
       if (action === "start") {
+        if (typeof args.referenceStyle !== "string" || args.referenceStyle.trim() === "") {
+          return {
+            status: "reference-style-prompt",
+            prompt: REFERENCE_STYLE_PROMPT,
+            nextAction: "ask-reference-style-then-start"
+          };
+        }
+        const referenceStyle = normalizeReferenceStyle(args.referenceStyle);
         const target = await resolveBoard(store, args.root, args.name);
         const board = await store.read(args.root, target.name);
         if (!board.ok) return generateError(board.error.code, board.error.message);
@@ -5346,7 +5403,12 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         const projectList = projects === void 0 ? null : await projects.list(args.root);
         const project = projectList?.ok === true ? projectList.value.find((candidate) => candidate.boardName === target.name) : void 0;
         const projectBrief = project?.brief;
-        const briefPages = Array.isArray(projectBrief?.pages) ? projectBrief.pages.filter((value) => typeof value === "string" && allNames.includes(value)) : [];
+        const briefPages = Array.isArray(projectBrief?.pages) ? projectBrief.pages.flatMap((value) => {
+          if (typeof value === "string") return allNames.includes(value) ? [value] : [];
+          if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+          const name = str3(value.name).trim();
+          return name !== "" && allNames.includes(name) ? [name] : [];
+        }) : [];
         const deferredStyle = str3(project?.deferredStyleNote).trim();
         const connected = directlyConnectedPages(board.value.scene.elements, requested);
         const recommended = requested.length > 0 ? [...requested, ...connected] : briefPages.length > 0 ? briefPages : allNames.slice(0, Math.min(3, allNames.length));
@@ -5379,6 +5441,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
           inheritedVisualDirection: inherited,
           device: null,
           styleNote: args.styleNote?.trim() || deferredStyle || null,
+          referenceStyle,
           blockers: [],
           warnings: [],
           brief: null,
@@ -5403,7 +5466,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         const board = await store.read(args.root, draft.board);
         if (!board.ok) return generateError(board.error.code, board.error.message, draft);
         if (args.questionId === "page-scope") draft.currentQuestion = pageScopeQuestion(prototypePages(board.value.scene.elements), draft.selectedFrames);
-        else if (args.questionId === "visual-direction") draft.currentQuestion = visualQuestion(board.value.scene.elements);
+        else if (args.questionId === "visual-direction") draft.currentQuestion = visualQuestion(board.value.scene.elements, draft.referenceStyle ?? null);
         else return generateError("invalid-question", "\u53EA\u80FD\u4FEE\u6539 page-scope \u6216 visual-direction", draft);
         draft.status = "question";
         draft.brief = null;
@@ -5448,7 +5511,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
         }
         if (draft.visualDirection === null) draft.visualDirection = draft.inheritedVisualDirection;
         if (draft.visualDirection === null) {
-          draft.currentQuestion = visualQuestion(board.value.scene.elements);
+          draft.currentQuestion = visualQuestion(board.value.scene.elements, draft.referenceStyle ?? null);
           draft.status = "question";
           const failed = await persistGeneration(store, args.root, draft);
           return failed ?? responseFromDraft(draft);

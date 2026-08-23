@@ -6,9 +6,9 @@ Draw2Code is a human-AI collaborative prototyping tool for DSH, Codex, and other
 
 ## Product flow
 
-1. **Create** — `draw2code_create` extracts explicit facts, then lets the Agent ask adaptive, product-specific questions about the highest-impact scenario, differentiation, loop, risk, or first-version proof. Users can skip one question, synthesize immediately, or reopen only the affected decision after reviewing the brief. It stops when the product is clear (at most ten lifetime questions) and deterministically renders one structured `PrototypeBrief` as a complete executable Markdown brief before creating a board.
+1. **Create** — `draw2code_create` extracts explicit facts, then lets the Agent ask adaptive, product-specific questions about the highest-impact scenario, differentiation, loop, risk, or first-version proof. Users can skip one question, synthesize immediately, or reopen only the affected decision after reviewing the brief. It stops when the product is clear (at most ten lifetime questions), deterministically renders one structured `PrototypeBrief` as a complete executable Markdown brief, and shows a final card listing every page to be drawn before creating a board.
 2. **Update** — `draw2code_update` writes to an editable Excalidraw board, protects manual edits and deletions, validates layout quality, verifies the disk write, and automatically reveals the updated board in DSH.
-3. **Generate** — `draw2code_generate` reads the latest board, lets the user choose page scope and visual direction, blocks incomplete prototypes, translates prototype facts into responsive Grid/Flex layouts instead of copying canvas coordinates, and verifies workspace screenshot/DOM artifacts, hashes, viewport sizes, and preserved unselected page blocks before completion.
+3. **Generate** — before `draw2code_generate` starts, the Agent asks in ordinary chat whether the user has a visual reference image. It then reads the latest board, lets the user choose page scope, recommends a visual direction from the reference or product semantics, blocks incomplete prototypes, translates prototype facts into responsive Grid/Flex layouts instead of copying canvas coordinates, and verifies workspace screenshot/DOM artifacts, hashes, viewport sizes, and preserved unselected page blocks before completion.
 
 ## Highlights
 

@@ -1134,6 +1134,7 @@ function buildGenerateInstructions(
   frameNames: string[],
   existingPages: string[],
   visualBrief: GenerateVisualBrief,
+  referenceStyle: string | null,
 ): string {
   const lines: string[] = [
     '按以下要求生成前端页面：',
@@ -1157,7 +1158,9 @@ function buildGenerateInstructions(
       + '   - 动效：' + visualBrief.motion + '\n'
       + '   - 视觉焦点：' + visualBrief.focalPoint,
     '7. 遵循专业前端设计规范：先建立 CSS 设计变量；每页只突出一个主要任务；避免无目的渐变、过度圆角、平均用力和千篇一律的 AI 模板感；真实 mock 数据必须参与排版。',
-    '8. 若本次用户消息附带了界面参考图：参考其配色、字体感觉与布局密度，但页面内容仍以画板原型为准。',
+    referenceStyle === null
+      ? '8. 用户本次未提供参考风格图；以结构化视觉简报为准，不得退化为无差别的通用模板。'
+      : '8. 用户提供的参考风格信息是：' + referenceStyle + '。提取其配色关系、字体感觉、留白、布局密度和组件气质，但页面内容与流程仍以画板原型为准，禁止像素照抄。',
     '9. 可以补充必填校验、加载、成功提示和选中态等通用交互反馈，但不得新增产品事实。',
     '10. 写入后必须自动打开真实浏览器预览，逐页截图并实际验证：所选页面和 mock 数据可见、页面切换与核心按钮可用、核心流程走通、控制台无 error/warning、无横向溢出或内容裁切、按钮文案居中、底部导航完整。发现实现问题要直接修复并重新验证。',
     '11. 调用 action=complete 时必须提交 verificationEvidence：本次浏览器验收唯一 captureId、生成入口 outputSha256、previewUrl、viewports；覆盖每个所选页面的 screenshots[{page,viewport,source,sha256,captureId}]；浏览器导出的 domSnapshots[{page,source,sha256,captureId}]；consoleErrors、consoleWarnings、domChecks、layoutChecks 和 interactionChecks。previewUrl 内容哈希必须等于 outputSha256；截图和 DOM 快照必须保存到 workspace 内、属于同一 captureId，sha256 必须与文件一致；不能再用几个自报布尔值代替证据。',
@@ -1207,6 +1210,7 @@ interface GenerateDraft {
   inheritedVisualDirection: string | null
   device: string | null
   styleNote: string | null
+  referenceStyle: string | null
   blockers: Array<Record<string, unknown>>
   warnings: Array<Record<string, unknown>>
   brief: Record<string, unknown> | null
@@ -1221,6 +1225,7 @@ interface GenerateArgs {
   pages?: string[]
   frames?: string[]
   styleNote?: string
+  referenceStyle?: string
   sessionId?: string
   revision?: number
   questionId?: string
@@ -1260,6 +1265,14 @@ interface GenerateResponse {
   outputDir?: string
   instructions?: string
   validation?: JsonValue
+  prompt?: string
+}
+
+const REFERENCE_STYLE_PROMPT = '生成前想确认一下：你有没有参考风格的图片？有的话直接发图即可；没有也没关系，我会结合原型智能推荐视觉方向。'
+
+function normalizeReferenceStyle(value: string): string | null {
+  const normalized = value.trim()
+  return /^(?:none|no|没有|无|不需要|暂无)$/iu.test(normalized) ? null : normalized
 }
 
 function generateError(code: string, message: string, draft?: GenerateDraft): GenerateResponse {
@@ -1349,7 +1362,7 @@ function deviceQuestion(): GenerateQuestion {
   }
 }
 
-function visualQuestion(elements: Array<Record<string, unknown>>): GenerateQuestion {
+function visualQuestion(elements: Array<Record<string, unknown>>, referenceStyle: string | null = null): GenerateQuestion {
   const corpus = elements.map((element) => `${str(element.name)} ${str(element.text)}`).join(' ')
   const social = /社交|雷达|好友|聊天|附近|碰一碰/u.test(corpus)
   const dataTool = /统计|日历|万年历|图表|清单|任务|管理/u.test(corpus)
@@ -1376,14 +1389,25 @@ function visualQuestion(elements: Array<Record<string, unknown>>): GenerateQuest
           { id: 'bold', label: '鲜明大胆', description: '更强对比与视觉焦点' },
           { id: 'custom', label: '自定义', description: '补充一个整体视觉方向' },
         ]
+  const referenceOption: GenerateOption | null = referenceStyle === null ? null : {
+    id: 'reference-image',
+    label: '沿用参考图（推荐）',
+    valueLabel: `参考图风格：${referenceStyle}`,
+    description: '提取参考图的视觉语言，页面内容和交互仍以原型为准',
+    recommended: true,
+    reason: '用户已经提供了明确的视觉参考',
+  }
+  const normalizedOptions = referenceOption === null
+    ? options
+    : [referenceOption, ...options.map((option) => ({ ...option, recommended: false, reason: undefined }))]
   return {
     id: 'visual-direction',
     text: '首次生成想采用哪一种整体视觉方向？',
     selectionMode: 'single',
     minSelections: 1,
     allowOther: true,
-    options,
-    recommendedValues: [options.find((option) => option.recommended)?.id ?? options[0].id],
+    options: normalizedOptions,
+    recommendedValues: [normalizedOptions.find((option) => option.recommended)?.id ?? normalizedOptions[0].id],
   }
 }
 
@@ -1465,6 +1489,15 @@ function recordValue(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
+}
+
+function jsonRecordValue(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string') return recordValue(value)
+  try {
+    return recordValue(JSON.parse(value) as unknown)
+  } catch {
+    return null
+  }
 }
 
 function recordArray(value: unknown): Array<Record<string, unknown>> | null {
@@ -1669,7 +1702,7 @@ async function verificationEvidenceFor(
   draft: GenerateDraft,
   outputHash: string,
 ): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; code: string; message: string }> {
-  const evidence = recordValue(raw)
+  const evidence = jsonRecordValue(raw)
   if (evidence === null) {
     return {
       ok: false,
@@ -1760,7 +1793,12 @@ async function verificationEvidenceFor(
         failures.push('domSnapshot:' + page + ':' + artifact.reason)
         continue
       }
-      const bodyText = normalizedVisibleText(artifact.bytes.toString('utf8'))
+      const domHtml = artifact.bytes.toString('utf8')
+      if (!/<html(?:\s|>)/iu.test(domHtml) || !/<body(?:\s|>)/iu.test(domHtml)) {
+        failures.push('domSnapshot:' + page + ':not-browser-dom')
+        continue
+      }
+      const bodyText = normalizedVisibleText(domHtml)
       for (const expected of draft.expectedPageTexts?.[page] ?? []) {
         if (!bodyText.includes(normalizedVisibleText(expected))) {
           failures.push('domText:' + page + ':' + expected.slice(0, 24))
@@ -1826,6 +1864,7 @@ function briefFor(draft: GenerateDraft, existingPages: string[]): Record<string,
     relatedPageRecommendations: (draft.recommendedFrames ?? []).filter((name) => !draft.selectedFrames.includes(name)),
     pageChanges: existingPages.includes('index.html') ? '只更新所选页面，未选择页面保持不变' : '首次生成所选页面',
     visualDirection: draft.visualDirection,
+    referenceStyle: draft.referenceStyle ?? null,
     visualBrief,
     device: draft.device,
     prototypeCheck: draft.blockers.length === 0 ? '通过' : '有阻断问题',
@@ -1959,7 +1998,7 @@ async function generationPayload(store: SceneStore, root: string, draft: Generat
   const quality = inspectPrototypeLayout(scope.elements)
   const layoutIssues = [...quality.errors, ...quality.warnings]
   const visualBrief = visualBriefFor(draft.visualDirection ?? '简洁现代', draft.device, draft.selectedFrames)
-  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, visualBrief)
+  const instructions = buildGenerateInstructions(draft.board, draft.selectedFrames, existing.value, visualBrief, draft.referenceStyle ?? null)
     + (layoutIssues.length > 0 ? `\n13. 原型非阻断提醒：\n${formatLayoutIssues(layoutIssues)}` : '')
   return responseFromDraft(draft, {
     nextAction: 'write-html-then-preview-and-validate',
@@ -1983,7 +2022,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
   return defineTool({
     name: 'draw2code_generate',
     description: 'Turn selected 画码 prototype pages into a verified, interactive, single-file HTML Demo through a resumable choice-first flow. New pages use ordinary rectangle page shells; named Excalidraw Frames remain supported as legacy pages. '
-      + 'On any explicit “生成页面 / 根据画板生成前端 / 重新生成” request, call action=start immediately. The first result always asks the user to select pages from every recognized page boundary; pass user-mentioned pages only as recommendations, never skip the choice. Use the host choice UI with all returned options. '
+      + 'On any explicit “生成页面 / 根据画板生成前端 / 重新生成” request, first ask once in ordinary chat whether the user has a reference-style image; do not use ask_user_question for that sentence. If the request already includes a reference image, do not ask again. Then call action=start with referenceStyle set to “none” or a concise description/path of the inspected reference. Calls missing referenceStyle return a non-native reference-style-prompt instead of creating a session. The first structured question always asks the user to select pages from every recognized page boundary; pass user-mentioned pages only as recommendations, never skip the choice. Use the host choice UI with all returned options. '
       + 'Then answer the returned visual/device question if present. When status=ready, show the brief once and immediately use the host choice UI with the returned confirmation options; never ask the user to type “确认”. Map confirm to action=confirm, revise-scope to action=revise questionId=page-scope, and revise-visual to action=revise questionId=visual-direction. The confirmed result carries elements and instructions for you to write index.html. '
       + 'After writing, automatically open the real preview, capture every selected page, inspect the console and DOM/layout, and exercise the core flow; fix implementation defects without asking. Call action=complete with structured verificationEvidence only after preview passes. Self-reported boolean flags are not accepted as evidence. Never report completion before status=completed. '
       + 'If status=blocked, repair the prototype through draw2code_update first, let the user inspect the board, then call action=recheck with the same sessionId/revision; do not repeat completed choices. action=resume restores interrupted work.',
@@ -1994,6 +2033,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
       pages: { type: 'array', items: { type: 'string' }, description: 'User-mentioned prototype page names, used only as recommended defaults on action=start.' },
       frames: { type: 'array', items: { type: 'string' }, description: 'Deprecated compatibility alias for pages. If both are supplied they must contain the same names.' },
       styleNote: { type: 'string', description: 'An explicit overall visual request; skips the first-time visual choice.' },
+      referenceStyle: { type: 'string', description: 'Required for action=start after the ordinary-chat reference-image prompt. Use “none” when the user has no reference; otherwise pass a concise inspected-image description or local reference path. This prompt must not use ask_user_question.' },
       sessionId: { type: 'string', description: 'Generation session ID from a prior result.' },
       revision: { type: 'integer', description: 'Expected generation revision for mutation actions.' },
       questionId: { type: 'string', description: 'Current question ID for answer/revise.' },
@@ -2039,9 +2079,13 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           outputDir: { type: 'string' },
           instructions: { type: 'string' },
           validation: { type: 'json' },
+          prompt: { type: 'string' },
         },
       },
       render: (_args, value: GenerateResponse) => {
+        if (value.status === 'reference-style-prompt') {
+          return text(`${value.prompt ?? REFERENCE_STYLE_PROMPT}\n这是一句普通对话询问，不得调用 ask_user_question。用户回答后，用 referenceStyle=none 或参考图摘要重新调用 action=start。`)
+        }
         if (value.status === 'question') {
           const question = value.question as unknown as GenerateQuestion
           const options = question.options.map((option, index) => `${index + 1}. ${option.id} — ${option.label}${option.recommended ? `（推荐：${option.reason ?? ''}）` : ''}`).join('\n')
@@ -2058,6 +2102,14 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
     async execute(args: GenerateArgs): Promise<GenerateResponse> {
       const action = args.action ?? 'start'
       if (action === 'start') {
+        if (typeof args.referenceStyle !== 'string' || args.referenceStyle.trim() === '') {
+          return {
+            status: 'reference-style-prompt',
+            prompt: REFERENCE_STYLE_PROMPT,
+            nextAction: 'ask-reference-style-then-start',
+          }
+        }
+        const referenceStyle = normalizeReferenceStyle(args.referenceStyle)
         const target = await resolveBoard(store, args.root, args.name)
         const board = await store.read(args.root, target.name)
         if (!board.ok) return generateError(board.error.code, board.error.message)
@@ -2086,7 +2138,12 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           : undefined
         const projectBrief = project?.brief as { pages?: unknown; deferredStyleNote?: unknown } | null | undefined
         const briefPages = Array.isArray(projectBrief?.pages)
-          ? projectBrief.pages.filter((value): value is string => typeof value === 'string' && allNames.includes(value))
+          ? projectBrief.pages.flatMap((value) => {
+              if (typeof value === 'string') return allNames.includes(value) ? [value] : []
+              if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
+              const name = str((value as Record<string, unknown>).name).trim()
+              return name !== '' && allNames.includes(name) ? [name] : []
+            })
           : []
         const deferredStyle = str(project?.deferredStyleNote).trim()
         const connected = directlyConnectedPages(board.value.scene.elements, requested)
@@ -2124,6 +2181,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
           inheritedVisualDirection: inherited,
           device: null,
           styleNote: args.styleNote?.trim() || deferredStyle || null,
+          referenceStyle,
           blockers: [],
           warnings: [],
           brief: null,
@@ -2151,7 +2209,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
         const board = await store.read(args.root, draft.board)
         if (!board.ok) return generateError(board.error.code, board.error.message, draft)
         if (args.questionId === 'page-scope') draft.currentQuestion = pageScopeQuestion(prototypePages(board.value.scene.elements), draft.selectedFrames)
-        else if (args.questionId === 'visual-direction') draft.currentQuestion = visualQuestion(board.value.scene.elements)
+        else if (args.questionId === 'visual-direction') draft.currentQuestion = visualQuestion(board.value.scene.elements, draft.referenceStyle ?? null)
         else return generateError('invalid-question', '只能修改 page-scope 或 visual-direction', draft)
         draft.status = 'question'
         draft.brief = null
@@ -2199,7 +2257,7 @@ export function draw2codeGenerateTool(store: SceneStore, projects?: ProjectStore
 
         if (draft.visualDirection === null) draft.visualDirection = draft.inheritedVisualDirection
         if (draft.visualDirection === null) {
-          draft.currentQuestion = visualQuestion(board.value.scene.elements)
+          draft.currentQuestion = visualQuestion(board.value.scene.elements, draft.referenceStyle ?? null)
           draft.status = 'question'
           const failed = await persistGeneration(store, args.root, draft)
           return failed ?? responseFromDraft(draft)

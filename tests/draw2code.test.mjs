@@ -11,7 +11,7 @@ import {
   ProjectStore,
   SceneStore,
   draw2codeCreateTool as rawDraw2codeCreateTool,
-  draw2codeGenerateTool,
+  draw2codeGenerateTool as rawDraw2codeGenerateTool,
   draw2codeReadTool,
   draw2codeUpdateTool,
   inspectPrototypeQuality,
@@ -48,6 +48,19 @@ function draw2codeCreateTool(...args) {
     execute(input, context) {
       const normalized = input.action === 'propose_question' && input.question !== undefined
         ? { ...input, question: nativeCreateQuestion(input.question) }
+        : input
+      return tool.execute(normalized, context)
+    },
+  }
+}
+
+function draw2codeGenerateTool(...args) {
+  const tool = rawDraw2codeGenerateTool(...args)
+  return {
+    ...tool,
+    execute(input, context) {
+      const normalized = (input.action ?? 'start') === 'start' && input.referenceStyle === undefined
+        ? { ...input, referenceStyle: 'none' }
         : input
       return tool.execute(normalized, context)
     },
@@ -157,7 +170,12 @@ async function browserEvidence(root, board, pageTexts, { preserveExisting = fals
       sha256: artifactHash(imageBytes),
       captureId,
     })
-    const domBytes = Buffer.from(pageTexts[page].join('\n'), 'utf8')
+    const domBytes = Buffer.from(
+      '<!doctype html><html><body><section data-page="' + page + '">'
+      + pageTexts[page].map((value) => '<p>' + value + '</p>').join('')
+      + '</section></body></html>',
+      'utf8',
+    )
     const domPath = join(artifactDir, 'page-' + index + '.txt')
     await writeFile(domPath, domBytes)
     domSnapshots.push({
@@ -1731,6 +1749,53 @@ test('draw2code_generate carries existing prototype quality warnings forward', a
   assert.match(result.nextAction, /draw2code_update/)
 })
 
+test('draw2code_generate asks about a reference-style image in ordinary chat before creating a session', async () => {
+  const { root, store } = await makeStore()
+  const tool = rawDraw2codeGenerateTool(store)
+  const result = await tool.execute({ root, action: 'start' }, {})
+
+  assert.equal(result.status, 'reference-style-prompt')
+  assert.match(result.prompt, /有没有参考风格的图片/)
+  assert.equal(result.nextAction, 'ask-reference-style-then-start')
+  assert.equal(result.sessionId, undefined)
+  assert.equal(result.question, undefined)
+  const rendered = tool.output.render({ root, action: 'start' }, result)
+  assert.match(rendered[0].text, /普通对话询问/)
+  assert.doesNotMatch(rendered[0].text, /askUserQuestionArgs/)
+})
+
+test('draw2code_generate recommends an inspected reference image without changing the page-scope step', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'generate-reference', {
+    elements: [
+      { id: 'home', type: 'frame', name: '首页', x: 0, y: 0, width: 390, height: 844 },
+      { id: 'home-title', type: 'text', text: '今日重点任务', frameId: 'home', x: 24, y: 80, width: 220, height: 32 },
+    ],
+  })
+  const tool = rawDraw2codeGenerateTool(store)
+  const started = await tool.execute({
+    root,
+    action: 'start',
+    name: 'generate-reference',
+    referenceStyle: '已查看：暖白底、编辑杂志式留白、克制蓝色强调',
+  }, {})
+
+  assert.equal(started.status, 'question')
+  assert.equal(started.question.id, 'page-scope')
+  const visual = await tool.execute({
+    root,
+    action: 'answer',
+    sessionId: started.sessionId,
+    revision: started.revision,
+    questionId: 'page-scope',
+    values: ['首页'],
+  }, {})
+  assert.equal(visual.status, 'question')
+  assert.equal(visual.question.id, 'visual-direction')
+  assert.equal(visual.question.options[0].id, 'reference-image')
+  assert.equal(visual.question.options[0].recommended, true)
+})
+
 test('draw2code_generate starts with an explicit page-scope choice instead of generating immediately', async () => {
   const { root, store } = await makeStore()
   await store.write(root, 'generate-scope', {
@@ -1976,6 +2041,21 @@ test('draw2code_generate resumes choices, confirms once, and refuses completion 
   assert.equal(domRejected.error.code, 'verification-evidence-failed')
   assert.match(domRejected.error.message, /domText:首页:附近的人/)
 
+  const summaryEvidence = await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] })
+  const summaryBytes = Buffer.from('页面=首页\n附近的人', 'utf8')
+  await writeFile(summaryEvidence.domSnapshots[0].source, summaryBytes)
+  summaryEvidence.domSnapshots[0].sha256 = artifactHash(summaryBytes)
+  const summaryRejected = await tool.execute({
+    root,
+    action: 'complete',
+    sessionId: confirmed.sessionId,
+    revision: confirmed.revision,
+    verificationEvidence: summaryEvidence,
+  }, {})
+  assert.equal(summaryRejected.status, 'error')
+  assert.equal(summaryRejected.error.code, 'verification-evidence-failed')
+  assert.match(summaryRejected.error.message, /domSnapshot:首页:not-browser-dom/)
+
   const failedEvidence = await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] })
   failedEvidence.consoleErrors.push('TypeError: navigation target is missing')
   failedEvidence.consoleWarnings.push('A form control has no accessible label')
@@ -1998,7 +2078,7 @@ test('draw2code_generate resumes choices, confirms once, and refuses completion 
     action: 'complete',
     sessionId: confirmed.sessionId,
     revision: confirmed.revision,
-    verificationEvidence: await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] }),
+    verificationEvidence: JSON.stringify(await browserEvidence(root, 'generate-flow', { 首页: ['附近的人'] })),
   }, {})
   assert.equal(completed.status, 'completed')
   assert.equal(completed.validation.verified, true)
@@ -2306,7 +2386,7 @@ test('draw2code_generate inherits create brief page recommendations and deferred
     answers: {},
     currentQuestion: null,
     pendingInterpretation: null,
-    brief: { pages: ['首页'] },
+    brief: { pages: [{ id: 'home', name: '首页' }] },
     history: [],
   })
   assert.equal(created.ok, true)
@@ -2703,11 +2783,13 @@ test('draw2code_create synthesizes one executable brief and renders the complete
   const rendered = tool.output.render({ root, action: 'synthesize' }, ready)
   assert.match(rendered[0].text, /# 个人四象限待办清单原型/)
   assert.match(rendered[0].text, /调整产品方向/)
-  assert.match(rendered[0].text, /调整首版范围/)
-  assert.equal(ready.confirmation.askUserQuestionArgs.questions[0].header, '简报确认')
+  assert.match(rendered[0].text, /调整页面范围/)
+  assert.deepEqual(ready.confirmation.pageNames, ['今日四象限', '全部任务', '添加／编辑任务'])
+  assert.match(ready.confirmation.question, /3 个页面：今日四象限、全部任务、添加／编辑任务/)
+  assert.equal(ready.confirmation.askUserQuestionArgs.questions[0].header, '页面确认')
   assert.deepEqual(
     ready.confirmation.askUserQuestionArgs.questions[0].options.map((option) => option.label),
-    ['确认并绘制', '调整产品方向', '调整首版范围'],
+    ['确认这些页面并绘制', '调整页面范围', '调整产品方向'],
   )
 
   const confirmed = await tool.execute({

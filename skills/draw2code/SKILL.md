@@ -12,7 +12,7 @@ description: Use Draw2Code or 画码 to clarify a product, draw or edit an edita
 - 用户只说“打开 Draw2Code / 打开画码”：调用 `draw2code_open`。不要开始需求提问。
 - 用户明确要从零设计、创建或画一个新产品原型：调用 `draw2code_create action=start`，忠实传入 idea，并基于完整语义概括简短 `projectName`。
 - 用户修改现有原型：先 `draw2code_read`，再用 `draw2code_update` 提交最小 ops。
-- 用户明确要求根据画板生成或重新生成页面：调用 `draw2code_generate action=start`，继续它返回的状态机直到 completed。
+- 用户明确要求根据画板生成或重新生成页面：先用普通对话问一次“有没有参考风格的图片”；这句话不用宿主选择题。有图就先查看并概括，没有则记为 `none`，随后调用 `draw2code_generate action=start` 并传入 `referenceStyle`，继续它返回的状态机直到 completed。用户已经随请求附图时不要重复问。
 - 普通“帮我做一个 App / 写一个页面”且没有 Draw2Code、画码或明确画原型意图：不要使用本 Skill。
 
 ## 交互
@@ -23,7 +23,7 @@ Create 的 `start` 返回 `discovery` 时，不要套用固定问卷。先读取
 
 用户跳过当前选择题时调用 `action=skip`，该项会保留为待验证假设；用户要求立即整理时可直接 `synthesize`，不需要先机械回答当前题。`ready` 后若选择调整产品方向或首版范围，直接用 `propose_question` 追问受影响的一项，回答后重新 `synthesize` 完整简报。
 
-Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得重新总结、缩写或另写一份简报。随后只提供“确认并绘制 / 调整产品方向 / 调整首版范围”一次统一确认；确认后的 `draw2code_update` 必须消费同一份 `brief.pages`、`pageBlueprints`、`pageMockData`、`pageRelations` 和验收要求。
+Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得重新总结、缩写或另写一份简报。随后展示最后一张页面范围确认卡，明确列出将绘制的全部页面，并只提供“确认这些页面并绘制 / 调整页面范围 / 调整产品方向”；确认后的 `draw2code_update` 必须消费同一份 `brief.pages`、`pageBlueprints`、`pageMockData`、`pageRelations` 和验收要求。
 
 `draw2code_update` 返回冲突或 `requiresConfirmation=true` 时，只询问相关覆盖选择；用户确认后用相同 ops 和 `force=true` 重试。无冲突直接继续，不增加模板化确认。Create brief 包含 3 个及以上页面时，先按 `pageBlueprints` 画一个代表页并查看真实画板，再以 `visualReview.phase=representative` 添加剩余页面；visualReview 必须携带最近一次成功 update 返回的 `boardRevision=rev` 和 `revealRequestId`。全部页面可见后查看真实画板，再用空 ops 单独提交 `phase=final`，`inspectedPageIds` 必须覆盖所有页面。
 

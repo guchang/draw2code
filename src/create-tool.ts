@@ -186,23 +186,41 @@ function displayedQuestionText(question: CreateQuestion): string {
   return question.insight === undefined ? question.text : `判断：${question.insight}\n\n问题：${question.text}`
 }
 
-function createConfirmation(): Record<string, unknown> {
+function readyPageNames(brief: unknown): string[] {
+  if (typeof brief !== 'object' || brief === null || Array.isArray(brief)) return []
+  const pages = (brief as { pages?: unknown }).pages
+  if (!Array.isArray(pages)) return []
+  return pages.flatMap((page) => {
+    if (typeof page !== 'object' || page === null || Array.isArray(page)) return []
+    const name = (page as { name?: unknown }).name
+    return typeof name === 'string' && name.trim() !== '' ? [name.trim()] : []
+  })
+}
+
+function createConfirmation(brief: unknown): Record<string, unknown> {
+  const pageNames = readyPageNames(brief)
+  const pageSummary = pageNames.length === 0
+    ? '项目简报中的页面范围'
+    : `${pageNames.length} 个页面：${pageNames.join('、')}`
+  const question = `计划绘制${pageSummary}。这些就是首版原型需要生成的页面吗？`
   return {
     id: 'create-brief-confirm',
+    pageNames,
+    question,
     options: [
-      { id: 'confirm', label: '确认并绘制', description: '使用刚刚展示的同一份项目简报创建独立画板。' },
+      { id: 'confirm', label: '确认这些页面并绘制', description: '使用刚刚展示的同一份项目简报和页面范围创建独立画板。' },
+      { id: 'adjust-pages', label: '调整页面范围', description: '增删、合并或拆分页面，再重新生成完整项目简报。' },
       { id: 'adjust-direction', label: '调整产品方向', description: '只追问受影响的产品决策，再重新生成完整简报。' },
-      { id: 'adjust-scope', label: '调整首版范围', description: '只调整首版包含与排除范围，再重新生成完整简报。' },
     ],
     askUserQuestionArgs: {
       questions: [{
         id: 'create-brief-confirm',
-        question: '这份项目简报是否准确，可以开始绘制原型吗？',
-        header: '简报确认',
+        question,
+        header: '页面确认',
         options: [
-          { label: '确认并绘制', description: '使用刚刚展示的同一份项目简报创建独立画板。' },
+          { label: '确认这些页面并绘制', description: '使用刚刚展示的同一份项目简报和页面范围创建独立画板。' },
+          { label: '调整页面范围', description: '增删、合并或拆分页面，再重新生成完整项目简报。' },
           { label: '调整产品方向', description: '只追问受影响的产品决策，再重新生成完整简报。' },
-          { label: '调整首版范围', description: '只调整首版包含与排除范围，再重新生成完整简报。' },
         ],
         multi_select: false,
       }],
@@ -254,7 +272,7 @@ function responseFor(projects: ProjectStore, draft: ProjectDraft, extras: Partia
     ...(draft.brief === null ? {} : { brief: draft.brief as JsonValue, assumptions: ((draft.brief as { assumptions?: JsonValue }).assumptions ?? []) }),
     ...(draft.briefMarkdown === undefined || draft.briefMarkdown === null ? {} : { briefMarkdown: draft.briefMarkdown }),
     ...(draft.flowVersion === CREATE_FLOW_VERSION && draft.status === 'draft' ? { briefContract: prototypeBriefContract() as JsonValue } : {}),
-    ...(status === 'ready' ? { confirmation: createConfirmation() as JsonValue } : {}),
+    ...(status === 'ready' ? { confirmation: createConfirmation(draft.brief) as JsonValue } : {}),
     ...(draft.boardName === null ? {} : { boardName: draft.boardName }),
     ...extras,
   }
@@ -418,7 +436,7 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
       + 'A discovery result means the Agent must choose the single highest-impact unresolved product decision. If information is insufficient, call action=propose_question with a product-specific insight, one decision question, 2–4 tradeoff-rich options, a recommendation, decisionImpact and dependencies. To make the native card lossless, question.text itself must be “判断：{insight}\\n\\n问题：{self-contained insight + decision question}”; the text after “问题：” must repeat the product judgment so it remains meaningful even if an Agent extracts only that part. question.options must already include synthesize-now/直接整理项目简报, unknown/还没想好 and other/其他 in addition to the product directions. question.dimension must use one returned openDimensions ID exactly: trigger-context, existing-alternative, core-outcome, unique-mechanism, core-loop, critical-risk, scope-proof, target-user, target-platform, or product-architecture. Never invent shorter aliases such as mechanism or risk. Never use the old fixed platform/user/goal/flow/modules/pages sequence, and never ask modules and pages as separate checklist questions. '
       + 'After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including “直接整理项目简报”, “还没想好” and “其他”; never truncate or silently replace options. Map the selected label back to its option id and call action=answer. The synthesize-now choice returns discovery.nextAction=synthesize. '
       + 'When the core scenario, outcome, unique mechanism, first-version flow and scope are clear—or the user asks to stop—call action=synthesize with stopReason and a complete PrototypeBrief. Discovery may stop early and must stop after ten questions. '
-      + 'The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim before the single “确认并绘制 / 调整产品方向 / 调整首版范围” confirmation; do not summarize it. '
+      + 'The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim, then show one explicit page-range confirmation card listing every page: “确认这些页面并绘制 / 调整页面范围 / 调整产品方向”; do not summarize it. '
       + 'Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, '
       + 'action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. '
       + 'The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; '
@@ -493,7 +511,7 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
         }
         if (value.status === 'ready') {
           const markdown = value.briefMarkdown ?? '项目简报缺少可读 Markdown，请修复后再确认。'
-          return text(`${continuation(value)} status=ready\n${markdown}\n\n请完整展示以上项目简报，不要自行缩写或重新总结。随后使用宿主 ask_user_question 原样复制 confirmation.askUserQuestionArgs，其中仅包含“确认并绘制 / 调整产品方向 / 调整首版范围”；确认后调用 action=confirm。选择调整时直接调用 action=propose_question 只追问受影响的一项，旧简报会失效，回答后必须重新 synthesize 完整简报。`)
+          return text(`${continuation(value)} status=ready\n${markdown}\n\n请完整展示以上项目简报，不要自行缩写或重新总结。随后使用宿主 ask_user_question 原样复制 confirmation.askUserQuestionArgs；这张卡会明确列出将绘制的页面，并且仅包含“确认这些页面并绘制 / 调整页面范围 / 调整产品方向”。确认后调用 action=confirm。选择调整时直接调用 action=propose_question，只追问受影响的一项；旧简报会失效，回答后必须重新 synthesize 完整简报。`)
         }
         if (value.status === 'confirmed') return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ''} activeBoard=${value.activeBoard ?? ''} nextAction=${value.nextAction ?? 'draw2code_update'}\n项目「${value.projectName ?? ''}」已确认，独立画板已创建。下一步必须同时按 brief.pageBlueprints 和 brief.pageMockData 调用 draw2code_update，并明确传入上面的 boardName；首轮有 3 个及以上页面时先画一个代表页并查看真实画板，再提交 representative visualReview 后添加其余页面，最终只有 completionReady=true 才能报告完成。每个重复内容组件至少提供 3 条可见 mock 数据，不要回写旧画板。`)
         if (value.status === 'drafts') {
