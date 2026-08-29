@@ -82,6 +82,39 @@ export function capturePendingSave(
   return { name, elements, baseRev, baseElements: cloneElements(baseElements) }
 }
 
+export async function flushCapturedSave(
+  pending: PendingSave | null,
+  persist: (pending: PendingSave) => Promise<boolean>,
+): Promise<{ ok: true; retry: null } | { ok: false; retry: PendingSave }> {
+  if (pending === null) return { ok: true, retry: null }
+  return await persist(pending)
+    ? { ok: true, retry: null }
+    : { ok: false, retry: pending }
+}
+
+/** Serialize asynchronous UI actions and commit only the latest request. */
+export class LatestAsyncAction {
+  private latest = 0
+  private tail: Promise<void> = Promise.resolve()
+
+  run<T>(
+    prepare: (isCurrent: () => boolean) => Promise<T>,
+    commit: (value: T) => void,
+  ): Promise<boolean> {
+    const request = ++this.latest
+    const isCurrent = (): boolean => request === this.latest
+    const task = this.tail.catch(() => undefined).then(async () => {
+      if (!isCurrent()) return false
+      const value = await prepare(isCurrent)
+      if (!isCurrent()) return false
+      commit(value)
+      return true
+    })
+    this.tail = task.then(() => undefined, () => undefined)
+    return task
+  }
+}
+
 function sameElement(left: Element | undefined, right: Element | undefined): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }

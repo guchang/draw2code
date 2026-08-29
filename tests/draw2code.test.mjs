@@ -240,6 +240,41 @@ test('debounced edits keep the revision and merge base from the first edit', () 
   assert.deepEqual(second.elements, [{ id: 'new-local-page', type: 'frame' }])
 })
 
+test('a failed pending save remains retryable', async () => {
+  const pending = sync.capturePendingSave(
+    null,
+    'prototype',
+    [{ id: 'unsaved-edit', type: 'text', text: '不能丢失' }],
+    17,
+    [{ id: 'old-edit', type: 'text', text: '旧内容' }],
+  )
+  const failed = await sync.flushCapturedSave(pending, async () => false)
+
+  assert.equal(failed.ok, false)
+  assert.deepEqual(failed.retry, pending)
+})
+
+test('the latest asynchronous board action wins even when an earlier flush settles later', async () => {
+  const actions = new sync.LatestAsyncAction()
+  let releaseFirst
+  let markFirstStarted
+  const firstFlush = new Promise((resolve) => { releaseFirst = resolve })
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve })
+  let selected = 'prototype'
+
+  const first = actions.run(async () => {
+    markFirstStarted()
+    await firstFlush
+    return '画板 A'
+  }, (name) => { selected = name })
+  await firstStarted
+  const second = actions.run(async () => '画板 B', (name) => { selected = name })
+  releaseFirst()
+  await Promise.all([first, second])
+
+  assert.equal(selected, '画板 B')
+})
+
 test('first-render Excalidraw metadata is ignored without hiding later z-order or geometry edits', () => {
   const base = [{ id: 'card', type: 'rectangle', x: 20, y: 40, width: 200, height: 80, version: 1, versionNonce: 11, updated: 100 }]
   const normalized = [{ ...base[0], index: 'a0', version: 2, versionNonce: 22, updated: 200 }]
@@ -1247,6 +1282,59 @@ test('draw2code_update centers a button label by geometry, not alignment metadat
   )
 })
 
+test('draw2code_update falls back to the container role when a label role only describes content', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'semantic-container-role-fallback',
+    ops: [
+      { op: 'upsert', element: { id: 'task-input', type: 'rectangle', customData: { role: 'input' }, x: 20, y: 80, width: 380, height: 48 } },
+      { op: 'upsert', element: { id: 'task-value', type: 'text', text: '提交产品周报', fontSize: 15, lineHeight: 1.25, customData: { role: 'mock-data' }, x: 32, y: 80, width: 356, height: 48, containerId: 'task-input' } },
+      { op: 'upsert', element: { id: 'quadrant-chip', type: 'rectangle', customData: { role: 'choice-chip' }, x: 20, y: 160, width: 180, height: 52 } },
+      { op: 'upsert', element: { id: 'quadrant-label', type: 'text', text: '重要且紧急', fontSize: 14, lineHeight: 1.25, customData: { role: 'choice-label' }, x: 20, y: 160, width: 180, height: 52, containerId: 'quadrant-chip' } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'semantic-container-role-fallback')
+  assert.equal(read.ok, true)
+  const value = read.value.scene.elements.find((element) => element.id === 'task-value')
+  assert.deepEqual(
+    [value.textAlign, value.verticalAlign, value.y, value.height],
+    ['left', 'middle', 94.625, 18.75],
+  )
+  const label = read.value.scene.elements.find((element) => element.id === 'quadrant-label')
+  assert.deepEqual(
+    [label.textAlign, label.verticalAlign, label.y, label.height],
+    ['center', 'middle', 177.25, 17.5],
+  )
+})
+
+test('draw2code_update defaults text autoResize on and preserves an explicit opt-out', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+
+  const result = await tool.execute({
+    root,
+    name: 'text-auto-resize',
+    ops: [
+      { op: 'upsert', element: { id: 'default-text', type: 'text', text: '默认自适应', x: 20, y: 20, width: 120, height: 24 } },
+      { op: 'upsert', element: { id: 'fixed-text', type: 'text', text: '固定文本框', autoResize: false, x: 20, y: 60, width: 120, height: 24 } },
+    ],
+  }, {})
+
+  assert.equal(result.verified, true)
+  const read = await store.read(root, 'text-auto-resize')
+  assert.equal(read.ok, true)
+  const byId = new Map(read.value.scene.elements.map((element) => [element.id, element]))
+  assert.deepEqual(
+    [byId.get('default-text').autoResize, byId.get('fixed-text').autoResize],
+    [true, false],
+  )
+})
+
 test('draw2code_update turns bottom navigation labels into independent centered items', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
@@ -1569,6 +1657,32 @@ test('prototype quality explains sparse hierarchy and interaction problems separ
   assert.ok(codes.includes('tap-target-too-small'))
   assert.ok(codes.includes('status-emphasis-missing'))
   assert.ok(quality.qualityScore < 100)
+})
+
+test('prototype quality distinguishes a two-column grid from inconsistent wide-content margins', () => {
+  const page = { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '今天' } }
+  const pageLabel = { id: 'page-label', type: 'text', text: '今天', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } }
+
+  const twoColumnQuality = inspectPrototypeQuality([
+    page,
+    pageLabel,
+    { id: 'heading', type: 'text', text: '今天', x: 24, y: 88, width: 342, height: 36, fontSize: 26 },
+    { id: 'q1', type: 'rectangle', x: 24, y: 144, width: 163, height: 220, customData: { role: 'quadrant-card' } },
+    { id: 'q2', type: 'rectangle', x: 203, y: 144, width: 163, height: 220, customData: { role: 'quadrant-card' } },
+    { id: 'q3', type: 'rectangle', x: 24, y: 380, width: 163, height: 220, customData: { role: 'quadrant-card' } },
+    { id: 'q4', type: 'rectangle', x: 203, y: 380, width: 163, height: 220, customData: { role: 'quadrant-card' } },
+  ])
+  assert.equal(twoColumnQuality.warnings.some((warning) => warning.code === 'page-margin-inconsistent'), false)
+
+  const inconsistentWideRows = inspectPrototypeQuality([
+    page,
+    pageLabel,
+    { id: 'row-a', type: 'rectangle', x: 24, y: 120, width: 310, height: 72 },
+    { id: 'row-b', type: 'rectangle', x: 56, y: 208, width: 310, height: 72 },
+    { id: 'row-c', type: 'rectangle', x: 24, y: 296, width: 310, height: 72 },
+    { id: 'row-d', type: 'rectangle', x: 56, y: 384, width: 310, height: 72 },
+  ])
+  assert.equal(inconsistentWideRows.warnings.some((warning) => warning.code === 'page-margin-inconsistent'), true)
 })
 
 test('draw2code_update separates write verification from prototype completion and accepts final visual review evidence', async () => {

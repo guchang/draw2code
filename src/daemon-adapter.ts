@@ -13,6 +13,7 @@ const ROUTES = [
   '/api/draw2code/scene',
   '/api/draw2code/scene/write',
   '/api/draw2code/versions',
+  '/api/draw2code/version',
   '/api/draw2code/restore',
   '/api/draw2code/export',
 ]

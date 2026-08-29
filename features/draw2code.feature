@@ -8,6 +8,27 @@ Feature: 画码原型板的人机协作
     Given DeepSeek Harness 已加载 dsh-draw2code 插件
     And 当前会话工作目录已注册为 workspace
 
+  Scenario: 用户亲自画示意时不应进入 Create
+    Given 宿主提供可见的侧边栏浏览器
+    When 用户说“打开画码，我自己画一下”
+    Then agent 应只调用 draw2code_open 且 presentation 为 handoff
+    And agent 不应调用 draw2code_create
+    And 宿主应在侧边栏打开工具返回的短期 URL
+    And 只有画布真正可见后才能报告“画码已经打开”
+
+  Scenario: 用户画完后先读取并复述
+    Given 用户已经在当前可见画板中手绘了页面和交互箭头
+    When 用户说“我画好了，你看看”
+    Then agent 应调用 draw2code_read 读取当前可见画板
+    And agent 应先复述页面、组件和交互关系
+    But 用户未要求修改或生成时不应调用 draw2code_update 或 draw2code_generate
+
+  Scenario: 明确指定的画板优先于浏览器记忆
+    Given 浏览器上次停留在“旧画板”
+    When draw2code_open 返回带 board=心情日记 的短期 URL
+    Then standalone canvas 首次加载应显示“心情日记”
+    And 不应被本地记忆的“旧画板”覆盖
+
   Scenario: 画板文件只允许从已注册 workspace 读取
     When agent 请求读取当前 workspace 的“prototype”画板
     Then 应返回画板 revision、元素摘要和完整元素数据

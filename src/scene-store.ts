@@ -172,6 +172,11 @@ export interface VersionMeta {
   elementCount: number
 }
 
+/** One archived scene, read-only until restoreVersion is explicitly called. */
+export interface VersionRead extends VersionMeta {
+  scene: SceneFile
+}
+
 function err(code: string, message: string): { ok: false; error: SceneError } {
   return { ok: false, error: { code, message } }
 }
@@ -300,6 +305,7 @@ export function normalizeElement(input: unknown): Record<string, unknown> {
     out.verticalAlign = str(el.verticalAlign, 'top')
     out.containerId = el.containerId === undefined || el.containerId === null ? null : el.containerId
     out.lineHeight = num(el.lineHeight, 1.25)
+    out.autoResize = el.autoResize !== false
     if (el.width === undefined) out.width = num(el.width, Math.min(360, fontSize * (text.length || 8) * 0.62 + 16))
     if (el.height === undefined) out.height = num(el.height, lines * fontSize * 1.25 + 8)
   }
@@ -400,11 +406,13 @@ export function reconcileBoundTextBindings(
       const container = typeof element.containerId === 'string' ? byId.get(element.containerId) : undefined
       const elementRole = semanticRole(element)
       const containerRole = semanticRole(container)
-      const role = elementRole !== '' ? elementRole : containerRole
+      const elementAlignment = semanticTextAlignment(elementRole)
+      const containerAlignment = semanticTextAlignment(containerRole)
+      const role = elementAlignment !== null ? elementRole : containerRole
       const isFocused = alignmentFocusIds === undefined
         || alignmentFocusIds.has(String(element.id ?? ''))
         || (container !== undefined && alignmentFocusIds.has(String(container.id ?? '')))
-      const alignment = semanticTextAlignment(role)
+      const alignment = elementAlignment ?? containerAlignment
       if (isFocused && alignment !== null) {
         if (detachedNavigationTextIds.has(String(element.id ?? ''))) {
           return {
@@ -776,9 +784,8 @@ export class SceneStore {
     return { ok: true, value: versions }
   }
 
-  /** Roll a board back to one archived version (snapshotting the current
-   * state first, so the rollback itself is reversible). */
-  async restoreVersion(root: string, name: string, id: string): Promise<SceneResult<SceneMeta>> {
+  /** Read one archived version without changing the current board. */
+  async readVersion(root: string, name: string, id: string): Promise<SceneResult<VersionRead>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
     const named = this.checkName(name)
@@ -790,15 +797,39 @@ export class SceneStore {
     } catch {
       return err('not-found', `version ${id} of scene "${named.value}" does not exist`)
     }
-    let scene: unknown
+    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+      return err('too-large', `version ${id} of scene "${named.value}" exceeds the read cap`)
+    }
+    let parsed: unknown
     try {
-      scene = JSON.parse(raw)
+      parsed = JSON.parse(raw)
     } catch {
       return err('corrupt', `version ${id} of scene "${named.value}" is not valid JSON`)
     }
+    const elements = (parsed as { elements?: unknown }).elements
+    const scene: SceneFile = {
+      type: 'excalidraw',
+      version: 2,
+      source: 'dsh-draw2code',
+      elements: Array.isArray(elements) ? elements as Array<Record<string, unknown>> : [],
+      appState: {
+        viewBackgroundColor:
+          typeof (parsed as { appState?: { viewBackgroundColor?: unknown } }).appState?.viewBackgroundColor === 'string'
+            ? (parsed as { appState: { viewBackgroundColor: string } }).appState.viewBackgroundColor
+            : '#ffffff',
+      },
+    }
+    return { ok: true, value: { id, ts: Number(id.split('-', 1)[0]), elementCount: scene.elements.length, scene } }
+  }
+
+  /** Roll a board back to one archived version (snapshotting the current
+   * state first, so the rollback itself is reversible). */
+  async restoreVersion(root: string, name: string, id: string): Promise<SceneResult<SceneMeta>> {
+    const version = await this.readVersion(root, name, id)
+    if (!version.ok) return version
     // 'agent' here means "always snapshot": the state being rolled back from
     // must be archived so the rollback itself is reversible.
-    return this.write(root, named.value, scene, undefined, 'agent')
+    return this.write(root, name, version.value.scene, undefined, 'agent')
   }
 
   /**

@@ -21,7 +21,7 @@ import excalidrawCss from '@excalidraw/excalidraw/index.css'
 import { Excalidraw, MainMenu } from '@excalidraw/excalidraw'
 import type { LibraryItems_anyVersion } from '@excalidraw/excalidraw/types'
 import { D2cApi, type SceneMetaRow, type VersionRow } from './api.ts'
-import { capturePendingSave, isNormalizationOnlyEcho, saveWithConflictRetry, type PendingSave } from './sync.ts'
+import { capturePendingSave, flushCapturedSave, isNormalizationOnlyEcho, LatestAsyncAction, saveWithConflictRetry, type PendingSave } from './sync.ts'
 import basicUxLibrary from './library-assets/basic-ux-wireframing-elements.json'
 import loFiWireframingLibrary from './library-assets/lo-fi-wireframing-kit.json'
 import dataVizLibrary from './library-assets/data-viz.json'
@@ -171,6 +171,12 @@ function formatUpdatedAt(ts: number): string {
   return new Date(ts).toLocaleDateString('zh-CN')
 }
 
+function operationErrorMessage(error: { code: string; message: string }): string {
+  if (error.code === 'unauthorized') return '访问已过期，请重新打开画码'
+  if (error.code === 'board-forbidden' || error.code === 'forbidden') return '当前浏览器没有操作这个画板的权限'
+  return `操作失败：${error.message}`
+}
+
 /**
  * The board component.
  */
@@ -184,6 +190,9 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
   const readyRef = useRef(false)
   const remoteApplyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const isRemoteApplyingRef = useRef(false)
+  /** A historical preview is read-only and must never enter the save path. */
+  const isPreviewingRef = useRef(false)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   /** JSON echo of the last server pull (updateScene re-fires onChange). */
   const lastPulledJsonRef = useRef<string | null>(null)
   /**
@@ -202,7 +211,9 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
   /** Avoid an active-board poll racing a user's own board selection. */
   const lastLocalBoardChangeRef = useRef(0)
   /** Saves already handed to the host, keyed by board for delete barriers. */
-  const inFlightSavesRef = useRef(new Map<string, Promise<void>>())
+  const inFlightSavesRef = useRef(new Map<string, Promise<boolean>>())
+  /** Board selections are serialized; only the latest requested target commits. */
+  const boardSwitchActionsRef = useRef(new LatestAsyncAction())
   /** Prevent a delete from being followed by a late debounced save. */
   const deletingBoardsRef = useRef(new Set<string>())
 
@@ -216,6 +227,8 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [versions, setVersions] = useState<VersionRow[]>([])
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null)
+  const [previewVersion, setPreviewVersion] = useState<VersionRow | null>(null)
+  const [notice, setNotice] = useState<{ message: string; tone: 'info' | 'error' } | null>(null)
   const [remoteEpoch, setRemoteEpoch] = useState(0)
   const [activeBoardEpoch, setActiveBoardEpoch] = useState(0)
   /** Fixed position of the combined menu portal (anchored to the button). */
@@ -226,14 +239,15 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     boardRef.current = boardName
   }, [boardName])
 
-  // A different workspace: restore the board remembered for that workspace.
+  // A URL selected by draw2code_open is authoritative for the first load.
+  // Fall back to browser memory only when the host did not request a board.
   useEffect(() => {
-    const remembered = rememberedBoard(cwd)
-    if (remembered !== boardRef.current) {
-      boardRef.current = remembered
-      setBoardName(remembered)
+    const selected = initialBoard ?? rememberedBoard(cwd)
+    if (selected !== boardRef.current) {
+      boardRef.current = selected
+      setBoardName(selected)
     }
-  }, [cwd])
+  }, [cwd, initialBoard])
 
   // ---- board-host styles (injected once; see comment below) -------------
   useEffect(() => {
@@ -286,8 +300,17 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     excalidrawRef.current?.updateScene({ elements })
   }, [])
 
+  const showNotice = useCallback((message: string, tone: 'info' | 'error' = 'info'): void => {
+    if (noticeTimerRef.current !== undefined) clearTimeout(noticeTimerRef.current)
+    setNotice({ message, tone })
+    noticeTimerRef.current = setTimeout(() => {
+      noticeTimerRef.current = undefined
+      setNotice(null)
+    }, 4_500)
+  }, [])
+
   /** Write one scene to disk, three-way merging on revision conflicts. */
-  const persistScene = useCallback((name: string, elements: Array<Record<string, unknown>>, baseRev: number, baseElements: Array<Record<string, unknown>>): Promise<void> => {
+  const persistScene = useCallback((name: string, elements: Array<Record<string, unknown>>, baseRev: number, baseElements: Array<Record<string, unknown>>): Promise<boolean> => {
     const scene = {
       type: 'excalidraw' as const,
       version: 2 as const,
@@ -295,10 +318,10 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       elements,
       appState: { viewBackgroundColor: '#ffffff' },
     }
-    const save = async (): Promise<void> => {
+    const save = async (): Promise<boolean> => {
       // A delete action owns the board from this point until the host confirms
       // removal. A queued debounce must never recreate the deleted file.
-      if (deletingBoardsRef.current.has(name)) return
+      if (deletingBoardsRef.current.has(name)) return true
       const saved = await saveWithConflictRetry({
         elements,
         baseElements,
@@ -318,54 +341,65 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       })
       const result = saved.result
       const savedElements = saved.savedElements
-      // A late settlement for a board we already left must not touch refs.
-      if (boardRef.current !== name) return
-      if (result.ok) {
-        // A successful local save becomes the new merge base immediately.
-        // Without this, the next remote update compares against the scene
-        // before the user's deletion and may resurrect deleted elements.
-        // Tombstones are dropped to mirror the server's normalizeScene
-        // (physical deletion) — otherwise this cached base still contains
-        // tombstones, and a later identical delete JSON gets swallowed by
-        // the echo guard instead of being saved.
-        const settled = savedElements.filter((el) => el.isDeleted !== true)
-        revRef.current = result.rev
-        elementsRef.current = settled
-        serverElementsRef.current = settled
-        lastPulledJsonRef.current = JSON.stringify(settled)
-        staleEchoJsonRef.current = null
-        // When a conflict merge changed the outcome (agent additions kept,
-        // or concurrent edits folded in), the user's canvas still shows the
-        // pre-merge local scene. Without resyncing it here, the very next
-        // local edit saves the stale canvas verbatim — now with a matching
-        // baseRev, so it blind-overwrites the merged result and silently
-        // wipes everything the merge had preserved (e.g. agent-drawn pages).
-        if (JSON.stringify(settled) !== JSON.stringify(elements)) {
-          applyRemoteScene(settled)
-        }
-      } else {
-        console.warn('[dsh-draw2code] local scene save was not applied after conflict')
+      if (!result.ok) {
+        if (boardRef.current === name) showNotice(operationErrorMessage(result.error), 'error')
+        return false
       }
+      // A late settlement for a board we already left must not touch refs.
+      if (boardRef.current !== name) return true
+      // A successful local save becomes the new merge base immediately.
+      // Without this, the next remote update compares against the scene
+      // before the user's deletion and may resurrect deleted elements.
+      // Tombstones are dropped to mirror the server's normalizeScene
+      // (physical deletion) — otherwise this cached base still contains
+      // tombstones, and a later identical delete JSON gets swallowed by
+      // the echo guard instead of being saved.
+      const settled = savedElements.filter((el) => el.isDeleted !== true)
+      revRef.current = result.rev
+      elementsRef.current = settled
+      serverElementsRef.current = settled
+      lastPulledJsonRef.current = JSON.stringify(settled)
+      staleEchoJsonRef.current = null
+      // When a conflict merge changed the outcome (agent additions kept,
+      // or concurrent edits folded in), the user's canvas still shows the
+      // pre-merge local scene. Without resyncing it here, the very next
+      // local edit saves the stale canvas verbatim — now with a matching
+      // baseRev, so it blind-overwrites the merged result and silently
+      // wipes everything the merge had preserved (e.g. agent-drawn pages).
+      if (JSON.stringify(settled) !== JSON.stringify(elements)) {
+        applyRemoteScene(settled)
+      }
+      return true
     }
     const previous = inFlightSavesRef.current.get(name)
-    const task = (previous ?? Promise.resolve()).catch(() => undefined).then(save)
+    const task = (previous ?? Promise.resolve()).catch(() => false).then(save)
     inFlightSavesRef.current.set(name, task)
     void task.finally(() => {
       if (inFlightSavesRef.current.get(name) === task) inFlightSavesRef.current.delete(name)
     }).catch(() => undefined)
     return task
-  }, [cwd, applyRemoteScene])
+  }, [cwd, applyRemoteScene, showNotice])
+
+  const landCapturedSave = useCallback(async (pending: PendingSave): Promise<boolean> => {
+    const flushed = await flushCapturedSave(pending, async (captured) => {
+      return persistScene(captured.name, captured.elements, captured.baseRev, captured.baseElements)
+    })
+    if (!flushed.ok && pendingSaveRef.current === null) pendingSaveRef.current = flushed.retry
+    return flushed.ok
+  }, [persistScene])
 
   /** Immediately write any debounced-but-unflushed edit (board switches). */
-  const flushPendingSave = useCallback(async (): Promise<void> => {
+  const flushPendingSave = useCallback(async (): Promise<boolean> => {
     if (saveTimerRef.current !== undefined) {
       clearTimeout(saveTimerRef.current)
       saveTimerRef.current = undefined
     }
     const pending = pendingSaveRef.current
     pendingSaveRef.current = null
-    if (pending !== null) await persistScene(pending.name, pending.elements, pending.baseRev, pending.baseElements)
-  }, [persistScene])
+    if (pending !== null) return landCapturedSave(pending)
+    const inFlight = inFlightSavesRef.current.get(boardRef.current)
+    return inFlight === undefined ? true : await inFlight
+  }, [landCapturedSave])
 
   // ---- load + poll the board (while visible) ----------------------------
   useEffect(() => {
@@ -397,8 +431,10 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
 
     const pull = async (): Promise<void> => {
       if (!visible) return
+      if (isPreviewingRef.current) return
       const result = await apiRef.current.read(cwd, boardName)
       if (cancelled || !result.ok) {
+        if (!result.ok && result.error.code === 'unauthorized') showNotice(operationErrorMessage(result.error), 'error')
         if (!result.ok && result.error.code === 'not-found') {
           excalidrawRef.current?.updateScene({ elements: [] })
           revRef.current = 0
@@ -439,7 +475,7 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       cancelled = true
       clearInterval(timer)
     }
-  }, [cwd, boardName, visible, applyRemoteScene, remoteEpoch])
+  }, [cwd, boardName, visible, applyRemoteScene, remoteEpoch, showNotice])
 
   useEffect(() => apiRef.current.subscribe(cwd, (event) => {
     if (event.type === 'scene.updated' || event.type === 'active-board.changed' || event.type === 'board.deleted') {
@@ -456,7 +492,11 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     let cancelled = false
     const refresh = async (): Promise<void> => {
       const result = await apiRef.current.list(cwd)
-      if (cancelled || !result.ok) return
+      if (cancelled) return
+      if (!result.ok) {
+        if (result.error.code === 'unauthorized') showNotice(operationErrorMessage(result.error), 'error')
+        return
+      }
       setBoards(result.scenes)
     }
     void refresh()
@@ -465,11 +505,12 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       cancelled = true
       clearInterval(timer)
     }
-  }, [cwd, visible])
+  }, [cwd, visible, showNotice])
 
   // ---- debounced save of local edits ------------------------------------
   const scheduleSave = useCallback((elements: Array<Record<string, unknown>>): void => {
     if (cwd === '') return
+    if (isPreviewingRef.current) return
     if (!readyRef.current) return
     if (deletingBoardsRef.current.has(boardRef.current)) return
     if (elements.length === 0 && revRef.current === 0) return
@@ -485,19 +526,21 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       saveTimerRef.current = undefined
       const pending = pendingSaveRef.current
       pendingSaveRef.current = null
-      if (pending !== null) persistScene(pending.name, pending.elements, pending.baseRev, pending.baseElements)
+      if (pending !== null) void landCapturedSave(pending)
     }, SAVE_DEBOUNCE_MS)
-  }, [cwd, persistScene])
+  }, [cwd, landCapturedSave])
 
   // ---- flush pending save on unmount ------------------------------------
   useEffect(() => () => {
     if (saveTimerRef.current !== undefined) clearTimeout(saveTimerRef.current)
     if (remoteApplyTimerRef.current !== undefined) clearTimeout(remoteApplyTimerRef.current)
+    if (noticeTimerRef.current !== undefined) clearTimeout(noticeTimerRef.current)
     const pending = pendingSaveRef.current
     if (pending !== null) persistScene(pending.name, pending.elements, pending.baseRev, pending.baseElements)
   }, [persistScene])
 
   const onChange = useCallback((elements: unknown): void => {
+    if (isPreviewingRef.current) return
     if (isRemoteApplyingRef.current) return
     const list = (Array.isArray(elements) ? elements : []) as Array<Record<string, unknown>>
     const json = JSON.stringify(list)
@@ -537,17 +580,23 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
   const switchBoard = useCallback((name: string, force = false): void => {
     if (!force && name === boardRef.current) return
     lastLocalBoardChangeRef.current = Date.now()
-    void (async () => {
-      await flushPendingSave()
+    void boardSwitchActionsRef.current.run(async (isCurrent) => {
+      if (!await flushPendingSave() || !isCurrent()) return false
       if (cwd !== '') {
         const selected = await apiRef.current.setActiveBoard(cwd, name)
         if (!selected.ok) {
-          console.warn('[dsh-draw2code] select board failed:', selected.error.message)
-          return
+          if (isCurrent()) showNotice(operationErrorMessage(selected.error), 'error')
+          return false
         }
       }
-      // The active-board request also advances a scoped Canvas token before
-      // the first read of the newly selected board.
+      return true
+    }, (ready) => {
+      if (!ready) return
+      isPreviewingRef.current = false
+      setPreviewVersion(null)
+      setConfirmRestore(null)
+      // Reset the local merge base before the first read of the newly
+      // selected board. The workspace-scoped token already permits it.
       revRef.current = 0
       readyRef.current = false
       lastPulledJsonRef.current = null
@@ -559,8 +608,8 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       setBoardName(name)
       rememberBoard(cwd, name)
       setMenuOpen(false)
-    })()
-  }, [cwd, flushPendingSave])
+    }).catch((error) => showNotice(`操作失败：${error instanceof Error ? error.message : String(error)}`, 'error'))
+  }, [cwd, flushPendingSave, showNotice])
 
   // The host can create and select an isolated board during
   // draw2code_create. Follow the shared active-board pointer so the board
@@ -593,6 +642,7 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     const result = await apiRef.current.create(cwd, name)
     if (!result.ok) {
       setCreateError(result.error.code === 'exists' ? '同名画板已存在' : result.error.message)
+      if (result.error.code === 'unauthorized') showNotice(operationErrorMessage(result.error), 'error')
       return
     }
     const listed = await apiRef.current.list(cwd)
@@ -601,7 +651,7 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     setNewName('')
     setCreateError('')
     switchBoard(name)
-  }, [cwd, newName, switchBoard])
+  }, [cwd, newName, switchBoard, showNotice])
 
   const deleteBoard = useCallback(async (name: string): Promise<void> => {
     deletingBoardsRef.current.add(name)
@@ -620,7 +670,7 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
       if (inFlight !== undefined) await inFlight.catch(() => undefined)
       const result = await apiRef.current.remove(cwd, name)
       if (!result.ok) {
-        console.warn('[dsh-draw2code] delete board failed:', result.error.message)
+        showNotice(operationErrorMessage(result.error), 'error')
         return
       }
       const listed = await apiRef.current.list(cwd)
@@ -636,26 +686,71 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     } finally {
       deletingBoardsRef.current.delete(name)
     }
-  }, [cwd, switchBoard])
+  }, [cwd, switchBoard, showNotice])
 
   // ---- version history -----------------------------------------------------
   const refreshVersions = useCallback(async (): Promise<void> => {
     const result = await apiRef.current.listVersions(cwd, boardRef.current)
     if (result.ok) setVersions(result.versions)
-  }, [cwd])
+    else showNotice(operationErrorMessage(result.error), 'error')
+  }, [cwd, showNotice])
+
+  const previewHistoryVersion = useCallback(async (row: VersionRow): Promise<boolean> => {
+    if (!await flushPendingSave()) return false
+    const result = await apiRef.current.readVersion(cwd, boardRef.current, row.id)
+    if (!result.ok) {
+      showNotice(operationErrorMessage(result.error), 'error')
+      return false
+    }
+    isPreviewingRef.current = true
+    setPreviewVersion(row)
+    setConfirmRestore(null)
+    excalidrawRef.current?.updateScene({ elements: result.scene.elements })
+    return true
+  }, [cwd, flushPendingSave, showNotice])
+
+  const leaveHistoryPreview = useCallback(async (): Promise<void> => {
+    const result = await apiRef.current.read(cwd, boardRef.current)
+    if (!result.ok) {
+      showNotice(operationErrorMessage(result.error), 'error')
+      return
+    }
+    isPreviewingRef.current = false
+    setPreviewVersion(null)
+    setConfirmRestore(null)
+    revRef.current = result.rev
+    readyRef.current = true
+    applyRemoteScene(result.scene.elements)
+  }, [cwd, applyRemoteScene, showNotice])
+
+  const requestRestore = useCallback(async (row: VersionRow): Promise<void> => {
+    if (previewVersion?.id !== row.id && !await previewHistoryVersion(row)) return
+    setConfirmRestore(row.id)
+  }, [previewVersion, previewHistoryVersion])
 
   const restoreVersion = useCallback(async (id: string): Promise<void> => {
     // Land any un-flushed local edit first so the rollback archives the
     // user's latest state (rollback itself stays reversible).
-    await flushPendingSave()
+    if (!await flushPendingSave()) return
     const result = await apiRef.current.restoreVersion(cwd, boardRef.current, id)
     if (!result.ok) {
-      console.warn('[dsh-draw2code] restore failed:', result.error.message)
+      showNotice(operationErrorMessage(result.error), 'error')
       return
     }
+    const restored = await apiRef.current.read(cwd, boardRef.current)
+    if (!restored.ok) {
+      showNotice(`回滚已完成，但画布刷新失败：${operationErrorMessage(restored.error)}`, 'error')
+      return
+    }
+    isPreviewingRef.current = false
+    setPreviewVersion(null)
     setConfirmRestore(null)
+    revRef.current = restored.rev
+    readyRef.current = true
+    applyRemoteScene(restored.scene.elements)
     await refreshVersions()
-  }, [cwd, flushPendingSave, refreshVersions])
+    showNotice('已回滚到所选历史版本')
+  }, [cwd, flushPendingSave, refreshVersions, applyRemoteScene, showNotice])
 
   // Refresh the version list whenever the combined menu opens (and whenever
   // the active board changes while it is open).
@@ -723,6 +818,12 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
           padding: 4, color: palette.text, fontSize: 12,
         }}
       >
+        <div
+          title={cwd}
+          style={{ padding: '4px 8px 3px', color: palette.sub, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
+          工作区 · {cwd.split('/').filter(Boolean).at(-1) ?? cwd}
+        </div>
         {creating ? (
           <div style={{ padding: '6px 6px 2px' }}>
             <input
@@ -836,19 +937,25 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
                   style={{
                     display: 'flex', alignItems: 'center', gap: 6, padding: '5px 6px 5px 8px',
                     borderRadius: 6, cursor: 'default',
+                    background: previewVersion?.id === row.id ? palette.active : 'transparent',
                   }}
-                  onMouseEnter={(event) => { event.currentTarget.style.background = palette.hover }}
-                  onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent' }}
+                  onMouseEnter={(event) => { if (previewVersion?.id !== row.id) event.currentTarget.style.background = palette.hover }}
+                  onMouseLeave={(event) => { event.currentTarget.style.background = previewVersion?.id === row.id ? palette.active : 'transparent' }}
                 >
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <button
+                    type="button"
+                    title="预览此版本"
+                    onClick={() => { void previewHistoryVersion(row) }}
+                    style={{ flex: 1, minWidth: 0, padding: 0, border: 'none', background: 'transparent', color: 'inherit', textAlign: 'left', cursor: 'pointer', fontSize: 12 }}
+                  >
                     <div>{formatUpdatedAt(row.ts)} 存档</div>
-                    <div style={{ color: palette.sub, fontSize: 11 }}>{row.elementCount} 个元素</div>
-                  </div>
+                    <div style={{ color: palette.sub, fontSize: 11 }}>{row.elementCount} 个元素 · {previewVersion?.id === row.id ? '正在预览' : '点击预览'}</div>
+                  </button>
                   {confirmRestore === row.id
                     ? (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                         <button type="button" onClick={() => { void restoreVersion(row.id) }}
-                          style={{ height: 22, padding: '0 7px', borderRadius: 5, border: 'none', cursor: 'pointer', background: '#4656e0', color: '#fff', fontSize: 11 }}>恢复</button>
+                          style={{ height: 22, padding: '0 7px', borderRadius: 5, border: 'none', cursor: 'pointer', background: '#4656e0', color: '#fff', fontSize: 11 }}>确定</button>
                         <button type="button" onClick={() => setConfirmRestore(null)}
                           style={{ height: 22, padding: '0 7px', borderRadius: 5, border: `1px solid ${palette.border}`, cursor: 'pointer', background: 'transparent', color: palette.sub, fontSize: 11 }}>取消</button>
                       </div>
@@ -857,7 +964,7 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
                       <button
                         type="button"
                         title="回滚到此版本"
-                        onClick={() => setConfirmRestore(row.id)}
+                        onClick={() => { void requestRestore(row) }}
                         style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 3, height: 22, padding: '0 7px', borderRadius: 5, border: `1px solid ${palette.border}`, cursor: 'pointer', background: 'transparent', color: palette.sub, fontSize: 11 }}
                         onMouseEnter={(event) => { event.currentTarget.style.color = palette.text; event.currentTarget.style.background = palette.active }}
                         onMouseLeave={(event) => { event.currentTarget.style.color = palette.sub; event.currentTarget.style.background = 'transparent' }}
@@ -905,12 +1012,44 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
             onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; event.currentTarget.style.color = palette.sub }}
           ><PlusIcon />新画板</button>
         </div>
+        {previewVersion !== null && (
+          <div
+            role="status"
+            style={{
+              marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 7, minWidth: 0,
+              height: 24, padding: '0 7px', borderRadius: 6,
+              background: dark ? '#302b18' : '#fff7d6', color: dark ? '#f3d97b' : '#735c00', fontSize: 11,
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              正在预览 {formatUpdatedAt(previewVersion.ts)}版本
+            </span>
+            <button
+              type="button"
+              onClick={() => { void leaveHistoryPreview() }}
+              style={{ height: 20, padding: '0 6px', borderRadius: 4, border: `1px solid ${dark ? '#6a5a28' : '#d9c36a'}`, background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 11, flexShrink: 0 }}
+            >返回当前版本</button>
+          </div>
+        )}
+        {notice !== null && (
+          <div
+            role="status"
+            style={{
+              marginLeft: previewVersion === null ? 'auto' : 4, maxWidth: '46%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              height: 24, lineHeight: '24px', padding: '0 8px', borderRadius: 6,
+              background: notice.tone === 'error' ? (dark ? '#4a2228' : '#ffe3e3') : (dark ? '#203829' : '#d3f9d8'),
+              color: notice.tone === 'error' ? (dark ? '#ffadb8' : '#a61e2b') : (dark ? '#9be9b2' : '#237a3b'), fontSize: 11,
+            }}
+            title={notice.message}
+          >{notice.message}</div>
+        )}
       </div>
       {menuPanel}
       <div className="d2c-toolbar-fade" style={{ background: `linear-gradient(${palette.bar}, transparent)` }} />
       <Excalidraw
         excalidrawAPI={(api) => { excalidrawRef.current = api as unknown as LooseExcalidrawApi }}
         onChange={(elements) => { onChange(elements as unknown as Array<Record<string, unknown>>) }}
+        viewModeEnabled={previewVersion !== null}
         theme={dark ? 'dark' : 'light'}
         langCode="zh-CN"
         UIOptions={{

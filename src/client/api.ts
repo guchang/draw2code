@@ -239,6 +239,10 @@ export class D2cApi {
     return get(this.path(`/api/draw2code/versions?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`), this.options.token)
   }
 
+  readVersion(root: string, name: string, id: string): Promise<D2cResult<VersionRow & { scene: ScenePayload }>> {
+    return get(this.path(`/api/draw2code/version?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}&id=${encodeURIComponent(id)}`), this.options.token)
+  }
+
   restoreVersion(root: string, name: string, id: string): Promise<D2cResult<{ rev: number; elementCount: number }>> {
     return send(this.path('/api/draw2code/restore'), 'POST', { root, name, id }, this.options.token)
   }

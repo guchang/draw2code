@@ -59,6 +59,7 @@ test('presentation uses capability detection instead of host names', () => {
   assert.equal(choosePresentation('auto', { mcpUi: false, externalBrowser: true }), 'browser')
   assert.equal(choosePresentation('auto', { mcpUi: false, externalBrowser: false }), 'headless')
   assert.equal(choosePresentation('browser', { mcpUi: true, externalBrowser: false }), 'headless')
+  assert.equal(choosePresentation('handoff', { mcpUi: true, externalBrowser: true }), 'handoff')
 })
 
 test('daemon descriptor is private, nonce-bound and rejects permissive files', async () => {

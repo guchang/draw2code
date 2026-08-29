@@ -492,7 +492,7 @@ function pageQualityWarnings(
   }
 
   const leftOffsets = content
-    .filter((element) => !isBottomNavigationMember(element) && num(element.width) >= page.bounds.width * 0.35)
+    .filter((element) => !isBottomNavigationMember(element) && num(element.width) > page.bounds.width * 0.5)
     .map((element) => Math.round(num(element.x) - page.bounds.x))
   if (leftOffsets.length >= 4 && Math.max(...leftOffsets) - Math.min(...leftOffsets) > 20) {
     warnings.push(qualityIssue(

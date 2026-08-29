@@ -8,7 +8,7 @@ import { draw2codeCreateTool } from './create-tool.ts'
 import { draw2codeGenerateTool, draw2codeListTool, draw2codeReadTool, draw2codeUpdateTool } from './tools.ts'
 
 export type HostKind = 'dsh' | 'codex' | 'mcp' | 'cli'
-export type Presentation = 'inline' | 'browser' | 'headless'
+export type Presentation = 'inline' | 'browser' | 'handoff' | 'headless'
 
 export interface HostContext {
   clientId: string
@@ -24,7 +24,7 @@ export type Draw2CodeCommand =
   | { type: 'create'; root: string; input: Record<string, unknown> }
   | { type: 'update'; root: string; board?: string; ops: unknown[]; force?: boolean; safeMode?: boolean; visualReview?: Record<string, unknown> }
   | { type: 'generate'; root: string; input: Record<string, unknown> }
-  | { type: 'open'; root: string; board?: string; presentation?: 'auto' | 'inline' | 'browser' }
+  | { type: 'open'; root: string; board?: string; presentation?: 'auto' | 'inline' | 'browser' | 'handoff' }
 
 export type Draw2CodeEvent =
   | { type: 'scene.updated'; root: string; board: string; revision: number; sourceClientId: string }
@@ -51,9 +51,10 @@ export interface Draw2CodeRuntime {
 }
 
 export function choosePresentation(
-  requested: 'auto' | 'inline' | 'browser' = 'auto',
+  requested: 'auto' | 'inline' | 'browser' | 'handoff' = 'auto',
   capabilities: HostContext['uiCapabilities'],
 ): Presentation {
+  if (requested === 'handoff') return 'handoff'
   if (requested === 'inline') return capabilities.mcpUi ? 'inline' : capabilities.externalBrowser ? 'browser' : 'headless'
   if (requested === 'browser') return capabilities.externalBrowser ? 'browser' : 'headless'
   if (capabilities.mcpUi) return 'inline'

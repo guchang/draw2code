@@ -199,6 +199,7 @@ function normalizeElement(input) {
     out.verticalAlign = str4(el.verticalAlign, "top");
     out.containerId = el.containerId === void 0 || el.containerId === null ? null : el.containerId;
     out.lineHeight = num4(el.lineHeight, 1.25);
+    out.autoResize = el.autoResize !== false;
     if (el.width === void 0) out.width = num4(el.width, Math.min(360, fontSize * (text3.length || 8) * 0.62 + 16));
     if (el.height === void 0) out.height = num4(el.height, lines * fontSize * 1.25 + 8);
   }
@@ -267,9 +268,11 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
       const container = typeof element.containerId === "string" ? byId.get(element.containerId) : void 0;
       const elementRole3 = semanticRole(element);
       const containerRole = semanticRole(container);
-      const role2 = elementRole3 !== "" ? elementRole3 : containerRole;
+      const elementAlignment = semanticTextAlignment(elementRole3);
+      const containerAlignment = semanticTextAlignment(containerRole);
+      const role2 = elementAlignment !== null ? elementRole3 : containerRole;
       const isFocused2 = alignmentFocusIds === void 0 || alignmentFocusIds.has(String(element.id ?? "")) || container !== void 0 && alignmentFocusIds.has(String(container.id ?? ""));
-      const alignment = semanticTextAlignment(role2);
+      const alignment = elementAlignment ?? containerAlignment;
       if (isFocused2 && alignment !== null) {
         if (detachedNavigationTextIds.has(String(element.id ?? ""))) {
           return {
@@ -593,9 +596,8 @@ var SceneStore = class {
     versions.sort((a, b) => b.ts - a.ts);
     return { ok: true, value: versions };
   }
-  /** Roll a board back to one archived version (snapshotting the current
-   * state first, so the rollback itself is reversible). */
-  async restoreVersion(root, name2, id) {
+  /** Read one archived version without changing the current board. */
+  async readVersion(root, name2, id) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     const named = this.checkName(name2);
@@ -607,13 +609,33 @@ var SceneStore = class {
     } catch {
       return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
     }
-    let scene;
+    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+      return err("too-large", `version ${id} of scene "${named.value}" exceeds the read cap`);
+    }
+    let parsed;
     try {
-      scene = JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
       return err("corrupt", `version ${id} of scene "${named.value}" is not valid JSON`);
     }
-    return this.write(root, named.value, scene, void 0, "agent");
+    const elements = parsed.elements;
+    const scene = {
+      type: "excalidraw",
+      version: 2,
+      source: "dsh-draw2code",
+      elements: Array.isArray(elements) ? elements : [],
+      appState: {
+        viewBackgroundColor: typeof parsed.appState?.viewBackgroundColor === "string" ? parsed.appState.viewBackgroundColor : "#ffffff"
+      }
+    };
+    return { ok: true, value: { id, ts: Number(id.split("-", 1)[0]), elementCount: scene.elements.length, scene } };
+  }
+  /** Roll a board back to one archived version (snapshotting the current
+   * state first, so the rollback itself is reversible). */
+  async restoreVersion(root, name2, id) {
+    const version = await this.readVersion(root, name2, id);
+    if (!version.ok) return version;
+    return this.write(root, name2, version.value.scene, void 0, "agent");
   }
   /**
    * Inventory the generated-pages output directory of a board
@@ -3665,7 +3687,7 @@ function pageQualityWarnings(page, members) {
       ));
     }
   }
-  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) >= page.bounds.width * 0.35).map((element) => Math.round(num2(element.x) - page.bounds.x));
+  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) > page.bounds.width * 0.5).map((element) => Math.round(num2(element.x) - page.bounds.x));
   if (leftOffsets.length >= 4 && Math.max(...leftOffsets) - Math.min(...leftOffsets) > 20) {
     warnings.push(qualityIssue(
       "page-margin-inconsistent",
@@ -5552,7 +5574,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 }
 
 // references/workflow-contract.md
-var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u53EA\u8C03\u7528 `draw2code_open`\uFF1A\u6709 active board \u5C31\u6062\u590D\uFF1B\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\uFF0C\u4E0D\u80FD\u64C5\u81EA\u5F00\u59CB Create\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName` \u548C\u540C\u4E00\u4EFD `brief` \u8C03\u7528 `draw2code_update`\u3002\u9996\u8F6E\u6709 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\u5148\u753B\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u5728\u53EF\u89C1\u753B\u677F\u68C0\u67E5\uFF0C\u518D\u5E26 `phase=representative` \u7684 `visualReview` \u6DFB\u52A0\u5176\u4F59\u9875\u9762\uFF1B\u590D\u6838\u5FC5\u987B\u643A\u5E26\u6700\u8FD1\u4E00\u6B21 update \u8FD4\u56DE\u7684 `rev` \u4E0E `revealRequestId`\uFF0C\u4E0D\u80FD\u91CD\u653E\u65E7\u7ED3\u679C\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528\u7A7A ops \u63D0\u4EA4\u8986\u76D6\u6240\u6709 page id \u7684 `phase=final` \u590D\u6838\u3002\u5DF2\u6709\u753B\u677F\u4FEE\u6539\u5FC5\u987B\u5148 `draw2code_read` \u518D `draw2code_update`\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- \u7B2C\u4E00\u6B21\u521B\u5EFA\u3001\u8BFB\u53D6\u6216\u7528\u6237\u660E\u786E\u6253\u5F00\u65F6\u5C55\u793A\u753B\u677F\uFF1A\u652F\u6301 MCP UI \u5C31\u5185\u5D4C\uFF1B\u5426\u5219\u672C\u5730\u56FE\u5F62\u73AF\u5883\u6253\u5F00 daemon \u7684\u77ED\u671F URL\uFF1Bheadless \u53EA\u8FD4\u56DE URL\u3002\u4E0D\u8981\u6839\u636E\u5BBF\u4E3B\u4EA7\u54C1\u540D\u5206\u652F\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F\u66F4\u65B0\u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002\u53EA\u6709\u6B64\u540E\u63D0\u4EA4\u7684 `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F workspace/board scoped token\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n";
+var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u53EA\u8C03\u7528 `draw2code_open`\uFF1A\u6709 active board \u5C31\u6062\u590D\uFF1B\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\uFF0C\u4E0D\u80FD\u64C5\u81EA\u5F00\u59CB Create\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName` \u548C\u540C\u4E00\u4EFD `brief` \u8C03\u7528 `draw2code_update`\u3002\u9996\u8F6E\u6709 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\u5148\u753B\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u5728\u53EF\u89C1\u753B\u677F\u68C0\u67E5\uFF0C\u518D\u5E26 `phase=representative` \u7684 `visualReview` \u6DFB\u52A0\u5176\u4F59\u9875\u9762\uFF1B\u590D\u6838\u5FC5\u987B\u643A\u5E26\u6700\u8FD1\u4E00\u6B21 update \u8FD4\u56DE\u7684 `rev` \u4E0E `revealRequestId`\uFF0C\u4E0D\u80FD\u91CD\u653E\u65E7\u7ED3\u679C\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528\u7A7A ops \u63D0\u4EA4\u8986\u76D6\u6240\u6709 page id \u7684 `phase=final` \u590D\u6838\u3002\u5DF2\u6709\u753B\u677F\u4FEE\u6539\u5FC5\u987B\u5148 `draw2code_read` \u518D `draw2code_update`\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- \u7B2C\u4E00\u6B21\u521B\u5EFA\u3001\u8BFB\u53D6\u6216\u7528\u6237\u660E\u786E\u6253\u5F00\u65F6\u5C55\u793A\u753B\u677F\uFF1A\u652F\u6301 MCP UI \u5C31\u5185\u5D4C\uFF1B\u5426\u5219\u672C\u5730\u56FE\u5F62\u73AF\u5883\u6253\u5F00 daemon \u7684\u77ED\u671F URL\uFF1Bheadless \u53EA\u8FD4\u56DE URL\u3002\u4E0D\u8981\u6839\u636E\u5BBF\u4E3B\u4EA7\u54C1\u540D\u5206\u652F\u3002\n- \u5BBF\u4E3B\u5177\u6709\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6D4F\u89C8\u5668\u65F6\u4F7F\u7528 `presentation=handoff`\uFF1A\u5DE5\u5177\u53EA\u51C6\u5907\u77ED\u671F URL \u5E76\u8FD4\u56DE `displayState=handoff-ready`\uFF0C\u5BBF\u4E3B\u8D1F\u8D23\u5728\u4FA7\u8FB9\u680F\u5BFC\u822A\u548C\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u53EA\u6709\u753B\u5E03\u5728\u4FA7\u8FB9\u680F\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F\u66F4\u65B0\u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002\u53EA\u6709\u6B64\u540E\u63D0\u4EA4\u7684 `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F\u3001\u6D3B\u52A8\u7EED\u671F\u7684 workspace-scoped token\uFF0C\u53EF\u5728\u8BE5 root \u5185\u7BA1\u7406\u591A\u4E2A\u753B\u677F\u4F46\u4E0D\u80FD\u8DE8 root \u8BBF\u95EE\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n";
 
 // src/guidance.ts
 var SECTION_ORDER = 220;
@@ -5571,9 +5593,9 @@ var DRAW2CODE_GUIDANCE = [
 
 // src/daemon-client.ts
 import { execFile, spawn } from "node:child_process";
-import { open as open2, mkdir as mkdir4, rm as rm2 } from "node:fs/promises";
+import { open as open2, mkdir as mkdir4, readFile as readFile4, rm as rm2, stat as stat4 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as join3 } from "node:path";
+import { dirname as dirname2, join as join3 } from "node:path";
 
 // src/runtime.ts
 import { randomBytes } from "node:crypto";
@@ -5590,6 +5612,7 @@ function storeContextFor(workspaceRoot) {
 
 // src/runtime.ts
 function choosePresentation(requested = "auto", capabilities) {
+  if (requested === "handoff") return "handoff";
   if (requested === "inline") return capabilities.mcpUi ? "inline" : capabilities.externalBrowser ? "browser" : "headless";
   if (requested === "browser") return capabilities.externalBrowser ? "browser" : "headless";
   if (capabilities.mcpUi) return "inline";
@@ -5768,6 +5791,29 @@ async function waitForDescriptor(path, timeoutMs) {
   }
   throw new Error("draw2code daemon did not become healthy");
 }
+async function staleStartupLock(path) {
+  try {
+    const info = await stat4(path);
+    let owner = {};
+    try {
+      owner = JSON.parse(await readFile4(path, "utf8"));
+    } catch {
+      return Date.now() - info.mtimeMs > 8e3;
+    }
+    if (Number.isInteger(owner.pid) && Number(owner.pid) > 0) {
+      try {
+        process.kill(Number(owner.pid), 0);
+        return false;
+      } catch (error2) {
+        if (error2.code === "ESRCH") return true;
+        return false;
+      }
+    }
+    return Date.now() - info.mtimeMs > 8e3;
+  } catch {
+    return false;
+  }
+}
 var Draw2CodeDaemonClient = class {
   constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
     this.daemonEntry = daemonEntry;
@@ -5777,30 +5823,38 @@ var Draw2CodeDaemonClient = class {
   async ensure() {
     const current = await validateDaemonDescriptor(this.descriptorPath);
     if (current !== null && await healthy(current)) return current;
-    await mkdir4(daemonRuntimeDir(), { recursive: true, mode: 448 });
+    await mkdir4(dirname2(this.descriptorPath), { recursive: true, mode: 448 });
     await rm2(this.descriptorPath, { force: true });
     const lockPath = `${this.descriptorPath}.lock`;
-    let lock = null;
-    try {
-      lock = await open2(lockPath, "wx", 384);
-      const child = spawn(process.execPath, [this.daemonEntry], {
-        detached: true,
-        stdio: "ignore",
-        env: {
-          ...process.env,
-          DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
-          DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
+    while (true) {
+      let lock = null;
+      try {
+        lock = await open2(lockPath, "wx", 384);
+        await lock.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}
+`);
+        const child = spawn(process.execPath, [this.daemonEntry], {
+          detached: true,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
+            DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
+          }
+        });
+        child.unref();
+        return await waitForDescriptor(this.descriptorPath, 8e3);
+      } catch (error2) {
+        if (error2.code !== "EEXIST") throw error2;
+        if (await staleStartupLock(lockPath)) {
+          await rm2(lockPath, { force: true });
+          continue;
         }
-      });
-      child.unref();
-      return await waitForDescriptor(this.descriptorPath, 8e3);
-    } catch (error2) {
-      if (error2.code !== "EEXIST") throw error2;
-    } finally {
-      await lock?.close();
-      if (lock !== null) await rm2(lockPath, { force: true });
+      } finally {
+        await lock?.close();
+        if (lock !== null) await rm2(lockPath, { force: true });
+      }
+      return waitForDescriptor(this.descriptorPath, 8e3);
     }
-    return waitForDescriptor(this.descriptorPath, 8e3);
   }
   async execute(command, context) {
     const descriptor = await this.ensure();
@@ -5849,9 +5903,10 @@ var Draw2CodeDaemonClient = class {
     return { url: body.url, token: body.token, expiresAt: body.expiresAt };
   }
   async openBrowser(url) {
-    if (process.platform !== "darwin") return;
-    await new Promise((resolve3, reject) => {
-      execFile("/usr/bin/open", [url], (error2) => error2 === null ? resolve3() : reject(error2));
+    const launcher = process.platform === "darwin" ? { command: "/usr/bin/open", args: [url] } : process.platform === "linux" ? { command: "xdg-open", args: [url] } : process.platform === "win32" ? { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : null;
+    if (launcher === null) return false;
+    return await new Promise((resolve3) => {
+      execFile(launcher.command, launcher.args, (error2) => resolve3(error2 === null));
     });
   }
 };
@@ -5864,6 +5919,7 @@ var ROUTES = [
   "/api/draw2code/scene",
   "/api/draw2code/scene/write",
   "/api/draw2code/versions",
+  "/api/draw2code/version",
   "/api/draw2code/restore",
   "/api/draw2code/export"
 ];
@@ -6248,6 +6304,23 @@ function makeRoutes(store) {
         }
         const result = await store.listVersions(root, name2);
         if (result.ok) writeJson(res, 200, { ok: true, versions: result.value });
+        else respond(res, result);
+      }
+    },
+    {
+      kind: "exact",
+      path: "/api/draw2code/version",
+      handler: async (req, res) => {
+        if (!guard(req, res, "GET")) return;
+        const root = query(req, "root");
+        const name2 = query(req, "name");
+        const id = query(req, "id");
+        if (root === void 0 || name2 === void 0 || id === void 0) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root, name or id" } });
+          return;
+        }
+        const result = await store.readVersion(root, name2, id);
+        if (result.ok) writeJson(res, 200, { ok: true, ...result.value });
         else respond(res, result);
       }
     },

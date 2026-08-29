@@ -1,8 +1,8 @@
 // src/daemon-client.ts
 import { execFile, spawn } from "node:child_process";
-import { open, mkdir as mkdir2, rm } from "node:fs/promises";
+import { open, mkdir as mkdir2, readFile as readFile2, rm, stat as stat2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // src/runtime.ts
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -102,6 +102,29 @@ async function waitForDescriptor(path, timeoutMs) {
   }
   throw new Error("draw2code daemon did not become healthy");
 }
+async function staleStartupLock(path) {
+  try {
+    const info = await stat2(path);
+    let owner = {};
+    try {
+      owner = JSON.parse(await readFile2(path, "utf8"));
+    } catch {
+      return Date.now() - info.mtimeMs > 8e3;
+    }
+    if (Number.isInteger(owner.pid) && Number(owner.pid) > 0) {
+      try {
+        process.kill(Number(owner.pid), 0);
+        return false;
+      } catch (error) {
+        if (error.code === "ESRCH") return true;
+        return false;
+      }
+    }
+    return Date.now() - info.mtimeMs > 8e3;
+  } catch {
+    return false;
+  }
+}
 var Draw2CodeDaemonClient = class {
   constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
     this.daemonEntry = daemonEntry;
@@ -111,30 +134,38 @@ var Draw2CodeDaemonClient = class {
   async ensure() {
     const current = await validateDaemonDescriptor(this.descriptorPath);
     if (current !== null && await healthy(current)) return current;
-    await mkdir2(daemonRuntimeDir(), { recursive: true, mode: 448 });
+    await mkdir2(dirname(this.descriptorPath), { recursive: true, mode: 448 });
     await rm(this.descriptorPath, { force: true });
     const lockPath = `${this.descriptorPath}.lock`;
-    let lock = null;
-    try {
-      lock = await open(lockPath, "wx", 384);
-      const child = spawn(process.execPath, [this.daemonEntry], {
-        detached: true,
-        stdio: "ignore",
-        env: {
-          ...process.env,
-          DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
-          DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
+    while (true) {
+      let lock = null;
+      try {
+        lock = await open(lockPath, "wx", 384);
+        await lock.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}
+`);
+        const child = spawn(process.execPath, [this.daemonEntry], {
+          detached: true,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
+            DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
+          }
+        });
+        child.unref();
+        return await waitForDescriptor(this.descriptorPath, 8e3);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        if (await staleStartupLock(lockPath)) {
+          await rm(lockPath, { force: true });
+          continue;
         }
-      });
-      child.unref();
-      return await waitForDescriptor(this.descriptorPath, 8e3);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-    } finally {
-      await lock?.close();
-      if (lock !== null) await rm(lockPath, { force: true });
+      } finally {
+        await lock?.close();
+        if (lock !== null) await rm(lockPath, { force: true });
+      }
+      return waitForDescriptor(this.descriptorPath, 8e3);
     }
-    return waitForDescriptor(this.descriptorPath, 8e3);
   }
   async execute(command, context) {
     const descriptor = await this.ensure();
@@ -183,9 +214,10 @@ var Draw2CodeDaemonClient = class {
     return { url: body.url, token: body.token, expiresAt: body.expiresAt };
   }
   async openBrowser(url) {
-    if (process.platform !== "darwin") return;
-    await new Promise((resolve, reject) => {
-      execFile("/usr/bin/open", [url], (error) => error === null ? resolve() : reject(error));
+    const launcher = process.platform === "darwin" ? { command: "/usr/bin/open", args: [url] } : process.platform === "linux" ? { command: "xdg-open", args: [url] } : process.platform === "win32" ? { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : null;
+    if (launcher === null) return false;
+    return await new Promise((resolve) => {
+      execFile(launcher.command, launcher.args, (error) => resolve(error === null));
     });
   }
 };

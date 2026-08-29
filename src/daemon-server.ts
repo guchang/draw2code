@@ -11,7 +11,7 @@ import type { Draw2CodeStoreContext } from './store-context.ts'
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const CANVAS_TOKEN_TTL_MS = 15 * 60_000
 
-interface CanvasGrant { root: string; board: string | null; expiresAt: number }
+interface CanvasGrant { root: string; expiresAt: number }
 type Authorized = { ok: true; grant?: CanvasGrant } | { ok: false }
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
@@ -63,6 +63,7 @@ export async function startDaemon(options: {
   descriptorPath: string
   canvasHtmlPath: string
   idleMs?: number
+  canvasTokenTtlMs?: number
 }): Promise<StartedDaemon> {
   const runtime = new Draw2CodeRuntimeImpl()
   const roots = new Set<string>()
@@ -70,6 +71,7 @@ export async function startDaemon(options: {
   const sockets = new Map<WebSocket, string>()
   let descriptor: DaemonDescriptor
   let lastActivity = Date.now()
+  const canvasTokenTtlMs = options.canvasTokenTtlMs ?? CANVAS_TOKEN_TTL_MS
   const storeContext: Draw2CodeStoreContext = {
     workspaceRegistry: { list: () => [...roots].map((path) => ({ path })) },
     logger: { warn: (message, ...args) => console.warn(message, ...args) },
@@ -85,25 +87,19 @@ export async function startDaemon(options: {
       grants.delete(token)
       return { ok: false }
     }
-    try { return (await realpath(root)) === grant.root ? { ok: true, grant } : { ok: false } } catch { return { ok: false } }
+    try {
+      if (await realpath(root) !== grant.root) return { ok: false }
+      // The token expires after inactivity, not while an open canvas is still
+      // polling or connected. This keeps long editing sessions usable without
+      // widening the grant beyond its exact workspace root.
+      grant.expiresAt = Date.now() + canvasTokenTtlMs
+      return { ok: true, grant }
+    } catch { return { ok: false } }
   }
 
   const boardForRequest = (url: URL, body: Record<string, unknown> | undefined): string | null => (
     typeof body?.name === 'string' ? body.name : url.searchParams.get('name')
   )
-
-  const scopedBoardAllowed = (url: URL, method: string | undefined, board: string | null, grant: CanvasGrant | undefined): boolean => {
-    if (grant === undefined) return true
-    // A picker token (board=null) may choose or create exactly one board. Once
-    // selected it becomes a fixed board grant; it cannot self-expand again.
-    if (url.pathname === '/api/draw2code/scene' && method === 'POST') return grant.board === null
-    if (url.pathname === '/api/draw2code/active-board' && method === 'PUT') return grant.board === null || board === grant.board
-    if (url.pathname === '/api/draw2code/scene' || url.pathname === '/api/draw2code/scene/write'
-      || url.pathname === '/api/draw2code/versions' || url.pathname === '/api/draw2code/restore') {
-      return grant.board !== null && board === grant.board
-    }
-    return true
-  }
 
   const broadcast = async (root: string, event: Record<string, unknown>): Promise<void> => {
     let canonicalRoot: string
@@ -180,7 +176,7 @@ export async function startDaemon(options: {
         roots.add(workspace)
         const token = randomBytes(24).toString('base64url')
         const board = typeof body.board === 'string' ? body.board : null
-        grants.set(token, { root, board, expiresAt: Date.now() + CANVAS_TOKEN_TTL_MS })
+        grants.set(token, { root, expiresAt: Date.now() + canvasTokenTtlMs })
         const query = new URLSearchParams({ root, token, ...(board === null ? {} : { board }) })
         writeJson(res, 200, { ok: true, token, expiresAt: grants.get(token)?.expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` })
       } catch (error) {
@@ -226,21 +222,12 @@ export async function startDaemon(options: {
         return
       }
       const board = boardForRequest(url, body)
-      if (!scopedBoardAllowed(url, req.method, board, authorized.grant)) {
-        writeJson(res, 403, { ok: false, error: { code: 'board-forbidden', message: 'canvas token is scoped to another board' } })
-        return
-      }
       const route = sceneRoutes.find((candidate) => candidate.path === url.pathname)
       if (route === undefined) {
         writeJson(res, 404, { ok: false, error: { code: 'not-found', message: 'route not found' } })
         return
       }
       await route.handler(req, res)
-      if (authorized.grant !== undefined && typeof body?.name === 'string'
-        && ((url.pathname === '/api/draw2code/active-board' && req.method === 'PUT')
-          || (url.pathname === '/api/draw2code/scene' && req.method === 'POST'))) {
-        authorized.grant.board = body.name
-      }
       if (root !== null && board !== null && (req.method === 'PUT' || req.method === 'POST')) {
         const latest = await new SceneStore(storeContext).read(root, board)
         if (latest.ok) {

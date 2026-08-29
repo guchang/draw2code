@@ -32,7 +32,7 @@
     "websiteURL": "https://github.com/guchang/draw2code",
     "defaultPrompt": [
       "\u7528 Draw2Code \u5e2e\u6211\u8bbe\u8ba1\u4e00\u4e2a\u4e60\u60ef\u8ffd\u8e2a App\u3002",
-      "\u6253\u5f00\u753b\u7801\u3002",
+      "\u6253\u5f00\u753b\u7801\uff0c\u6211\u81ea\u5df1\u753b\u4e00\u4e2a\u539f\u578b\u793a\u610f\u3002",
       "\u5e2e\u6211\u753b\u4e00\u4e2a\u4ea7\u54c1\u539f\u578b\u3002"
     ],
     "brandColor": "#4C6EF5"

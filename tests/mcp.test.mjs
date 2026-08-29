@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -91,4 +91,68 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   const called = await client.request('tools/call', { name: 'draw2code_list', arguments: { root } })
   assert.equal(called.result.structuredContent.ok, true)
   assert.deepEqual(called.result.structuredContent.data.scenes, [])
+
+  const nested = join(root, 'nested-repository')
+  await mkdir(nested)
+  const updatedFromNested = await client.request('tools/call', {
+    name: 'draw2code_update',
+    arguments: {
+      root: nested,
+      board: '共享画板',
+      ops: [{ op: 'upsert', element: { id: 'shared-title', type: 'text', text: '跨宿主共享' } }],
+    },
+  })
+  assert.equal(updatedFromNested.result.structuredContent.ok, true)
+  const listedFromWorkspace = await client.request('tools/call', { name: 'draw2code_list', arguments: { root } })
+  assert.deepEqual(listedFromWorkspace.result.structuredContent.data.scenes.map((scene) => scene.name), ['共享画板'])
+
+  const openedForHostSidebar = await client.request('tools/call', {
+    name: 'draw2code_open',
+    arguments: { root, board: '共享画板', presentation: 'handoff' },
+  })
+  assert.equal(openedForHostSidebar.result.structuredContent.ok, true)
+  assert.equal(openedForHostSidebar.result.structuredContent.data.board, '共享画板')
+  assert.equal(openedForHostSidebar.result.structuredContent.data.presentation, 'handoff')
+  assert.equal(openedForHostSidebar.result.structuredContent.data.displayState, 'handoff-ready')
+  assert.equal(openedForHostSidebar.result.structuredContent.data.opened, false)
+  assert.equal(new URL(openedForHostSidebar.result.structuredContent.data.url).searchParams.get('board'), '共享画板')
+})
+
+test('stdio MCP does not report a canvas opened when no browser launcher exists', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-browser-workspace-'))
+  const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-browser-runtime-'))
+  const descriptorPath = join(runtime, 'daemon.json')
+  const preload = join(runtime, 'unsupported-platform.cjs')
+  await writeFile(preload, "Object.defineProperty(process, 'platform', { value: 'aix' })\n")
+  const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
+    cwd: process.cwd(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
+      DRAW2CODE_WORKSPACE_ROOT: root,
+      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_HEADLESS: '0',
+    },
+  })
+  t.after(async () => {
+    child.kill('SIGTERM')
+    const descriptor = await validateDaemonDescriptor(descriptorPath)
+    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+  })
+  const client = protocolClient(child, root)
+  await client.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'draw2code-browser-test', version: '1.0.0' },
+  })
+  client.notify('notifications/initialized')
+
+  const opened = await client.request('tools/call', {
+    name: 'draw2code_open',
+    arguments: { root, presentation: 'browser' },
+  })
+  assert.equal(opened.result.structuredContent.ok, true)
+  assert.equal(opened.result.structuredContent.data.opened, false)
+  assert.equal(opened.result.structuredContent.data.displayState, 'url-ready')
 })

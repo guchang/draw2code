@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -20,7 +20,13 @@ async function waitUntil(predicate, timeoutMs = 3000) {
   throw new Error('condition timed out')
 }
 
-test('daemon is a token-gated single writer with scoped canvas access and WebSocket events', async (t) => {
+test('daemon is a token-gated single writer with workspace-scoped canvas access and WebSocket events', async (t) => {
+  const previousTokenTtl = process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS
+  process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS = '1000'
+  t.after(() => {
+    if (previousTokenTtl === undefined) delete process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS
+    else process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS = previousTokenTtl
+  })
   const root = await mkdtemp(join(tmpdir(), 'draw2code-daemon-workspace-'))
   const secondRoot = await mkdtemp(join(tmpdir(), 'draw2code-daemon-workspace-'))
   const outside = await mkdtemp(join(tmpdir(), 'draw2code-daemon-outside-'))
@@ -51,12 +57,24 @@ test('daemon is a token-gated single writer with scoped canvas access and WebSoc
   assert.equal(escaped.error.code, 'workspace-unknown')
 
   const canvas = await client.canvas(root, null, context)
+  assert.ok(canvas.expiresAt - Date.now() < 2_000)
   const html = await fetch(canvas.url)
   assert.equal(html.status, 200)
   assert.match(await html.text(), /draw2code-root/)
   const escapedCanvasUrl = new URL(canvas.url)
   escapedCanvasUrl.searchParams.set('root', outside)
   assert.equal((await fetch(escapedCanvasUrl)).status, 401)
+
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const keepAlive = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scenes?root=${encodeURIComponent(root)}`, {
+    headers: { authorization: `Bearer ${canvas.token}` },
+  })
+  assert.equal(keepAlive.status, 200)
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const afterOriginalExpiry = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scenes?root=${encodeURIComponent(root)}`, {
+    headers: { authorization: `Bearer ${canvas.token}` },
+  })
+  assert.equal(afterOriginalExpiry.status, 200)
 
   const events = []
   const wsUrl = new URL(canvas.url)
@@ -100,30 +118,71 @@ test('daemon is a token-gated single writer with scoped canvas access and WebSoc
     body: JSON.stringify({ root, name: '第二画板' }),
   })
   assert.equal(create.status, 200)
-  assert.equal((await create.json()).ok, true)
+  const created = await create.json()
+  assert.equal(created.ok, true)
 
-  const forbiddenDelete = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene?root=${encodeURIComponent(root)}&name=prototype`, {
-    method: 'DELETE',
+  const firstWrite = await client.execute({
+    type: 'update', root, board: '第二画板',
+    ops: [{ op: 'upsert', element: { id: 'version-title', type: 'text', text: '第一版' } }],
+  }, context)
+  assert.equal(firstWrite.ok, true)
+
+  const secondWrite = await client.execute({
+    type: 'update', root, board: '第二画板',
+    ops: [{ op: 'upsert', element: { id: 'version-title', type: 'text', text: '第二版' } }],
+  }, context)
+  assert.equal(secondWrite.ok, true)
+
+  const versions = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/versions?root=${encodeURIComponent(root)}&name=${encodeURIComponent('第二画板')}`, {
     headers: { authorization: `Bearer ${canvas.token}` },
   })
-  assert.equal(forbiddenDelete.status, 403)
+  assert.equal(versions.status, 200)
+  const versionList = await versions.json()
+  assert.ok(versionList.versions.length >= 1)
+  const preview = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/version?root=${encodeURIComponent(root)}&name=${encodeURIComponent('第二画板')}&id=${encodeURIComponent(versionList.versions[0].id)}`, {
+    headers: { authorization: `Bearer ${canvas.token}` },
+  })
+  assert.equal(preview.status, 200)
+  const previewBody = await preview.json()
+  assert.equal(previewBody.scene.elements[0].text, '第一版')
 
   const scopedRead = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent('第二画板')}`, {
     headers: { authorization: `Bearer ${canvas.token}` },
   })
   assert.equal(scopedRead.status, 200)
 
-  const forbiddenSwitch = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/active-board`, {
+  const switchBoard = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/active-board`, {
     method: 'PUT',
     headers: { authorization: `Bearer ${canvas.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ root, name: 'prototype' }),
   })
-  assert.equal(forbiddenSwitch.status, 403)
+  assert.equal(switchBoard.status, 200)
+  assert.equal((await switchBoard.json()).name, 'prototype')
 
-  const forbiddenCreate = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene`, {
+  const createThird = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene`, {
     method: 'POST',
     headers: { authorization: `Bearer ${canvas.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ root, name: '第三画板' }),
   })
-  assert.equal(forbiddenCreate.status, 403)
+  assert.equal(createThird.status, 200)
+  assert.equal((await createThird.json()).ok, true)
+})
+
+test('daemon client recovers a stale startup lock left by a crashed process', async (t) => {
+  const runtime = await mkdtemp(join(tmpdir(), 'draw2code-daemon-stale-lock-'))
+  const descriptorPath = join(runtime, 'daemon.json')
+  const lockPath = `${descriptorPath}.lock`
+  await writeFile(lockPath, '')
+  const staleAt = new Date(Date.now() - 60_000)
+  await utimes(lockPath, staleAt, staleAt)
+
+  const client = new Draw2CodeDaemonClient(daemonEntry, canvasHtml, descriptorPath)
+  const descriptor = await client.ensure()
+  t.after(async () => {
+    try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await waitUntil(async () => await validateDaemonDescriptor(descriptorPath) === null).catch(() => undefined)
+  })
+
+  assert.ok(descriptor.pid > 0)
+  assert.deepEqual(await validateDaemonDescriptor(descriptorPath), descriptor)
 })

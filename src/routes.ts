@@ -300,6 +300,23 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
     },
     {
       kind: 'exact',
+      path: '/api/draw2code/version',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return
+        const root = query(req, 'root')
+        const name = query(req, 'name')
+        const id = query(req, 'id')
+        if (root === undefined || name === undefined || id === undefined) {
+          writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: 'missing root, name or id' } })
+          return
+        }
+        const result = await store.readVersion(root, name, id)
+        if (result.ok) writeJson(res, 200, { ok: true, ...result.value })
+        else respond(res, result)
+      },
+    },
+    {
+      kind: 'exact',
       path: '/api/draw2code/restore',
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return

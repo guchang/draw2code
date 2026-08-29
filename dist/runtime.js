@@ -201,6 +201,7 @@ function normalizeElement(input) {
     out.verticalAlign = str4(el.verticalAlign, "top");
     out.containerId = el.containerId === void 0 || el.containerId === null ? null : el.containerId;
     out.lineHeight = num4(el.lineHeight, 1.25);
+    out.autoResize = el.autoResize !== false;
     if (el.width === void 0) out.width = num4(el.width, Math.min(360, fontSize * (text3.length || 8) * 0.62 + 16));
     if (el.height === void 0) out.height = num4(el.height, lines * fontSize * 1.25 + 8);
   }
@@ -269,9 +270,11 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
       const container = typeof element.containerId === "string" ? byId.get(element.containerId) : void 0;
       const elementRole3 = semanticRole(element);
       const containerRole = semanticRole(container);
-      const role2 = elementRole3 !== "" ? elementRole3 : containerRole;
+      const elementAlignment = semanticTextAlignment(elementRole3);
+      const containerAlignment = semanticTextAlignment(containerRole);
+      const role2 = elementAlignment !== null ? elementRole3 : containerRole;
       const isFocused2 = alignmentFocusIds === void 0 || alignmentFocusIds.has(String(element.id ?? "")) || container !== void 0 && alignmentFocusIds.has(String(container.id ?? ""));
-      const alignment = semanticTextAlignment(role2);
+      const alignment = elementAlignment ?? containerAlignment;
       if (isFocused2 && alignment !== null) {
         if (detachedNavigationTextIds.has(String(element.id ?? ""))) {
           return {
@@ -595,9 +598,8 @@ var SceneStore = class {
     versions.sort((a, b) => b.ts - a.ts);
     return { ok: true, value: versions };
   }
-  /** Roll a board back to one archived version (snapshotting the current
-   * state first, so the rollback itself is reversible). */
-  async restoreVersion(root, name, id) {
+  /** Read one archived version without changing the current board. */
+  async readVersion(root, name, id) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     const named = this.checkName(name);
@@ -609,13 +611,33 @@ var SceneStore = class {
     } catch {
       return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
     }
-    let scene;
+    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+      return err("too-large", `version ${id} of scene "${named.value}" exceeds the read cap`);
+    }
+    let parsed;
     try {
-      scene = JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
       return err("corrupt", `version ${id} of scene "${named.value}" is not valid JSON`);
     }
-    return this.write(root, named.value, scene, void 0, "agent");
+    const elements = parsed.elements;
+    const scene = {
+      type: "excalidraw",
+      version: 2,
+      source: "dsh-draw2code",
+      elements: Array.isArray(elements) ? elements : [],
+      appState: {
+        viewBackgroundColor: typeof parsed.appState?.viewBackgroundColor === "string" ? parsed.appState.viewBackgroundColor : "#ffffff"
+      }
+    };
+    return { ok: true, value: { id, ts: Number(id.split("-", 1)[0]), elementCount: scene.elements.length, scene } };
+  }
+  /** Roll a board back to one archived version (snapshotting the current
+   * state first, so the rollback itself is reversible). */
+  async restoreVersion(root, name, id) {
+    const version = await this.readVersion(root, name, id);
+    if (!version.ok) return version;
+    return this.write(root, name, version.value.scene, void 0, "agent");
   }
   /**
    * Inventory the generated-pages output directory of a board
@@ -3675,7 +3697,7 @@ function pageQualityWarnings(page, members) {
       ));
     }
   }
-  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) >= page.bounds.width * 0.35).map((element) => Math.round(num2(element.x) - page.bounds.x));
+  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) > page.bounds.width * 0.5).map((element) => Math.round(num2(element.x) - page.bounds.x));
   if (leftOffsets.length >= 4 && Math.max(...leftOffsets) - Math.min(...leftOffsets) > 20) {
     warnings.push(qualityIssue(
       "page-margin-inconsistent",
@@ -5563,6 +5585,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 
 // src/runtime.ts
 function choosePresentation(requested = "auto", capabilities) {
+  if (requested === "handoff") return "handoff";
   if (requested === "inline") return capabilities.mcpUi ? "inline" : capabilities.externalBrowser ? "browser" : "headless";
   if (requested === "browser") return capabilities.externalBrowser ? "browser" : "headless";
   if (capabilities.mcpUi) return "inline";

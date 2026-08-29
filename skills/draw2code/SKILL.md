@@ -9,7 +9,8 @@ description: Use Draw2Code or 画码 to clarify a product, draw or edit an edita
 
 ## 路由
 
-- 用户只说“打开 Draw2Code / 打开画码”：调用 `draw2code_open`。不要开始需求提问。
+- 用户只说“打开 Draw2Code / 打开画码”，或明确说“我自己画一下 / 我画个示意给你 / 给我一块空白画板”：只调用 `draw2code_open`。不要开始需求提问，不要进入 Create。
+- 用户说“我画好了 / 按我画的看看 / 根据这个示意继续”：先调用 `draw2code_read` 读取当前可见画板并复述页面、组件和交互关系；用户没有要求修改或生成时，不要自行调用 Update 或 Generate。
 - 用户明确要从零设计、创建或画一个新产品原型：调用 `draw2code_create action=start`，忠实传入 idea，并基于完整语义概括简短 `projectName`。
 - 用户修改现有原型：先 `draw2code_read`，再用 `draw2code_update` 提交最小 ops。
 - 用户明确要求根据画板生成或重新生成页面：先用普通对话问一次“有没有参考风格的图片”；这句话不用宿主选择题。有图就先查看并概括，没有则记为 `none`，随后调用 `draw2code_generate action=start` 并传入 `referenceStyle`，继续它返回的状态机直到 completed。用户已经随请求附图时不要重复问。
@@ -28,6 +29,8 @@ Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得
 `draw2code_update` 返回冲突或 `requiresConfirmation=true` 时，只询问相关覆盖选择；用户确认后用相同 ops 和 `force=true` 重试。无冲突直接继续，不增加模板化确认。Create brief 包含 3 个及以上页面时，先按 `pageBlueprints` 画一个代表页并查看真实画板，再以 `visualReview.phase=representative` 添加剩余页面；visualReview 必须携带最近一次成功 update 返回的 `boardRevision=rev` 和 `revealRequestId`。全部页面可见后查看真实画板，再用空 ops 单独提交 `phase=final`，`inspectedPageIds` 必须覆盖所有页面。
 
 第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。内嵌 UI、浏览器与 headless 的选择由工具 capability detection 决定；不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
+
+用户要亲自绘制且宿主提供侧边栏浏览器时，以 `presentation=handoff` 调用 `draw2code_open`，再让宿主浏览器打开工具返回的短期 `url`。确认该标签页已经导航到此 URL 且画布真正可见后，才能告诉用户“画码已经在侧边栏打开”。若只得到 `displayState=handoff-ready`，但侧边栏未显示，不得把“URL 已准备”误报成“已打开”；无法自动展示时应返回可点击 URL。没有 active board 时展示画板选择器或空白画布，不进入 Create。
 
 ## 完成口径
 

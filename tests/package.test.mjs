@@ -31,3 +31,12 @@ test('bundle patch mounts only Draw2Code and leaves the sidebar in its own bundl
   assert.match(patch, /id:\s*ui-draw2code/)
   assert.doesNotMatch(patch, /id:\s*better-sidebar/)
 })
+
+test('Codex skill distinguishes user-led drawing from agent-led creation', async () => {
+  const skill = await readFile(new URL('skills/draw2code/SKILL.md', root), 'utf8')
+  assert.match(skill, /我自己画/)
+  assert.match(skill, /presentation=handoff/)
+  assert.match(skill, /侧边栏.*真正可见/)
+  assert.match(skill, /我画好了/)
+  assert.match(skill, /draw2code_read/)
+})

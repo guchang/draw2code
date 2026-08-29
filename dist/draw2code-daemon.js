@@ -3924,6 +3924,23 @@ function makeRoutes(store) {
     },
     {
       kind: "exact",
+      path: "/api/draw2code/version",
+      handler: async (req, res) => {
+        if (!guard(req, res, "GET")) return;
+        const root = query(req, "root");
+        const name = query(req, "name");
+        const id = query(req, "id");
+        if (root === void 0 || name === void 0 || id === void 0) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root, name or id" } });
+          return;
+        }
+        const result = await store.readVersion(root, name, id);
+        if (result.ok) writeJson(res, 200, { ok: true, ...result.value });
+        else respond(res, result);
+      }
+    },
+    {
+      kind: "exact",
       path: "/api/draw2code/restore",
       handler: async (req, res) => {
         if (!guard(req, res, "POST")) return;
@@ -4161,6 +4178,7 @@ function normalizeElement(input) {
     out.verticalAlign = str4(el.verticalAlign, "top");
     out.containerId = el.containerId === void 0 || el.containerId === null ? null : el.containerId;
     out.lineHeight = num4(el.lineHeight, 1.25);
+    out.autoResize = el.autoResize !== false;
     if (el.width === void 0) out.width = num4(el.width, Math.min(360, fontSize * (text3.length || 8) * 0.62 + 16));
     if (el.height === void 0) out.height = num4(el.height, lines * fontSize * 1.25 + 8);
   }
@@ -4229,9 +4247,11 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
       const container = typeof element.containerId === "string" ? byId.get(element.containerId) : void 0;
       const elementRole3 = semanticRole(element);
       const containerRole = semanticRole(container);
-      const role3 = elementRole3 !== "" ? elementRole3 : containerRole;
+      const elementAlignment = semanticTextAlignment(elementRole3);
+      const containerAlignment = semanticTextAlignment(containerRole);
+      const role3 = elementAlignment !== null ? elementRole3 : containerRole;
       const isFocused2 = alignmentFocusIds === void 0 || alignmentFocusIds.has(String(element.id ?? "")) || container !== void 0 && alignmentFocusIds.has(String(container.id ?? ""));
-      const alignment = semanticTextAlignment(role3);
+      const alignment = elementAlignment ?? containerAlignment;
       if (isFocused2 && alignment !== null) {
         if (detachedNavigationTextIds.has(String(element.id ?? ""))) {
           return {
@@ -4555,9 +4575,8 @@ var SceneStore = class {
     versions.sort((a, b) => b.ts - a.ts);
     return { ok: true, value: versions };
   }
-  /** Roll a board back to one archived version (snapshotting the current
-   * state first, so the rollback itself is reversible). */
-  async restoreVersion(root, name, id) {
+  /** Read one archived version without changing the current board. */
+  async readVersion(root, name, id) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     const named = this.checkName(name);
@@ -4569,13 +4588,33 @@ var SceneStore = class {
     } catch {
       return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
     }
-    let scene;
+    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+      return err("too-large", `version ${id} of scene "${named.value}" exceeds the read cap`);
+    }
+    let parsed;
     try {
-      scene = JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
       return err("corrupt", `version ${id} of scene "${named.value}" is not valid JSON`);
     }
-    return this.write(root, named.value, scene, void 0, "agent");
+    const elements = parsed.elements;
+    const scene = {
+      type: "excalidraw",
+      version: 2,
+      source: "dsh-draw2code",
+      elements: Array.isArray(elements) ? elements : [],
+      appState: {
+        viewBackgroundColor: typeof parsed.appState?.viewBackgroundColor === "string" ? parsed.appState.viewBackgroundColor : "#ffffff"
+      }
+    };
+    return { ok: true, value: { id, ts: Number(id.split("-", 1)[0]), elementCount: scene.elements.length, scene } };
+  }
+  /** Roll a board back to one archived version (snapshotting the current
+   * state first, so the rollback itself is reversible). */
+  async restoreVersion(root, name, id) {
+    const version2 = await this.readVersion(root, name, id);
+    if (!version2.ok) return version2;
+    return this.write(root, name, version2.value.scene, void 0, "agent");
   }
   /**
    * Inventory the generated-pages output directory of a board
@@ -13485,7 +13524,7 @@ function pageQualityWarnings(page, members) {
       ));
     }
   }
-  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) >= page.bounds.width * 0.35).map((element) => Math.round(num2(element.x) - page.bounds.x));
+  const leftOffsets = content.filter((element) => !isBottomNavigationMember(element) && num2(element.width) > page.bounds.width * 0.5).map((element) => Math.round(num2(element.x) - page.bounds.x));
   if (leftOffsets.length >= 4 && Math.max(...leftOffsets) - Math.min(...leftOffsets) > 20) {
     warnings.push(qualityIssue(
       "page-margin-inconsistent",
@@ -15373,6 +15412,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 
 // src/runtime.ts
 function choosePresentation(requested = "auto", capabilities) {
+  if (requested === "handoff") return "handoff";
   if (requested === "inline") return capabilities.mcpUi ? "inline" : capabilities.externalBrowser ? "browser" : "headless";
   if (requested === "browser") return capabilities.externalBrowser ? "browser" : "headless";
   if (capabilities.mcpUi) return "inline";
@@ -15553,6 +15593,7 @@ async function startDaemon(options) {
   const sockets = /* @__PURE__ */ new Map();
   let descriptor;
   let lastActivity = Date.now();
+  const canvasTokenTtlMs2 = options.canvasTokenTtlMs ?? CANVAS_TOKEN_TTL_MS;
   const storeContext = {
     workspaceRegistry: { list: () => [...roots].map((path) => ({ path })) },
     logger: { warn: (message, ...args) => console.warn(message, ...args) }
@@ -15568,21 +15609,14 @@ async function startDaemon(options) {
       return { ok: false };
     }
     try {
-      return await realpath5(root) === grant.root ? { ok: true, grant } : { ok: false };
+      if (await realpath5(root) !== grant.root) return { ok: false };
+      grant.expiresAt = Date.now() + canvasTokenTtlMs2;
+      return { ok: true, grant };
     } catch {
       return { ok: false };
     }
   };
   const boardForRequest = (url, body) => typeof body?.name === "string" ? body.name : url.searchParams.get("name");
-  const scopedBoardAllowed = (url, method, board, grant) => {
-    if (grant === void 0) return true;
-    if (url.pathname === "/api/draw2code/scene" && method === "POST") return grant.board === null;
-    if (url.pathname === "/api/draw2code/active-board" && method === "PUT") return grant.board === null || board === grant.board;
-    if (url.pathname === "/api/draw2code/scene" || url.pathname === "/api/draw2code/scene/write" || url.pathname === "/api/draw2code/versions" || url.pathname === "/api/draw2code/restore") {
-      return grant.board !== null && board === grant.board;
-    }
-    return true;
-  };
   const broadcast = async (root, event) => {
     let canonicalRoot;
     try {
@@ -15661,7 +15695,7 @@ async function startDaemon(options) {
         roots.add(workspace);
         const token = randomBytes2(24).toString("base64url");
         const board = typeof body.board === "string" ? body.board : null;
-        grants.set(token, { root, board, expiresAt: Date.now() + CANVAS_TOKEN_TTL_MS });
+        grants.set(token, { root, expiresAt: Date.now() + canvasTokenTtlMs2 });
         const query = new URLSearchParams({ root, token, ...board === null ? {} : { board } });
         writeJson2(res, 200, { ok: true, token, expiresAt: grants.get(token)?.expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` });
       } catch (error2) {
@@ -15709,19 +15743,12 @@ async function startDaemon(options) {
         return;
       }
       const board = boardForRequest(url, body);
-      if (!scopedBoardAllowed(url, req.method, board, authorized.grant)) {
-        writeJson2(res, 403, { ok: false, error: { code: "board-forbidden", message: "canvas token is scoped to another board" } });
-        return;
-      }
       const route = sceneRoutes.find((candidate) => candidate.path === url.pathname);
       if (route === void 0) {
         writeJson2(res, 404, { ok: false, error: { code: "not-found", message: "route not found" } });
         return;
       }
       await route.handler(req, res);
-      if (authorized.grant !== void 0 && typeof body?.name === "string" && (url.pathname === "/api/draw2code/active-board" && req.method === "PUT" || url.pathname === "/api/draw2code/scene" && req.method === "POST")) {
-        authorized.grant.board = body.name;
-      }
       if (root !== null && board !== null && (req.method === "PUT" || req.method === "POST")) {
         const latest = await new SceneStore(storeContext).read(root, board);
         if (latest.ok) {
@@ -15793,7 +15820,9 @@ async function startDaemon(options) {
 var descriptorPath = process.env.DRAW2CODE_DESCRIPTOR_PATH;
 if (descriptorPath === void 0 || descriptorPath === "") throw new Error("DRAW2CODE_DESCRIPTOR_PATH is required");
 var canvasHtmlPath = process.env.DRAW2CODE_CANVAS_HTML ?? resolve3(import.meta.dirname, "../lib/canvas.html");
-var daemon = await startDaemon({ descriptorPath, canvasHtmlPath });
+var configuredTokenTtl = Number(process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS);
+var canvasTokenTtlMs = Number.isFinite(configuredTokenTtl) && configuredTokenTtl > 0 ? configuredTokenTtl : void 0;
+var daemon = await startDaemon({ descriptorPath, canvasHtmlPath, ...canvasTokenTtlMs === void 0 ? {} : { canvasTokenTtlMs } });
 var shutdown = () => {
   void daemon.close().finally(() => process.exit(0));
 };

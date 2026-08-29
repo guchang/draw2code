@@ -7,8 +7,9 @@ Draw2Code is a human-AI collaborative prototyping tool for DSH, Codex, and other
 ## Product flow
 
 1. **Create** — `draw2code_create` extracts explicit facts, then lets the Agent ask adaptive, product-specific questions about the highest-impact scenario, differentiation, loop, risk, or first-version proof. Users can skip one question, synthesize immediately, or reopen only the affected decision after reviewing the brief. It stops when the product is clear (at most ten lifetime questions), deterministically renders one structured `PrototypeBrief` as a complete executable Markdown brief, and shows a final card listing every page to be drawn before creating a board.
-2. **Update** — `draw2code_update` writes to an editable Excalidraw board, protects manual edits and deletions, validates layout quality, verifies the disk write, and automatically reveals the updated board in DSH.
-3. **Generate** — before `draw2code_generate` starts, the Agent asks in ordinary chat whether the user has a visual reference image. It then reads the latest board, lets the user choose page scope, recommends a visual direction from the reference or product semantics, blocks incomplete prototypes, translates prototype facts into responsive Grid/Flex layouts instead of copying canvas coordinates, and verifies workspace screenshot/DOM artifacts, hashes, viewport sizes, and preserved unselected page blocks before completion.
+2. **Open & Demonstrate** — when users want to sketch for the Agent, `draw2code_open` hands a short-lived canvas URL to the host sidebar without entering Create. “I’m done drawing” routes to `draw2code_read`, which summarizes the visible board before any requested update or generation.
+3. **Update** — `draw2code_update` writes to an editable Excalidraw board, protects manual edits and deletions, validates layout quality, verifies the disk write, and automatically reveals the updated board in DSH.
+4. **Generate** — before `draw2code_generate` starts, the Agent asks in ordinary chat whether the user has a visual reference image. It then reads the latest board, lets the user choose page scope, recommends a visual direction from the reference or product semantics, blocks incomplete prototypes, translates prototype facts into responsive Grid/Flex layouts instead of copying canvas coordinates, and verifies workspace screenshot/DOM artifacts, hashes, viewport sizes, and preserved unselected page blocks before completion.
 
 ## Highlights
 
@@ -36,9 +37,9 @@ The first release is installed from a local personal marketplace and is not subm
 codex plugin add draw2code@personal
 ```
 
-Start a new Codex task after installation. Users invoke it with natural language such as “Use Draw2Code to design a habit tracker”, “Open Draw2Code”, or an explicit request to draw a prototype. A generic app coding request does not activate Draw2Code.
+Start a new Codex task after installation. Users invoke it with natural language such as “Use Draw2Code to design a habit tracker”, “Open Draw2Code; I want to sketch it myself”, or an explicit request to draw a prototype. A generic app coding request does not activate Draw2Code.
 
-The bundled Skill drives six stable MCP tools. `draw2code_open` prefers MCP UI, falls back to one local browser canvas per workspace, and returns a link in headless environments. DSH and Codex connect to the same on-demand loopback daemon and edit the same in-place workspace files.
+The bundled Skill drives six stable MCP tools. `draw2code_open` prefers MCP UI, supports `presentation=handoff` for a host-owned sidebar browser, falls back to an external local browser, and returns a link in headless environments. URL readiness is not reported as visible until the host has actually shown the canvas. DSH and Codex connect to the same on-demand loopback daemon and edit the same in-place workspace files.
 
 Draw2Code registers its board inside the right sidebar provided by `dsh-better-sidebar`. DSH currently activates only bundles installed as direct profile dependencies, not another plugin's transitive dependencies, so both install commands below are required.
 

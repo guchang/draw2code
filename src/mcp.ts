@@ -77,10 +77,16 @@ function toolResult(result: Draw2CodeResult) {
 }
 
 async function execute(command: Draw2CodeCommand): Promise<ReturnType<typeof toolResult>> {
-  return toolResult(await client.execute(command, await contextFor(command.root)))
+  const context = await contextFor(command.root)
+  // MCP clients may run the tool from a nested repository while advertising
+  // a broader workspace root. Boards are workspace-scoped, so normalize every
+  // command to the advertised root; otherwise the browser and DSH silently
+  // create separate board inventories for parent and child directories.
+  const normalized = { ...command, root: context.workspaceRoot } as Draw2CodeCommand
+  return toolResult(await client.execute(normalized, context))
 }
 
-const root = z.string().min(1).describe('Absolute workspace root for this task.')
+const root = z.string().min(1).describe('Absolute path inside the current workspace. The registered workspace root is the shared Draw2Code storage scope.')
 
 server.registerTool('draw2code_list', {
   title: 'List Draw2Code boards',
@@ -168,7 +174,8 @@ server.registerTool('draw2code_open', {
   inputSchema: {
     root,
     board: z.string().optional(),
-    presentation: z.enum(['auto', 'inline', 'browser']).optional(),
+    presentation: z.enum(['auto', 'inline', 'browser', 'handoff']).optional()
+      .describe('Use handoff when the host will open the returned URL in its own sidebar browser.'),
   },
   _meta: {
     ui: { resourceUri: DRAW2CODE_UI_URI },
@@ -178,25 +185,32 @@ server.registerTool('draw2code_open', {
   },
 }, async ({ root, board, presentation }) => {
   const context = await contextFor(root)
+  const workspaceRoot = context.workspaceRoot
   const opened = await client.execute({
-    type: 'open', root,
+    type: 'open', root: workspaceRoot,
     ...(board === undefined ? {} : { board }),
     ...(presentation === undefined ? {} : { presentation }),
   }, context)
   if (!opened.ok) return toolResult(opened)
   const selectedBoard = typeof opened.data.board === 'string' ? opened.data.board : null
-  const canvas = await client.canvas(root, selectedBoard, context)
+  const canvas = await client.canvas(workspaceRoot, selectedBoard, context)
   const actualPresentation = String(opened.data.presentation)
   let didOpen = false
-  if (actualPresentation === 'browser' && !openedWorkspaces.has(root)) {
-    await client.openBrowser(canvas.url)
-    openedWorkspaces.add(root)
-    didOpen = true
+  if (actualPresentation === 'browser' && !openedWorkspaces.has(workspaceRoot)) {
+    didOpen = await client.openBrowser(canvas.url)
+    if (didOpen) openedWorkspaces.add(workspaceRoot)
   }
+  const displayState = didOpen
+    ? 'external-browser-opened'
+    : actualPresentation === 'inline'
+      ? 'inline-requested'
+      : actualPresentation === 'handoff'
+        ? 'handoff-ready'
+        : 'url-ready'
   const result: Draw2CodeResult = {
     ok: true,
     command: 'open',
-    data: { ...opened.data, ...canvas, opened: didOpen },
+    data: { ...opened.data, ...canvas, opened: didOpen, displayState },
   }
   return toolResult(result)
 })
