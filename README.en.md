@@ -14,7 +14,7 @@ Draw2Code is a human-AI collaborative prototyping tool for DSH, Codex, and other
 ## Highlights
 
 - Full Excalidraw canvas inside `dsh-better-sidebar`;
-- multiple boards, history, export, and workspace-local persistence;
+- multiple boards, history, export, workspace-local persistence, and explicit switching between locally registered workspaces in the standalone canvas;
 - structured, resumable Create and Generate flows;
 - conflict-aware human/agent co-editing;
 - automatic reveal of the target board after a verified update;
@@ -93,6 +93,8 @@ Draw2Code writes only to the current host-registered workspace:
 - `draw2code-pages/<board>/index.html` — generated frontend demos.
 
 Workspace roots are canonicalized and gated by HostContext. The daemon listens only on loopback, uses a private `0600` descriptor and random bearer token, and gives canvases short-lived scoped tokens. Risky overwrites require confirmation, while board updates use atomic writes plus read-back verification.
+
+The standalone canvas remembers only workspaces explicitly registered by Codex, DSH, another host, or the user. Its workspace menu shows the current root plus other roots that already contain boards, including each name, path, and board count; plugin caches and empty roots stay out of the picker. Switching first flushes pending edits and exchanges the current credential for a new token scoped to the selected root; the old token cannot directly read that root. Draw2Code does not scan the whole machine or automatically copy, merge, or migrate boards between workspaces.
 
 ## Development
 

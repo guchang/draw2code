@@ -14,6 +14,8 @@ const daemonEntry = process.env.DRAW2CODE_DAEMON_ENTRY ?? resolve(here, 'draw2co
 const canvasHtml = process.env.DRAW2CODE_CANVAS_HTML ?? resolve(here, '../lib/canvas.html')
 const client = new Draw2CodeDaemonClient(daemonEntry, canvasHtml)
 const openedWorkspaces = new Set<string>()
+const configuredWorkspaceRoot = process.env.DRAW2CODE_WORKSPACE_ROOT?.trim() || undefined
+let advertisedRootsPromise: Promise<string[]> | undefined
 
 const instructions = workflowContract
 
@@ -47,15 +49,23 @@ function uiSupported(): boolean {
   return Object.keys(extensions).some((key) => /(?:mcp.*(?:apps|ui)|apps.*ui)/i.test(key))
 }
 
-async function contextFor(root: string): Promise<HostContext> {
-  let workspaceRoot = process.env.DRAW2CODE_WORKSPACE_ROOT ?? process.cwd()
-  try {
-    const response = await server.server.listRoots()
-    const roots = response.roots
+function advertisedRoots(): Promise<string[]> {
+  advertisedRootsPromise ??= server.server.listRoots()
+    .then((response) => response.roots
       .filter((item) => item.uri.startsWith('file:'))
-      .map((item) => fileURLToPath(item.uri))
-    workspaceRoot = roots.find((candidate) => root === candidate || root.startsWith(`${candidate}/`)) ?? workspaceRoot
-  } catch { /* roots are optional; Codex starts local stdio servers in task cwd */ }
+      .map((item) => fileURLToPath(item.uri)))
+    .catch(() => [])
+  return advertisedRootsPromise
+}
+
+async function contextFor(root: string): Promise<HostContext> {
+  let workspaceRoot = configuredWorkspaceRoot ?? root
+  if (configuredWorkspaceRoot === undefined) {
+    const roots = await advertisedRoots()
+    const advertisedRoot = roots.find((candidate) => root === candidate || root.startsWith(`${candidate}/`))
+    if (advertisedRoot !== undefined) workspaceRoot = advertisedRoot
+    else if (roots.length > 0) workspaceRoot = process.cwd()
+  }
   return {
     clientId: `mcp-${process.pid}`,
     host: 'mcp',
@@ -214,5 +224,9 @@ server.registerTool('draw2code_open', {
   }
   return toolResult(result)
 })
+
+server.server.oninitialized = () => {
+  if (configuredWorkspaceRoot === undefined) void advertisedRoots()
+}
 
 await server.connect(new StdioServerTransport())

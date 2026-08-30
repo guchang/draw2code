@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -7,9 +7,12 @@ import test from 'node:test'
 
 import { validateDaemonDescriptor } from '../dist/runtime.js'
 
-function protocolClient(child, root) {
+function protocolClient(child, root, advertiseRoot = true, respondToRoots = true) {
   let buffer = ''
   const pending = new Map()
+  let rootsRequested = 0
+  let resolveRootsRequest
+  const firstRootsRequest = new Promise((resolve) => { resolveRootsRequest = resolve })
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
     buffer += chunk
@@ -20,7 +23,11 @@ function protocolClient(child, root) {
       if (line.trim() === '') continue
       const message = JSON.parse(line)
       if (message.method === 'roots/list' && message.id !== undefined) {
-        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { roots: [{ uri: new URL(`file://${root}`).href, name: 'test workspace' }] } })}\n`)
+        rootsRequested += 1
+        resolveRootsRequest()
+        if (!respondToRoots) continue
+        const roots = advertiseRoot ? [{ uri: new URL(`file://${root}`).href, name: 'test workspace' }] : []
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { roots } })}\n`)
         continue
       }
       if (message.id !== undefined && pending.has(message.id)) {
@@ -32,6 +39,13 @@ function protocolClient(child, root) {
   let id = 0
   return {
     notify(method, params = {}) { child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`) },
+    rootsRequestCount() { return rootsRequested },
+    async waitForRootsRequest() {
+      await Promise.race([
+        firstRootsRequest,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('roots/list was not requested')), 1000)),
+      ])
+    },
     request(method, params = {}) {
       const requestId = ++id
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params })}\n`)
@@ -50,7 +64,7 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
     cwd: process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, DRAW2CODE_WORKSPACE_ROOT: root, DRAW2CODE_DESCRIPTOR_PATH: descriptorPath, DRAW2CODE_HEADLESS: '1' },
+    env: { ...process.env, DRAW2CODE_WORKSPACE_ROOT: root, DRAW2CODE_DESCRIPTOR_PATH: descriptorPath, DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'), DRAW2CODE_HEADLESS: '1' },
   })
   t.after(async () => {
     child.kill('SIGTERM')
@@ -132,6 +146,7 @@ test('stdio MCP does not report a canvas opened when no browser launcher exists'
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
       DRAW2CODE_WORKSPACE_ROOT: root,
       DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
       DRAW2CODE_HEADLESS: '0',
     },
   })
@@ -155,4 +170,116 @@ test('stdio MCP does not report a canvas opened when no browser launcher exists'
   assert.equal(opened.result.structuredContent.ok, true)
   assert.equal(opened.result.structuredContent.data.opened, false)
   assert.equal(opened.result.structuredContent.data.displayState, 'url-ready')
+})
+
+test('stdio MCP falls back to the requested root when the host advertises no roots', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-requested-root-'))
+  const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-requested-runtime-'))
+  const pluginCwd = await mkdtemp(join(tmpdir(), 'draw2code-mcp-plugin-cwd-'))
+  const descriptorPath = join(runtime, 'daemon.json')
+  const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
+    cwd: pluginCwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      DRAW2CODE_WORKSPACE_ROOT: '',
+      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
+      DRAW2CODE_HEADLESS: '1',
+    },
+  })
+  t.after(async () => {
+    child.kill('SIGTERM')
+    const descriptor = await validateDaemonDescriptor(descriptorPath)
+    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+  })
+  const client = protocolClient(child, root, false)
+  await client.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'draw2code-no-roots-test', version: '1.0.0' },
+  })
+  client.notify('notifications/initialized')
+
+  const opened = await client.request('tools/call', {
+    name: 'draw2code_open',
+    arguments: { root, presentation: 'handoff' },
+  })
+  assert.equal(opened.result.structuredContent.ok, true)
+  assert.equal(new URL(opened.result.structuredContent.data.url).searchParams.get('root'), await realpath(root))
+})
+
+test('stdio MCP opens a configured workspace when the host roots service is unavailable', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-configured-root-'))
+  const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-configured-runtime-'))
+  const descriptorPath = join(runtime, 'daemon.json')
+  const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
+    cwd: process.cwd(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      DRAW2CODE_WORKSPACE_ROOT: root,
+      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
+      DRAW2CODE_HEADLESS: '1',
+    },
+  })
+  t.after(async () => {
+    child.kill('SIGTERM')
+    const descriptor = await validateDaemonDescriptor(descriptorPath)
+    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+  })
+  const client = protocolClient(child, root, true, false)
+  await client.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'draw2code-unavailable-roots-test', version: '1.0.0' },
+  })
+  client.notify('notifications/initialized')
+
+  const opened = await client.request('tools/call', {
+    name: 'draw2code_open',
+    arguments: { root, presentation: 'handoff' },
+  })
+  assert.equal(opened.result.structuredContent.ok, true)
+  assert.equal(new URL(opened.result.structuredContent.data.url).searchParams.get('root'), await realpath(root))
+})
+
+test('stdio MCP prewarms advertised roots before the first tool call', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-prewarm-root-'))
+  const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-prewarm-runtime-'))
+  const descriptorPath = join(runtime, 'daemon.json')
+  const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
+    cwd: process.cwd(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      DRAW2CODE_WORKSPACE_ROOT: '',
+      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
+      DRAW2CODE_HEADLESS: '1',
+    },
+  })
+  t.after(async () => {
+    child.kill('SIGTERM')
+    const descriptor = await validateDaemonDescriptor(descriptorPath)
+    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+  })
+  const client = protocolClient(child, root)
+  await client.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: { roots: {} },
+    clientInfo: { name: 'draw2code-roots-prewarm-test', version: '1.0.0' },
+  })
+  client.notify('notifications/initialized')
+
+  await client.waitForRootsRequest()
+  assert.equal(client.rootsRequestCount(), 1)
+
+  const opened = await client.request('tools/call', {
+    name: 'draw2code_open',
+    arguments: { root, presentation: 'handoff' },
+  })
+  assert.equal(opened.result.structuredContent.ok, true)
+  assert.equal(client.rootsRequestCount(), 1)
 })

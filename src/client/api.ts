@@ -28,6 +28,12 @@ export interface VersionRow {
   elementCount: number
 }
 
+export interface WorkspaceMetaRow {
+  root: string
+  name: string
+  boardCount: number
+}
+
 export interface BoardRevealRequest {
   id: string
   board: string
@@ -201,6 +207,14 @@ export class D2cApi {
 
   list(root: string): Promise<D2cResult<{ scenes: SceneMetaRow[] }>> {
     return get(this.path(`/api/draw2code/scenes?root=${encodeURIComponent(root)}`), this.options.token)
+  }
+
+  listWorkspaces(root: string): Promise<D2cResult<{ workspaces: WorkspaceMetaRow[] }>> {
+    return get(this.path(`/canvas-workspaces?root=${encodeURIComponent(root)}`), this.options.token)
+  }
+
+  switchWorkspace(root: string, targetRoot: string): Promise<D2cResult<{ root: string; token: string; expiresAt: number; url: string }>> {
+    return send(this.path('/canvas-workspace-token'), 'POST', { root, targetRoot }, this.options.token)
   }
 
   getActiveBoard(root: string): Promise<D2cResult<{ name: string | null }>> {

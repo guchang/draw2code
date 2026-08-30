@@ -2,6 +2,8 @@
 
 `features/draw2code.feature` 面向插件的真实协作契约：workspace 门禁、`draw2code_create` 的自适应产品深挖与可执行项目简报、项目草稿与版本、确认后独立画板、agent 工具、冲突确认、场景持久化、客户端挂载同步、画板切换，以及 `draw2code_generate` 从页面范围选择到真实预览验收的完整产品流程。它不把 Excalidraw 的坐标或 React 内部 ref 当作用户行为。
 
+独立画码额外维护一份用户级“已明确注册工作区”清单：菜单按 root 分组展示原位画板，切换前先保存当前编辑并换取目标 root 的新短期凭据。旧凭据仍不能直接跨 root 读取，Agent 默认操作范围也不随浏览器切换扩大；工具不会扫描整台电脑，也不会自动迁移或合并历史画板。
+
 ## 已实现并通过真实宿主验收 — `draw2code_generate` 产品流程
 
 完整决策见 `GENERATE_PRODUCT_FLOW.md`。本节既是产品契约，也是当前实现的验收口径。

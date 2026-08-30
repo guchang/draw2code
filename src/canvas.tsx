@@ -20,5 +20,6 @@ createRoot(mount).render(
     visible
     initialBoard={board}
     api={new D2cApi({ baseUrl: window.location.origin, token })}
+    workspaceSwitching
   />,
 )

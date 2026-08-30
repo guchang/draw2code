@@ -35,6 +35,20 @@ Feature: 画码原型板的人机协作
     When agent 请求读取 workspace 外的目录
     Then 应拒绝请求并返回 workspace-unknown
 
+  Scenario: 独立画码可以安全切换已注册工作区
+    Given 本机已经明确注册工作区 A 和工作区 B
+    And 两个工作区的画板仍保存在各自原始目录
+    When 用户在独立画码的工作区菜单中查看列表
+    Then 应分别显示工作区 A 和工作区 B 的名称、路径和画板数量
+    And 插件缓存和没有画板的空 root 不应进入工作区菜单
+    And 不应扫描本机其他未注册目录
+    When 用户从工作区 A 切换到工作区 B
+    Then 应先完成工作区 A 的待保存编辑
+    And 应签发只用于工作区 B 的新短期 token
+    And 工作区 A 的旧 token 不应能直接读取工作区 B
+    And 不应复制、合并或迁移任一工作区的画板
+    But Agent 未明确指定其他 root 时仍只应操作当前任务工作区
+
   Scenario: Agent 新建原型页面必须使用普通矩形页面外框
     When agent 新增 type 为 rectangle 且 customData.role 为 prototype-page 的“任务列表”页面
     And 页面外框的 customData.pageName 为“任务列表”

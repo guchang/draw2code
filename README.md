@@ -33,7 +33,7 @@ Vibe Coding 很容易从一句模糊需求直接跳到代码，结果往往是�
 ## 主要能力
 
 - DSH 右侧 `dsh-better-sidebar` 中的完整 Excalidraw 画布；
-- 多画板创建、切换、删除、历史版本和导出；
+- 多画板创建、切换、删除、历史版本和导出；独立画码可在本机已明确注册的工作区之间切换，各工作区的画板仍原位保存；
 - Agent 工具：`draw2code_list`、`draw2code_read`、`draw2code_create`、`draw2code_update`、`draw2code_generate`、`draw2code_open`；
 - 用户手工编辑与 Agent 更新之间的三方合并和冲突确认；
 - 成功更新后自动展开画码、激活目标画板，同一事件不会反复抢焦点；
@@ -127,10 +127,12 @@ draw2code-pages/
 
 这些运行数据已加入 `.gitignore`，不会进入 Draw2Code 源码仓库。
 
+独立画码会记住 Codex、DSH 或其他宿主明确注册过的工作区，并在画板菜单中显示当前工作区及其他已经存在画板的工作区，包括名称、完整路径和画板数量；插件缓存和没有画板的空 root 不进入切换菜单。切换工作区前会先落盘当前待保存内容，再换取目标工作区的新短期凭据；原凭据不能直接读取其他工作区。Draw2Code 不扫描整台电脑，也不会自动复制、合并或迁移不同工作区的画板。
+
 ## 协作与安全边界
 
 - 文件访问受 HostContext workspace 门禁限制，root 经 `realpath` 后不能越过已注册工作区；
-- daemon 只监听 loopback，descriptor 权限为 `0600`；宿主使用随机 bearer，画板只获得短期 workspace/board scoped token；
+- daemon 只监听 loopback，descriptor 权限为 `0600`；宿主使用随机 bearer，画板只获得短期 workspace-scoped token；独立画码切换工作区时必须显式换取目标 root 的新 token；
 - DSH `/api/draw2code/*` 是隐藏 token 的同源 daemon 代理；
 - `draw2code_update` 使用原子写入、revision 和回读验证，不直接修改未知文件；
 - 涉及用户手工修改的危险覆盖会返回确认状态，不会静默写入；

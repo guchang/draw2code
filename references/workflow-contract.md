@@ -23,13 +23,15 @@
 ## 展示与共同编辑
 
 - 第一次创建、读取或用户明确打开时展示画板：支持 MCP UI 就内嵌；否则本地图形环境打开 daemon 的短期 URL；headless 只返回 URL。不要根据宿主产品名分支。
-- 宿主具有自己的侧边栏浏览器时使用 `presentation=handoff`：工具只准备短期 URL 并返回 `displayState=handoff-ready`，宿主负责在侧边栏导航和验证可见性。只有画布在侧边栏真正可见后，Agent 才能报告“已打开”；不能把 URL 就绪或 daemon 启动成功当作可见性证据。
-- 同一 workspace 的外部浏览器只首次打开一次；后续依靠事件刷新，不能反复抢焦点。
+- 宿主具有自己的侧边栏浏览器时使用 `presentation=handoff`：工具只准备短期 URL 并返回 `displayState=handoff-ready`，宿主负责在侧边栏导航和验证可见性。单纯导航优先使用宿主原生能力，不为此初始化通用浏览器自动化；只有需要 DOM、控制台或交互证据时才接管浏览器。只有画布在侧边栏真正可见后，Agent 才能报告“已打开”；不能把 URL 就绪或 daemon 启动成功当作可见性证据。
+- 同一 workspace 的外部浏览器只首次打开一次；后续复用现有标签页并依靠事件刷新，不能反复抢焦点。
 - `verified=true` / `writeVerified=true` 只证明目标画板写盘并回读，不代表原型已经完成。成功更新会把目标设为 active board、发布带目标 revision 的 reveal request 并自动打开画码；Canvas 实际加载到同一 board + revision 后才回传消费确认。只有此后提交的 `completionReady=true` 才说明最终视觉复核已覆盖全部页面，即使如此，仍应把 `prototypeQuality.warnings` 作为继续打磨依据。
 - 用户拖动产生的 scene write 与 Agent update 都通过 daemon；WebSocket 是主通知通道，revision polling 是断线降级。
+- 独立画码可以列出当前 workspace 和本机已由宿主明确注册、持久化且确实含有画板的其他 workspace；插件缓存和空 root 不进入切换菜单。切换前必须先落盘当前待保存编辑，再用当前短期会话换取目标 root 的新 workspace-scoped token。旧 token 不能直接访问目标 root，Agent 工具默认范围也不能因为 UI 切换而扩大。
 
 ## 数据与安全
 
 - 原位使用 `draw2code/`、`.active-board.json`、`.projects/`、`.generations/`、`.generate-settings/` 与 `draw2code-pages/`，不得复制、导入或主动迁移旧数据。
 - 所有 root 都必须 realpath 后落在 HostContext 注册 workspace 内。daemon 只监听 loopback；主 bearer 不进入画板页面，页面只收到短期、活动续期的 workspace-scoped token，可在该 root 内管理多个画板但不能跨 root 访问。
 - 不上传画板、brief、页面或验证证据。单画板元素数、UTF-8 byte 上限、历史版本与生成证据门禁保持有效。
+- 不递归扫描整台电脑寻找 workspace，也不自动复制、合并或迁移不同 root 的画板；新打开的画码只获得打开当时已注册 workspace 的快照。

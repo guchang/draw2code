@@ -20,7 +20,7 @@ import { createPortal } from 'react-dom'
 import excalidrawCss from '@excalidraw/excalidraw/index.css'
 import { Excalidraw, MainMenu } from '@excalidraw/excalidraw'
 import type { LibraryItems_anyVersion } from '@excalidraw/excalidraw/types'
-import { D2cApi, type SceneMetaRow, type VersionRow } from './api.ts'
+import { D2cApi, type SceneMetaRow, type VersionRow, type WorkspaceMetaRow } from './api.ts'
 import { capturePendingSave, flushCapturedSave, isNormalizationOnlyEcho, LatestAsyncAction, saveWithConflictRetry, type PendingSave } from './sync.ts'
 import basicUxLibrary from './library-assets/basic-ux-wireframing-elements.json'
 import loFiWireframingLibrary from './library-assets/lo-fi-wireframing-kit.json'
@@ -88,6 +88,8 @@ interface Props {
   api?: D2cApi
   /** Board requested by draw2code_open. */
   initialBoard?: string | null
+  /** Standalone canvas can switch between explicitly registered workspaces. */
+  workspaceSwitching?: boolean
 }
 
 interface LooseExcalidrawApi {
@@ -180,7 +182,7 @@ function operationErrorMessage(error: { code: string; message: string }): string
 /**
  * The board component.
  */
-export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Element {
+export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitching = false }: Props): JSX.Element {
   const apiRef = useRef<D2cApi>(api ?? new D2cApi())
   const excalidrawRef = useRef<LooseExcalidrawApi | null>(null)
   const lastLocalEditRef = useRef(0)
@@ -220,6 +222,8 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
   const [dark, setDark] = useState(false)
   const [boardName, setBoardName] = useState(() => initialBoard ?? rememberedBoard(cwd))
   const [boards, setBoards] = useState<SceneMetaRow[]>([])
+  const [workspaces, setWorkspaces] = useState<WorkspaceMetaRow[]>([])
+  const [switchingWorkspace, setSwitchingWorkspace] = useState<string | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
@@ -486,6 +490,17 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     }
   }), [cwd])
 
+  useEffect(() => {
+    if (!workspaceSwitching || cwd === '' || !visible) return
+    let cancelled = false
+    void apiRef.current.listWorkspaces(cwd).then((result) => {
+      if (cancelled) return
+      if (result.ok) setWorkspaces(result.workspaces)
+      else showNotice(operationErrorMessage(result.error), 'error')
+    })
+    return () => { cancelled = true }
+  }, [cwd, visible, workspaceSwitching, showNotice])
+
   // ---- poll the board list (while visible) ------------------------------
   useEffect(() => {
     if (cwd === '' || !visible) return
@@ -653,6 +668,22 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
     switchBoard(name)
   }, [cwd, newName, switchBoard, showNotice])
 
+  const switchWorkspace = useCallback(async (targetRoot: string): Promise<void> => {
+    if (targetRoot === cwd || switchingWorkspace !== null) return
+    setSwitchingWorkspace(targetRoot)
+    try {
+      if (!await flushPendingSave()) return
+      const result = await apiRef.current.switchWorkspace(cwd, targetRoot)
+      if (!result.ok) {
+        showNotice(operationErrorMessage(result.error), 'error')
+        return
+      }
+      window.location.assign(result.url)
+    } finally {
+      setSwitchingWorkspace(null)
+    }
+  }, [cwd, switchingWorkspace, flushPendingSave, showNotice])
+
   const deleteBoard = useCallback(async (name: string): Promise<void> => {
     deletingBoardsRef.current.add(name)
     // Cancel a not-yet-started debounce for this board. Any save already sent
@@ -818,12 +849,41 @@ export function CanvasPanel({ cwd, visible, api, initialBoard }: Props): JSX.Ele
           padding: 4, color: palette.text, fontSize: 12,
         }}
       >
-        <div
-          title={cwd}
-          style={{ padding: '4px 8px 3px', color: palette.sub, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-        >
+        <div title={cwd} style={{ padding: '4px 8px 3px', color: palette.sub, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           工作区 · {cwd.split('/').filter(Boolean).at(-1) ?? cwd}
         </div>
+        {workspaceSwitching && workspaces.length > 1 && (
+          <>
+            <div style={{ padding: '5px 8px 3px', color: palette.sub, fontSize: 11 }}>切换工作区（{workspaces.length}）</div>
+            <div style={{ maxHeight: 132, overflowY: 'auto' }}>
+              {workspaces.map((workspace) => {
+                const active = workspace.root === cwd
+                const switching = switchingWorkspace === workspace.root
+                return (
+                  <button
+                    key={workspace.root}
+                    type="button"
+                    title={workspace.root}
+                    disabled={active || switchingWorkspace !== null}
+                    onClick={() => { void switchWorkspace(workspace.root) }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '5px 8px', border: 'none', borderRadius: 6,
+                      background: active ? palette.active : 'transparent', color: palette.text, textAlign: 'left', cursor: active ? 'default' : 'pointer', fontSize: 12,
+                      opacity: switchingWorkspace !== null && !switching ? 0.55 : 1,
+                    }}
+                  >
+                    <span style={{ width: 14, flexShrink: 0, color: active ? '#4656e0' : palette.sub }}>{active ? '✓' : '⌂'}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 600 : 400 }}>{workspace.name}</span>
+                      <span style={{ display: 'block', color: palette.sub, fontSize: 11 }}>{switching ? '正在切换…' : `${workspace.boardCount} 个画板`}</span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            <div style={{ borderTop: `1px solid ${palette.border}`, margin: '4px 2px' }} />
+          </>
+        )}
         {creating ? (
           <div style={{ padding: '6px 6px 2px' }}>
             <input

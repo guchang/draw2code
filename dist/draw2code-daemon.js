@@ -3646,7 +3646,8 @@ import { resolve as resolve3 } from "node:path";
 // src/daemon-server.ts
 import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile as readFile4, realpath as realpath5, rm as rm2 } from "node:fs/promises";
+import { readFile as readFile5, realpath as realpath6, rm as rm2 } from "node:fs/promises";
+import { basename } from "node:path";
 import { URL as URL2 } from "node:url";
 
 // node_modules/ws/wrapper.mjs
@@ -15549,6 +15550,74 @@ async function createDaemonDescriptor(path, input) {
   return descriptor;
 }
 
+// src/workspace-registry.ts
+import { chmod, mkdir as mkdir4, readFile as readFile4, realpath as realpath5, rename as rename4, writeFile as writeFile5 } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname as dirname2, join as join3 } from "node:path";
+function defaultWorkspaceRegistryPath() {
+  return process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH ?? join3(homedir(), ".draw2code", "workspaces.json");
+}
+function isWorkspacePickerCandidate(path) {
+  return !/\/\.codex\/plugins\/cache(?:\/|$)/.test(path.replaceAll("\\", "/"));
+}
+var WorkspaceRegistry = class {
+  constructor(path = defaultWorkspaceRegistryPath()) {
+    this.path = path;
+  }
+  writeQueue = Promise.resolve();
+  async read() {
+    let value;
+    try {
+      value = JSON.parse(await readFile4(this.path, "utf8"));
+    } catch {
+      return [];
+    }
+    if (typeof value !== "object" || value === null || !Array.isArray(value.workspaces)) return [];
+    const rows = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const candidate of value.workspaces ?? []) {
+      if (typeof candidate?.path !== "string") continue;
+      let canonical;
+      try {
+        canonical = await realpath5(candidate.path);
+      } catch {
+        continue;
+      }
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      rows.push({
+        path: canonical,
+        registeredAt: Number.isFinite(candidate.registeredAt) ? candidate.registeredAt : Date.now(),
+        lastUsedAt: Number.isFinite(candidate.lastUsedAt) ? candidate.lastUsedAt : Date.now()
+      });
+    }
+    return rows;
+  }
+  async list() {
+    return await this.read();
+  }
+  async register(path) {
+    const canonical = await realpath5(path);
+    const task = this.writeQueue.then(async () => {
+      const now2 = Date.now();
+      const rows = await this.read();
+      const existing = rows.find((row) => row.path === canonical);
+      if (existing === void 0) rows.push({ path: canonical, registeredAt: now2, lastUsedAt: now2 });
+      else existing.lastUsedAt = now2;
+      rows.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
+      await mkdir4(dirname2(this.path), { recursive: true, mode: 448 });
+      const temporary = `${this.path}.tmp-${process.pid}-${now2}`;
+      await writeFile5(temporary, `${JSON.stringify({ version: 1, workspaces: rows }, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+      await rename4(temporary, this.path);
+      await chmod(this.path, 384);
+    });
+    this.writeQueue = task.catch(() => void 0);
+    await task;
+    return canonical;
+  }
+};
+
 // src/daemon-server.ts
 var MAX_BODY_BYTES = 2 * 1024 * 1024;
 var CANVAS_TOKEN_TTL_MS = 15 * 6e4;
@@ -15588,7 +15657,8 @@ function safeEqual(left, right) {
 }
 async function startDaemon(options) {
   const runtime = new Draw2CodeRuntimeImpl();
-  const roots = /* @__PURE__ */ new Set();
+  const workspaceRegistry = new WorkspaceRegistry(options.workspaceRegistryPath ?? defaultWorkspaceRegistryPath());
+  const roots = new Set((await workspaceRegistry.list()).map((row) => row.path));
   const grants = /* @__PURE__ */ new Map();
   const sockets = /* @__PURE__ */ new Map();
   let descriptor;
@@ -15599,6 +15669,34 @@ async function startDaemon(options) {
     logger: { warn: (message, ...args) => console.warn(message, ...args) }
   };
   const sceneRoutes = makeRoutes(new SceneStore(storeContext));
+  const registerWorkspace = async (path) => {
+    const canonical = await realpath6(path);
+    if (roots.has(canonical)) return canonical;
+    await workspaceRegistry.register(canonical);
+    roots.add(canonical);
+    return canonical;
+  };
+  const issueCanvasGrant = (root, allowedRoots, board) => {
+    const token = randomBytes2(24).toString("base64url");
+    const expiresAt = Date.now() + canvasTokenTtlMs2;
+    grants.set(token, { root, allowedRoots, expiresAt });
+    const query = new URLSearchParams({ root, token, ...board === null ? {} : { board } });
+    return { token, expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` };
+  };
+  const switchableRoots = async (currentRoot) => {
+    const store = new SceneStore(storeContext);
+    const allowed = [];
+    for (const workspaceRoot of roots) {
+      if (workspaceRoot === currentRoot) {
+        allowed.push(workspaceRoot);
+        continue;
+      }
+      if (!isWorkspacePickerCandidate(workspaceRoot)) continue;
+      const listed = await store.list(workspaceRoot);
+      if (listed.ok && listed.value.length > 0) allowed.push(workspaceRoot);
+    }
+    return allowed;
+  };
   const authorize = async (req, root) => {
     const token = bearer(req) ?? new URL2(req.url ?? "/", "http://localhost").searchParams.get("token");
     if (token !== null && safeEqual(token, descriptor.token)) return { ok: true };
@@ -15609,7 +15707,7 @@ async function startDaemon(options) {
       return { ok: false };
     }
     try {
-      if (await realpath5(root) !== grant.root) return { ok: false };
+      if (await realpath6(root) !== grant.root) return { ok: false };
       grant.expiresAt = Date.now() + canvasTokenTtlMs2;
       return { ok: true, grant };
     } catch {
@@ -15620,7 +15718,7 @@ async function startDaemon(options) {
   const broadcast = async (root, event) => {
     let canonicalRoot;
     try {
-      canonicalRoot = await realpath5(root);
+      canonicalRoot = await realpath6(root);
     } catch {
       return;
     }
@@ -15654,8 +15752,8 @@ async function startDaemon(options) {
         const context = body.context;
         const command = body.command;
         if (typeof context?.workspaceRoot !== "string" || typeof command?.root !== "string") throw new Error("invalid command or context");
-        const canonicalWorkspace = await realpath5(context.workspaceRoot);
-        roots.add(canonicalWorkspace);
+        const canonicalWorkspace = await realpath6(context.workspaceRoot);
+        await registerWorkspace(canonicalWorkspace);
         const result = await runtime.execute(command, { ...context, workspaceRoot: canonicalWorkspace });
         writeJson2(res, result.ok ? 200 : result.error.code === "workspace-unknown" ? 403 : 400, result);
       } catch (error2) {
@@ -15671,10 +15769,10 @@ async function startDaemon(options) {
       try {
         const body = await readJson(req);
         const context = body.context;
-        const root = await realpath5(String(body.root ?? ""));
-        const workspace = await realpath5(context.workspaceRoot);
+        const root = await realpath6(String(body.root ?? ""));
+        const workspace = await realpath6(context.workspaceRoot);
         if (root !== workspace && !root.startsWith(`${workspace}/`)) throw new Error("root is outside the host workspace");
-        roots.add(workspace);
+        await registerWorkspace(workspace);
         writeJson2(res, 200, { ok: true, root, workspaceRoot: workspace });
       } catch (error2) {
         writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
@@ -15689,15 +15787,50 @@ async function startDaemon(options) {
       try {
         const body = await readJson(req);
         const context = body.context;
-        const root = await realpath5(String(body.root ?? ""));
-        const workspace = await realpath5(context.workspaceRoot);
+        const root = await realpath6(String(body.root ?? ""));
+        const workspace = await realpath6(context.workspaceRoot);
         if (root !== workspace && !root.startsWith(`${workspace}/`)) throw new Error("root is outside the host workspace");
-        roots.add(workspace);
-        const token = randomBytes2(24).toString("base64url");
+        await registerWorkspace(workspace);
         const board = typeof body.board === "string" ? body.board : null;
-        grants.set(token, { root, expiresAt: Date.now() + canvasTokenTtlMs2 });
-        const query = new URLSearchParams({ root, token, ...board === null ? {} : { board } });
-        writeJson2(res, 200, { ok: true, token, expiresAt: grants.get(token)?.expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` });
+        writeJson2(res, 200, { ok: true, ...issueCanvasGrant(root, await switchableRoots(root), board) });
+      } catch (error2) {
+        writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
+      }
+      return;
+    }
+    if (url.pathname === "/canvas-workspaces" && req.method === "GET") {
+      const root = url.searchParams.get("root");
+      const authorized = await authorize(req, root);
+      if (!authorized.ok || authorized.grant === void 0) {
+        writeJson2(res, 401, { ok: false, error: { code: "unauthorized", message: "workspace-scoped canvas token required" } });
+        return;
+      }
+      const workspaces = [];
+      for (const workspaceRoot of authorized.grant.allowedRoots) {
+        if (!roots.has(workspaceRoot)) continue;
+        const listed = await new SceneStore(storeContext).list(workspaceRoot);
+        if (!listed.ok) continue;
+        workspaces.push({ root: workspaceRoot, name: basename(workspaceRoot), boardCount: listed.value.length });
+      }
+      workspaces.sort((left, right) => left.name.localeCompare(right.name, "zh-CN") || left.root.localeCompare(right.root));
+      writeJson2(res, 200, { ok: true, workspaces });
+      return;
+    }
+    if (url.pathname === "/canvas-workspace-token" && req.method === "POST") {
+      try {
+        const body = await readJson(req);
+        const root = typeof body.root === "string" ? body.root : null;
+        const authorized = await authorize(req, root);
+        if (!authorized.ok || authorized.grant === void 0) {
+          writeJson2(res, 401, { ok: false, error: { code: "unauthorized", message: "workspace-scoped canvas token required" } });
+          return;
+        }
+        const targetRoot = await realpath6(String(body.targetRoot ?? ""));
+        if (!authorized.grant.allowedRoots.includes(targetRoot) || !roots.has(targetRoot)) {
+          writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "target workspace was not registered when this canvas opened" } });
+          return;
+        }
+        writeJson2(res, 200, { ok: true, root: targetRoot, ...issueCanvasGrant(targetRoot, authorized.grant.allowedRoots, null) });
       } catch (error2) {
         writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
       }
@@ -15710,7 +15843,7 @@ async function startDaemon(options) {
         return;
       }
       try {
-        const html = await readFile4(options.canvasHtmlPath, "utf8");
+        const html = await readFile5(options.canvasHtmlPath, "utf8");
         res.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
@@ -15776,7 +15909,7 @@ async function startDaemon(options) {
     }
     let canonicalRoot;
     try {
-      canonicalRoot = await realpath5(root);
+      canonicalRoot = await realpath6(root);
     } catch {
       socket.destroy();
       return;
@@ -15808,7 +15941,7 @@ async function startDaemon(options) {
     for (const socket of sockets.keys()) socket.close();
     await new Promise((resolve4) => server.close(() => resolve4()));
     try {
-      const current = JSON.parse(await readFile4(options.descriptorPath, "utf8"));
+      const current = JSON.parse(await readFile5(options.descriptorPath, "utf8"));
       if (current.nonce === descriptor.nonce) await rm2(options.descriptorPath, { force: true });
     } catch {
     }

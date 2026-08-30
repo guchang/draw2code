@@ -30,7 +30,7 @@ Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得
 
 第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。内嵌 UI、浏览器与 headless 的选择由工具 capability detection 决定；不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
 
-用户要亲自绘制且宿主提供侧边栏浏览器时，以 `presentation=handoff` 调用 `draw2code_open`，再让宿主浏览器打开工具返回的短期 `url`。确认该标签页已经导航到此 URL 且画布真正可见后，才能告诉用户“画码已经在侧边栏打开”。若只得到 `displayState=handoff-ready`，但侧边栏未显示，不得把“URL 已准备”误报成“已打开”；无法自动展示时应返回可点击 URL。没有 active board 时展示画板选择器或空白画布，不进入 Create。
+用户要亲自绘制且宿主提供侧边栏浏览器时，以 `presentation=handoff` 调用 `draw2code_open`。优先复用同一 workspace 的画码标签页并依靠事件刷新；没有时才打开工具返回的短期 `url`。单纯打开或切换 URL 时优先使用宿主原生打开/导航能力，不要为此初始化通用浏览器自动化；只有需要检查画布 DOM、控制台或交互且没有更轻量证据时才接管浏览器。确认标签页已经显示目标画板且画布真正可见后，才能告诉用户“画码已经在侧边栏打开”。若只得到 `displayState=handoff-ready`，但侧边栏未显示，不得把“URL 已准备”误报成“已打开”；无法自动展示时应返回可点击 URL。没有 active board 时展示画板选择器或空白画布，不进入 Create。
 
 ## 完成口径
 

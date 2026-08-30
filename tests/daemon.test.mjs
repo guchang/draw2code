@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -22,16 +22,22 @@ async function waitUntil(predicate, timeoutMs = 3000) {
 
 test('daemon is a token-gated single writer with workspace-scoped canvas access and WebSocket events', async (t) => {
   const previousTokenTtl = process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS
+  const previousRegistryPath = process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH
   process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS = '1000'
   t.after(() => {
     if (previousTokenTtl === undefined) delete process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS
     else process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS = previousTokenTtl
+    if (previousRegistryPath === undefined) delete process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH
+    else process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH = previousRegistryPath
   })
   const root = await mkdtemp(join(tmpdir(), 'draw2code-daemon-workspace-'))
   const secondRoot = await mkdtemp(join(tmpdir(), 'draw2code-daemon-workspace-'))
   const outside = await mkdtemp(join(tmpdir(), 'draw2code-daemon-outside-'))
   const runtime = await mkdtemp(join(tmpdir(), 'draw2code-daemon-runtime-'))
+  const pluginCacheRoot = join(runtime, '.codex', 'plugins', 'cache', 'personal', 'draw2code')
+  await mkdir(pluginCacheRoot, { recursive: true })
   const descriptorPath = join(runtime, 'daemon.json')
+  process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH = join(runtime, 'workspaces.json')
   const client = new Draw2CodeDaemonClient(daemonEntry, canvasHtml, descriptorPath)
   const concurrentClient = new Draw2CodeDaemonClient(daemonEntry, canvasHtml, descriptorPath)
   const context = {
@@ -39,6 +45,7 @@ test('daemon is a token-gated single writer with workspace-scoped canvas access 
     uiCapabilities: { mcpUi: false, externalBrowser: false },
   }
   const secondContext = { ...context, clientId: 'daemon-test-second', workspaceRoot: secondRoot }
+  const pluginCacheContext = { ...context, clientId: 'daemon-test-cache', workspaceRoot: pluginCacheRoot }
   const [descriptor, concurrentDescriptor] = await Promise.all([client.ensure(), concurrentClient.ensure()])
   assert.equal(concurrentDescriptor.pid, descriptor.pid)
   assert.equal(concurrentDescriptor.nonce, descriptor.nonce)
@@ -56,6 +63,16 @@ test('daemon is a token-gated single writer with workspace-scoped canvas access 
   assert.equal(escaped.ok, false)
   assert.equal(escaped.error.code, 'workspace-unknown')
 
+  const seededSecondWorkspace = await client.execute({
+    type: 'update', root: secondRoot, board: '第二工作区画板',
+    ops: [{ op: 'upsert', element: { id: 'second-workspace-title', type: 'text', text: '第二工作区' } }],
+  }, secondContext)
+  assert.equal(seededSecondWorkspace.ok, true)
+  const seededPluginCache = await client.execute({
+    type: 'update', root: pluginCacheRoot, board: '缓存误写画板',
+    ops: [{ op: 'upsert', element: { id: 'cache-title', type: 'text', text: '不应出现在工作区菜单' } }],
+  }, pluginCacheContext)
+  assert.equal(seededPluginCache.ok, true)
   const canvas = await client.canvas(root, null, context)
   assert.ok(canvas.expiresAt - Date.now() < 2_000)
   const html = await fetch(canvas.url)
@@ -89,6 +106,37 @@ test('daemon is a token-gated single writer with workspace-scoped canvas access 
 
   await client.execute({ type: 'list', root: secondRoot }, secondContext)
   const secondCanvas = await client.canvas(secondRoot, null, secondContext)
+  const workspaces = await fetch(`http://127.0.0.1:${descriptor.port}/canvas-workspaces?root=${encodeURIComponent(root)}`, {
+    headers: { authorization: `Bearer ${canvas.token}` },
+  })
+  assert.equal(workspaces.status, 200)
+  const workspaceList = await workspaces.json()
+  assert.deepEqual(workspaceList.workspaces.map((row) => row.root).sort(), [await realpath(root), await realpath(secondRoot)].sort())
+
+  const crossRootRead = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scenes?root=${encodeURIComponent(secondRoot)}`, {
+    headers: { authorization: `Bearer ${canvas.token}` },
+  })
+  assert.equal(crossRootRead.status, 401)
+
+  const switched = await fetch(`http://127.0.0.1:${descriptor.port}/canvas-workspace-token`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${canvas.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ root, targetRoot: secondRoot }),
+  })
+  assert.equal(switched.status, 200)
+  const switchedBody = await switched.json()
+  assert.equal(new URL(switchedBody.url).searchParams.get('root'), await realpath(secondRoot))
+  const switchedRead = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scenes?root=${encodeURIComponent(secondRoot)}`, {
+    headers: { authorization: `Bearer ${switchedBody.token}` },
+  })
+  assert.equal(switchedRead.status, 200)
+
+  const escapedSwitch = await fetch(`http://127.0.0.1:${descriptor.port}/canvas-workspace-token`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${canvas.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ root, targetRoot: outside }),
+  })
+  assert.equal(escapedSwitch.status, 403)
   const secondEvents = []
   const secondWsUrl = new URL(secondCanvas.url)
   secondWsUrl.protocol = 'ws:'

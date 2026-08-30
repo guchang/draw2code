@@ -122,6 +122,16 @@ async function main() {
     logLevel: 'info',
   })
   await esbuild.build({
+    entryPoints: ['src/workspace-registry.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    packages: 'external',
+    outfile: 'dist/workspace-registry.js',
+    sourcemap: false,
+    logLevel: 'info',
+  })
+  await esbuild.build({
     entryPoints: ['src/mcp.ts'],
     bundle: true,
     platform: 'node',

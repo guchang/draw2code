@@ -1,17 +1,19 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { readFile, realpath, rm } from 'node:fs/promises'
+import { basename } from 'node:path'
 import { URL } from 'node:url'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { makeRoutes } from './routes.ts'
 import { SceneStore } from './scene-store.ts'
 import { Draw2CodeRuntimeImpl, createDaemonDescriptor, type DaemonDescriptor, type Draw2CodeCommand, type HostContext } from './runtime.ts'
 import type { Draw2CodeStoreContext } from './store-context.ts'
+import { WorkspaceRegistry, defaultWorkspaceRegistryPath, isWorkspacePickerCandidate } from './workspace-registry.ts'
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const CANVAS_TOKEN_TTL_MS = 15 * 60_000
 
-interface CanvasGrant { root: string; expiresAt: number }
+interface CanvasGrant { root: string; allowedRoots: string[]; expiresAt: number }
 type Authorized = { ok: true; grant?: CanvasGrant } | { ok: false }
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
@@ -64,9 +66,11 @@ export async function startDaemon(options: {
   canvasHtmlPath: string
   idleMs?: number
   canvasTokenTtlMs?: number
+  workspaceRegistryPath?: string
 }): Promise<StartedDaemon> {
   const runtime = new Draw2CodeRuntimeImpl()
-  const roots = new Set<string>()
+  const workspaceRegistry = new WorkspaceRegistry(options.workspaceRegistryPath ?? defaultWorkspaceRegistryPath())
+  const roots = new Set((await workspaceRegistry.list()).map((row) => row.path))
   const grants = new Map<string, CanvasGrant>()
   const sockets = new Map<WebSocket, string>()
   let descriptor: DaemonDescriptor
@@ -77,6 +81,37 @@ export async function startDaemon(options: {
     logger: { warn: (message, ...args) => console.warn(message, ...args) },
   }
   const sceneRoutes = makeRoutes(new SceneStore(storeContext))
+
+  const registerWorkspace = async (path: string): Promise<string> => {
+    const canonical = await realpath(path)
+    if (roots.has(canonical)) return canonical
+    await workspaceRegistry.register(canonical)
+    roots.add(canonical)
+    return canonical
+  }
+
+  const issueCanvasGrant = (root: string, allowedRoots: string[], board: string | null): { token: string; expiresAt: number; url: string } => {
+    const token = randomBytes(24).toString('base64url')
+    const expiresAt = Date.now() + canvasTokenTtlMs
+    grants.set(token, { root, allowedRoots, expiresAt })
+    const query = new URLSearchParams({ root, token, ...(board === null ? {} : { board }) })
+    return { token, expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` }
+  }
+
+  const switchableRoots = async (currentRoot: string): Promise<string[]> => {
+    const store = new SceneStore(storeContext)
+    const allowed = []
+    for (const workspaceRoot of roots) {
+      if (workspaceRoot === currentRoot) {
+        allowed.push(workspaceRoot)
+        continue
+      }
+      if (!isWorkspacePickerCandidate(workspaceRoot)) continue
+      const listed = await store.list(workspaceRoot)
+      if (listed.ok && listed.value.length > 0) allowed.push(workspaceRoot)
+    }
+    return allowed
+  }
 
   const authorize = async (req: IncomingMessage, root: string | null): Promise<Authorized> => {
     const token = bearer(req) ?? new URL(req.url ?? '/', 'http://localhost').searchParams.get('token')
@@ -136,7 +171,7 @@ export async function startDaemon(options: {
         const command = body.command as Draw2CodeCommand
         if (typeof context?.workspaceRoot !== 'string' || typeof command?.root !== 'string') throw new Error('invalid command or context')
         const canonicalWorkspace = await realpath(context.workspaceRoot)
-        roots.add(canonicalWorkspace)
+        await registerWorkspace(canonicalWorkspace)
         const result = await runtime.execute(command, { ...context, workspaceRoot: canonicalWorkspace })
         writeJson(res, result.ok ? 200 : result.error.code === 'workspace-unknown' ? 403 : 400, result)
       } catch (error) {
@@ -155,7 +190,7 @@ export async function startDaemon(options: {
         const root = await realpath(String(body.root ?? ''))
         const workspace = await realpath(context.workspaceRoot)
         if (root !== workspace && !root.startsWith(`${workspace}/`)) throw new Error('root is outside the host workspace')
-        roots.add(workspace)
+        await registerWorkspace(workspace)
         writeJson(res, 200, { ok: true, root, workspaceRoot: workspace })
       } catch (error) {
         writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
@@ -173,12 +208,47 @@ export async function startDaemon(options: {
         const root = await realpath(String(body.root ?? ''))
         const workspace = await realpath(context.workspaceRoot)
         if (root !== workspace && !root.startsWith(`${workspace}/`)) throw new Error('root is outside the host workspace')
-        roots.add(workspace)
-        const token = randomBytes(24).toString('base64url')
+        await registerWorkspace(workspace)
         const board = typeof body.board === 'string' ? body.board : null
-        grants.set(token, { root, expiresAt: Date.now() + canvasTokenTtlMs })
-        const query = new URLSearchParams({ root, token, ...(board === null ? {} : { board }) })
-        writeJson(res, 200, { ok: true, token, expiresAt: grants.get(token)?.expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` })
+        writeJson(res, 200, { ok: true, ...issueCanvasGrant(root, await switchableRoots(root), board) })
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
+      }
+      return
+    }
+    if (url.pathname === '/canvas-workspaces' && req.method === 'GET') {
+      const root = url.searchParams.get('root')
+      const authorized = await authorize(req, root)
+      if (!authorized.ok || authorized.grant === undefined) {
+        writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'workspace-scoped canvas token required' } })
+        return
+      }
+      const workspaces = []
+      for (const workspaceRoot of authorized.grant.allowedRoots) {
+        if (!roots.has(workspaceRoot)) continue
+        const listed = await new SceneStore(storeContext).list(workspaceRoot)
+        if (!listed.ok) continue
+        workspaces.push({ root: workspaceRoot, name: basename(workspaceRoot), boardCount: listed.value.length })
+      }
+      workspaces.sort((left, right) => left.name.localeCompare(right.name, 'zh-CN') || left.root.localeCompare(right.root))
+      writeJson(res, 200, { ok: true, workspaces })
+      return
+    }
+    if (url.pathname === '/canvas-workspace-token' && req.method === 'POST') {
+      try {
+        const body = await readJson(req)
+        const root = typeof body.root === 'string' ? body.root : null
+        const authorized = await authorize(req, root)
+        if (!authorized.ok || authorized.grant === undefined) {
+          writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'workspace-scoped canvas token required' } })
+          return
+        }
+        const targetRoot = await realpath(String(body.targetRoot ?? ''))
+        if (!authorized.grant.allowedRoots.includes(targetRoot) || !roots.has(targetRoot)) {
+          writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'target workspace was not registered when this canvas opened' } })
+          return
+        }
+        writeJson(res, 200, { ok: true, root: targetRoot, ...issueCanvasGrant(targetRoot, authorized.grant.allowedRoots, null) })
       } catch (error) {
         writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
       }
