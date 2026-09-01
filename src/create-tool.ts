@@ -72,6 +72,7 @@ interface CreateResponse {
   boardName?: string
   activeBoard?: string
   nextAction?: string
+  drawingPlan?: JsonValue
   error?: JsonValue
   current?: JsonValue
   drafts?: JsonValue
@@ -228,6 +229,33 @@ function createConfirmation(brief: unknown): Record<string, unknown> {
   }
 }
 
+function createDrawingPlan(brief: unknown): Record<string, unknown> {
+  if (typeof brief !== 'object' || brief === null || Array.isArray(brief)) {
+    return { mode: 'single-batch', nextActionCode: 'write_pages', allowedPageIds: [], remainingPageIds: [] }
+  }
+  const value = brief as { pages?: unknown; prototypeLayout?: unknown }
+  const pageIds = Array.isArray(value.pages)
+    ? value.pages.flatMap((page) => {
+        if (typeof page !== 'object' || page === null || Array.isArray(page)) return []
+        const id = (page as { id?: unknown }).id
+        return typeof id === 'string' && id.trim() !== '' ? [id.trim()] : []
+      })
+    : []
+  const layout = typeof value.prototypeLayout === 'object' && value.prototypeLayout !== null && !Array.isArray(value.prototypeLayout)
+    ? value.prototypeLayout as { representativePageId?: unknown }
+    : {}
+  const requestedRepresentative = typeof layout.representativePageId === 'string' ? layout.representativePageId : ''
+  const representativePageId = pageIds.includes(requestedRepresentative) ? requestedRepresentative : pageIds[0]
+  const phased = pageIds.length >= 3 && representativePageId !== undefined
+  return {
+    mode: phased ? 'representative-first' : 'single-batch',
+    nextActionCode: phased ? 'write_representative' : 'write_pages',
+    ...(representativePageId === undefined ? {} : { representativePageId }),
+    allowedPageIds: phased ? [representativePageId] : pageIds,
+    remainingPageIds: phased ? pageIds.filter((id) => id !== representativePageId) : [],
+  }
+}
+
 function prototypeBriefContract(): Record<string, unknown> {
   return {
     requiredTopLevel: [
@@ -273,6 +301,7 @@ function responseFor(projects: ProjectStore, draft: ProjectDraft, extras: Partia
     ...(draft.briefMarkdown === undefined || draft.briefMarkdown === null ? {} : { briefMarkdown: draft.briefMarkdown }),
     ...(draft.flowVersion === CREATE_FLOW_VERSION && draft.status === 'draft' ? { briefContract: prototypeBriefContract() as JsonValue } : {}),
     ...(status === 'ready' ? { confirmation: createConfirmation(draft.brief) as JsonValue } : {}),
+    ...(status === 'confirmed' && draft.brief !== null ? { drawingPlan: createDrawingPlan(draft.brief) as JsonValue } : {}),
     ...(draft.boardName === null ? {} : { boardName: draft.boardName }),
     ...extras,
   }
@@ -439,8 +468,8 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
       + 'The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim, then show one explicit page-range confirmation card listing every page: “确认这些页面并绘制 / 调整页面范围 / 调整产品方向”; do not summarize it. '
       + 'Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, '
       + 'action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. '
-      + 'The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; '
-      + 'the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4–12 Chinese characters, and becomes the board name directly; never append “原型” or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. '
+      + 'The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update plus a machine-readable drawingPlan. For three or more pages, drawingPlan allows only the representative page first; the model must not generate the remaining page ops until action=review returns nextActionCode=write_remaining_pages. '
+      + 'The model must call draw2code_update with the returned boardName and drawingPlan. projectName is required for action=start, should usually be 4–12 Chinese characters, and becomes the board name directly; never append “原型” or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. '
       + 'If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. '
       + 'Options are structured for native choice cards when available; otherwise render them as numbered choices. “直接整理项目简报” ends discovery without requiring a hidden chat input; “Other” requires text and is stored directly; silence or “还没想好” is an explicit pending decision, not pause or cancellation.',
     parameters: {
@@ -486,6 +515,7 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
           boardName: { type: 'string' },
           activeBoard: { type: 'string' },
           nextAction: { type: 'string' },
+          drawingPlan: { type: 'json' },
           error: { type: 'json' },
           current: { type: 'json' },
           drafts: { type: 'json' },
@@ -513,7 +543,10 @@ export function draw2codeCreateTool(projects: ProjectStore, scenes: SceneStore) 
           const markdown = value.briefMarkdown ?? '项目简报缺少可读 Markdown，请修复后再确认。'
           return text(`${continuation(value)} status=ready\n${markdown}\n\n请完整展示以上项目简报，不要自行缩写或重新总结。随后使用宿主 ask_user_question 原样复制 confirmation.askUserQuestionArgs；这张卡会明确列出将绘制的页面，并且仅包含“确认这些页面并绘制 / 调整页面范围 / 调整产品方向”。确认后调用 action=confirm。选择调整时直接调用 action=propose_question，只追问受影响的一项；旧简报会失效，回答后必须重新 synthesize 完整简报。`)
         }
-        if (value.status === 'confirmed') return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ''} activeBoard=${value.activeBoard ?? ''} nextAction=${value.nextAction ?? 'draw2code_update'}\n项目「${value.projectName ?? ''}」已确认，独立画板已创建。下一步必须同时按 brief.pageBlueprints 和 brief.pageMockData 调用 draw2code_update，并明确传入上面的 boardName；首轮有 3 个及以上页面时先画一个代表页并查看真实画板，再提交 representative visualReview 后添加其余页面，最终只有 completionReady=true 才能报告完成。每个重复内容组件至少提供 3 条可见 mock 数据，不要回写旧画板。`)
+        if (value.status === 'confirmed') {
+          const drawingPlan = value.drawingPlan as { nextActionCode?: string; allowedPageIds?: string[]; remainingPageIds?: string[] } | undefined
+          return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ''} activeBoard=${value.activeBoard ?? ''} nextAction=${value.nextAction ?? 'draw2code_update'} drawingNextAction=${drawingPlan?.nextActionCode ?? 'write_pages'} allowedPageIds=${(drawingPlan?.allowedPageIds ?? []).join(',')} remainingPageIds=${(drawingPlan?.remainingPageIds ?? []).join(',')}\n项目「${value.projectName ?? ''}」已确认，独立画板已创建。必须严格执行 drawingPlan：当 drawingNextAction=write_representative 时，本轮只为 allowedPageIds 生成 ops；写入后等待画布可见，再用 draw2code_update action=review 和返回的 reviewToken 记录 representative 复核，随后才生成 remainingPageIds。不要预先生成全部页面的大批 ops。最终用 action=review phase=final 收口，只有 completionReady=true 才能报告完成。每个重复内容组件至少提供 3 条可见 mock 数据，不要回写旧画板。`)
+        }
         if (value.status === 'drafts') {
           const drafts = (value.drafts as Array<{ sessionId?: string; projectName?: string; status?: string }> | undefined) ?? []
           const summary = drafts.map((draft) => `${draft.sessionId ?? ''} ${draft.projectName ?? ''} (${draft.status ?? ''})`).join('\n')

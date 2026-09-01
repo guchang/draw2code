@@ -56,6 +56,7 @@ const CLIENT_ARCHIVE_INTERVAL_MS = 10 * 60_000
 // instance, so every mutation of the same physical file shares one queue.
 const WRITE_QUEUES = new Map<string, Promise<void>>()
 const BOARD_REVEALS = new Map<string, BoardRevealRequest>()
+const BOARD_REVIEWS = new Map<string, BoardReviewReceipt>()
 let revealCounter = 0
 
 /** Element types agents may author (render-safe subset). */
@@ -154,6 +155,19 @@ export interface BoardRevealRequest {
   revision: number
   createdAt: number
   consumedAt?: number
+}
+
+export type BoardReviewPhase = 'representative' | 'final'
+
+/** A visible-board review acknowledged without mutating the scene. */
+export interface BoardReviewReceipt {
+  token: string
+  board: string
+  revision: number
+  phase: BoardReviewPhase
+  inspectedPageIds: string[]
+  observations: string[]
+  reviewedAt: number
 }
 
 /** Snapshot file basenames: <ms-timestamp>-<random6>.json (unique within a
@@ -702,6 +716,51 @@ export class SceneStore {
     return { ok: true, value: acknowledged }
   }
 
+  /** Record a visible review of the latest reveal without writing the board. */
+  async recordBoardReview(
+    root: string,
+    input: Omit<BoardReviewReceipt, 'revision' | 'reviewedAt'> & { boardRevision: number },
+  ): Promise<SceneResult<BoardReviewReceipt>> {
+    const gated = await this.gate(root)
+    if (!gated.ok) return gated
+    const named = this.checkName(input.board)
+    if (!named.ok) return named
+    const current = BOARD_REVEALS.get(gated.value)
+    if (current === undefined || current.id !== input.token || current.board !== named.value) {
+      return err('visual-review-stale', 'review token does not match the latest visible-board reveal')
+    }
+    if (Math.abs(current.revision - input.boardRevision) > 0.5) {
+      return err('visual-review-stale', `review token revision ${current.revision} does not match current board revision ${input.boardRevision}`)
+    }
+    if (typeof current.consumedAt !== 'number') {
+      return err('visual-review-not-visible', 'the canvas has not acknowledged opening this review token')
+    }
+    const key = `${gated.value}\u0000${named.value}\u0000${input.phase}`
+    const existing = BOARD_REVIEWS.get(key)
+    if (existing?.token === input.token) return { ok: true, value: existing }
+    const { boardRevision, ...reviewInput } = input
+    const receipt: BoardReviewReceipt = {
+      ...reviewInput,
+      board: named.value,
+      revision: boardRevision,
+      inspectedPageIds: [...input.inspectedPageIds],
+      observations: [...input.observations],
+      reviewedAt: Date.now(),
+    }
+    BOARD_REVIEWS.set(key, receipt)
+    return { ok: true, value: receipt }
+  }
+
+  /** Read the latest stored review for one board and phase. */
+  async getBoardReview(root: string, board: string, phase: BoardReviewPhase): Promise<SceneResult<{ receipt: BoardReviewReceipt | null }>> {
+    const gated = await this.gate(root)
+    if (!gated.ok) return gated
+    const named = this.checkName(board)
+    if (!named.ok) return named
+    const key = `${gated.value}\u0000${named.value}\u0000${phase}`
+    return { ok: true, value: { receipt: BOARD_REVIEWS.get(key) ?? null } }
+  }
+
   /** The versions directory of one board (inside draw2code/.versions/<name>). */
   private versionsDir(canonicalRoot: string, name: string): string {
     return join(this.dir(canonicalRoot), VERSIONS_DIR, name)
@@ -1081,6 +1140,8 @@ export class SceneStore {
         })
       }
       BOARD_REVEALS.delete(gated.value)
+      BOARD_REVIEWS.delete(`${gated.value}\u0000${named.value}\u0000representative`)
+      BOARD_REVIEWS.delete(`${gated.value}\u0000${named.value}\u0000final`)
       return { ok: true, value: { deleted: true } }
     })
   }

@@ -94,11 +94,19 @@ export function apply(ctx: Context): void {
     daemonTool(ctx, client, localTools[2], (args) => { const { root, ...input } = args; return { type: 'create', root: String(root ?? ''), input } }),
     daemonTool(ctx, client, localTools[3], (args) => {
       const visualReview = normalizeVisualReviewArg(args.visualReview)
+      const action = args.action === 'review' || args.action === 'commit_pending' ? args.action : 'write'
       return {
-        type: 'update', root: String(args.root ?? ''), ops: normalizeOpsArg(args.ops),
+        type: 'update', root: String(args.root ?? ''), action,
+        ...(args.ops === undefined ? {} : { ops: normalizeOpsArg(args.ops) }),
         ...(typeof args.name === 'string' ? { board: args.name } : {}),
         ...(typeof args.force === 'boolean' ? { force: args.force } : {}),
         ...(typeof args.safeMode === 'boolean' ? { safeMode: args.safeMode } : {}),
+        ...(typeof args.reviewToken === 'string' ? { reviewToken: args.reviewToken } : {}),
+        ...(args.phase === 'representative' || args.phase === 'final' ? { phase: args.phase } : {}),
+        ...(typeof args.passed === 'boolean' ? { passed: args.passed } : {}),
+        ...(Array.isArray(args.inspectedPageIds) ? { inspectedPageIds: args.inspectedPageIds.filter((item): item is string => typeof item === 'string') } : {}),
+        ...(Array.isArray(args.observations) ? { observations: args.observations.filter((item): item is string => typeof item === 'string') } : {}),
+        ...(typeof args.pendingUpdateId === 'string' ? { pendingUpdateId: args.pendingUpdateId } : {}),
         ...(visualReview === undefined ? {} : { visualReview }),
       }
     }),

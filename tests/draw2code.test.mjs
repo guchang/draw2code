@@ -1735,13 +1735,200 @@ test('draw2code_update separates write verification from prototype completion an
     visualReview: finalReview,
   }, {})
   assert.equal(reviewed.verified, true)
-  assert.equal(reviewed.writeVerified, true)
+  assert.equal(reviewed.writeVerified, false)
+  assert.equal(reviewed.reviewVerified, true)
   assert.equal(reviewed.completionReady, true)
   assert.equal(reviewed.prototypeQuality.visualReviewRequired, false)
   assert.equal(reviewed.prototypeQuality.contentPassed, true)
 
+  const repeated = await tool.execute({ root, name: 'quality-report', ops: [], visualReview: finalReview }, {})
+  assert.equal(repeated.rev, written.rev)
+  assert.equal(repeated.reviewVerified, true)
+  assert.equal(repeated.completionReady, true)
+})
+
+test('draw2code_update review action is pure and idempotent', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const written = await tool.execute({
+    root,
+    name: 'pure-review',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '任务列表', mockDataMin: 3 } } },
+      { op: 'upsert', element: { id: 'page-label', type: 'text', text: '任务列表', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } } },
+      { op: 'upsert', element: { id: 'mock-a', type: 'text', text: '10:30 提交产品周报', x: 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'mock-b', type: 'text', text: '14:00 修复登录闪退', x: 24, y: 170, width: 320, height: 30, customData: { role: 'mock-data' } } },
+      { op: 'upsert', element: { id: 'mock-c', type: 'text', text: '18:00 取快递', x: 24, y: 220, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    ],
+  }, {})
+  assert.equal(typeof written.reviewToken, 'string')
+  assert.equal((await store.ackBoardReveal(root, written.revealRequestId, 'pure-review')).ok, true)
+
+  const input = {
+    root,
+    name: 'pure-review',
+    action: 'review',
+    reviewToken: written.reviewToken,
+    phase: 'representative',
+    passed: true,
+    inspectedPageIds: ['page'],
+    observations: ['页面首次渲染可见', '任务数据可读'],
+  }
+  const reviewed = await tool.execute(input, {})
+  const revealAfterReview = await store.getBoardReveal(root)
+
+  assert.equal(reviewed.rev, written.rev)
+  assert.equal(reviewed.applied, 0)
+  assert.equal(reviewed.writeVerified, false)
+  assert.equal(reviewed.reviewVerified, true)
+  assert.equal(reviewed.completionReady, false)
+  assert.equal(reviewed.nextActionCode, 'write_remaining_pages')
+  assert.equal(revealAfterReview.ok, true)
+  assert.equal(revealAfterReview.value.request.id, written.revealRequestId)
+
+  const repeated = await tool.execute(input, {})
+  assert.equal(repeated.rev, written.rev)
+  assert.equal(repeated.reviewVerified, true)
+  assert.equal(repeated.completionReady, false)
+})
+
+test('draw2code_update accepts a stored representative review before writing remaining pages', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const pageOps = (id, name, x) => [
+    { op: 'upsert', element: { id, type: 'rectangle', x, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: name, mockDataMin: 3 } } },
+    { op: 'upsert', element: { id: `${id}-label`, type: 'text', text: name, x, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: id } } },
+    { op: 'upsert', element: { id: `${id}-mock-a`, type: 'text', text: `${name}示例一`, x: x + 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    { op: 'upsert', element: { id: `${id}-mock-b`, type: 'text', text: `${name}示例二`, x: x + 24, y: 170, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    { op: 'upsert', element: { id: `${id}-mock-c`, type: 'text', text: `${name}示例三`, x: x + 24, y: 220, width: 320, height: 30, customData: { role: 'mock-data' } } },
+  ]
+  const representative = await tool.execute({ root, name: 'stored-representative-review', ops: pageOps('page-a', '今天', 0) }, {})
+  assert.equal((await store.ackBoardReveal(root, representative.revealRequestId, 'stored-representative-review')).ok, true)
+  const reviewed = await tool.execute({
+    root,
+    name: 'stored-representative-review',
+    action: 'review',
+    reviewToken: representative.reviewToken,
+    phase: 'representative',
+    passed: true,
+    inspectedPageIds: ['page-a'],
+    observations: ['代表页层级和对齐正常'],
+  }, {})
+  assert.equal(reviewed.nextActionCode, 'write_remaining_pages')
+
+  const completedWrite = await tool.execute({
+    root,
+    name: 'stored-representative-review',
+    ops: [...pageOps('page-b', '全部任务', 450), ...pageOps('page-c', '编辑任务', 900)],
+  }, {})
+  assert.equal(completedWrite.writeVerified, true)
+  assert.equal(completedWrite.prototypeQuality.pages.length, 3)
+})
+
+test('draw2code_update preserves remaining page ops while representative review is pending', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const pageOps = (id, name, x) => [
+    { op: 'upsert', element: { id, type: 'rectangle', x, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: name, mockDataMin: 3 } } },
+    { op: 'upsert', element: { id: `${id}-label`, type: 'text', text: name, x, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: id } } },
+    { op: 'upsert', element: { id: `${id}-mock-a`, type: 'text', text: `${name}示例一`, x: x + 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    { op: 'upsert', element: { id: `${id}-mock-b`, type: 'text', text: `${name}示例二`, x: x + 24, y: 170, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    { op: 'upsert', element: { id: `${id}-mock-c`, type: 'text', text: `${name}示例三`, x: x + 24, y: 220, width: 320, height: 30, customData: { role: 'mock-data' } } },
+  ]
+  const representative = await tool.execute({ root, name: 'deferred-pages', ops: pageOps('page-a', '今天', 0) }, {})
+  const deferred = await tool.execute({
+    root,
+    name: 'deferred-pages',
+    ops: [...pageOps('page-b', '全部任务', 450), ...pageOps('page-c', '编辑任务', 900)],
+  }, {})
+  assert.equal(deferred.writeVerified, false)
+  assert.equal(deferred.nextActionCode, 'review_representative')
+  assert.equal(typeof deferred.pendingUpdateId, 'string')
+
+  assert.equal((await store.ackBoardReveal(root, representative.revealRequestId, 'deferred-pages')).ok, true)
+  const reviewed = await tool.execute({
+    root,
+    name: 'deferred-pages',
+    action: 'review',
+    reviewToken: representative.reviewToken,
+    phase: 'representative',
+    passed: true,
+    inspectedPageIds: ['page-a'],
+    observations: ['代表页首屏可见'],
+  }, {})
+  assert.equal(reviewed.nextActionCode, 'commit_pending_write')
+  assert.equal(reviewed.pendingUpdateId, deferred.pendingUpdateId)
+
+  const committed = await tool.execute({
+    root,
+    name: 'deferred-pages',
+    action: 'commit_pending',
+    pendingUpdateId: deferred.pendingUpdateId,
+  }, {})
+  assert.equal(committed.writeVerified, true)
+  assert.equal(committed.prototypeQuality.pages.length, 3)
+})
+
+test('draw2code_update rejects a preserved batch after the board changes', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const pageOps = (id, name, x) => [
+    { op: 'upsert', element: { id, type: 'rectangle', x, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: name, mockDataMin: 1 } } },
+    { op: 'upsert', element: { id: `${id}-label`, type: 'text', text: name, x, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: id } } },
+    { op: 'upsert', element: { id: `${id}-mock`, type: 'text', text: `${name}真实任务`, x: x + 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+  ]
+  await tool.execute({ root, name: 'stale-pending-pages', ops: pageOps('page-a', '今天', 0) }, {})
+  const deferred = await tool.execute({
+    root,
+    name: 'stale-pending-pages',
+    ops: [...pageOps('page-b', '全部任务', 450), ...pageOps('page-c', '编辑任务', 900)],
+  }, {})
+  assert.equal(typeof deferred.pendingUpdateId, 'string')
+  const current = await store.read(root, 'stale-pending-pages')
+  assert.equal(current.ok, true)
+  assert.equal((await store.write(root, 'stale-pending-pages', {
+    ...current.value.scene,
+    elements: [...current.value.scene.elements, { id: 'manual-note', type: 'text', text: '用户手工补充', x: 24, y: 280, width: 200, height: 30 }],
+  }, current.value.rev)).ok, true)
+
   await assert.rejects(
-    tool.execute({ root, name: 'quality-report', ops: [], visualReview: finalReview }, {}),
+    () => tool.execute({ root, name: 'stale-pending-pages', action: 'commit_pending', pendingUpdateId: deferred.pendingUpdateId }, {}),
+    /pending-update-stale: board changed/,
+  )
+})
+
+test('draw2code_update rejects a review token after the user changes the visible board revision', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const written = await tool.execute({
+    root,
+    name: 'stale-review-token',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '首页', mockDataMin: 1 } } },
+      { op: 'upsert', element: { id: 'page-label', type: 'text', text: '首页', x: 0, y: 4, width: 120, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } } },
+      { op: 'upsert', element: { id: 'mock', type: 'text', text: '提交产品周报', x: 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    ],
+  }, {})
+  assert.equal((await store.ackBoardReveal(root, written.revealRequestId, 'stale-review-token')).ok, true)
+  const current = await store.read(root, 'stale-review-token')
+  assert.equal(current.ok, true)
+  const changed = await store.write(root, 'stale-review-token', {
+    ...current.value.scene,
+    elements: [...current.value.scene.elements, { id: 'user-note', type: 'text', text: '用户刚刚补充' }],
+  }, current.value.rev)
+  assert.equal(changed.ok, true)
+
+  await assert.rejects(
+    tool.execute({
+      root,
+      name: 'stale-review-token',
+      action: 'review',
+      reviewToken: written.reviewToken,
+      phase: 'representative',
+      passed: true,
+      inspectedPageIds: ['page'],
+      observations: ['查看了旧版本'],
+    }, {}),
     /visual-review-stale/iu,
   )
 })
@@ -2917,6 +3104,9 @@ test('draw2code_create synthesizes one executable brief and renders the complete
   assert.equal(confirmed.brief.title, '个人四象限待办清单')
   assert.equal(confirmed.briefMarkdown, ready.briefMarkdown)
   assert.equal(confirmed.nextAction, 'draw2code_update')
+  assert.equal(confirmed.drawingPlan.nextActionCode, 'write_representative')
+  assert.deepEqual(confirmed.drawingPlan.allowedPageIds, ['today'])
+  assert.deepEqual(confirmed.drawingPlan.remainingPageIds, ['all', 'edit'])
 })
 
 test('draw2code_create refuses a brief whose page structure is still generic placeholder language', async () => {

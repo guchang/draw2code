@@ -4,7 +4,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { Draw2CodeDaemonClient } from './daemon-client.ts'
-import { DRAW2CODE_UI_HTML, DRAW2CODE_UI_URI } from './mcp-ui.ts'
 import type { Draw2CodeCommand, Draw2CodeResult, HostContext } from './runtime.ts'
 import workflowContract from '../references/workflow-contract.md'
 import { CREATE_ACTIONS } from './create-contract.ts'
@@ -21,33 +20,8 @@ const instructions = workflowContract
 
 const server = new McpServer(
   { name: 'draw2code', title: 'Draw2Code / 画码', version: '0.5.0' },
-  { capabilities: { tools: {}, resources: {} }, instructions },
+  { capabilities: { tools: {} }, instructions },
 )
-
-server.registerResource('draw2code-canvas', DRAW2CODE_UI_URI, {
-  title: 'Draw2Code Canvas',
-  description: 'Editable Draw2Code Excalidraw canvas.',
-  mimeType: 'text/html;profile=mcp-app',
-}, async () => ({
-  contents: [{
-    uri: DRAW2CODE_UI_URI,
-    mimeType: 'text/html;profile=mcp-app',
-    text: DRAW2CODE_UI_HTML,
-    _meta: {
-      ui: {
-        prefersBorder: false,
-        csp: { frameDomains: ['http://127.0.0.1', 'http://localhost'] },
-      },
-      'openai/widgetPrefersBorder': false,
-    },
-  }],
-}))
-
-function uiSupported(): boolean {
-  const capabilities = server.server.getClientCapabilities() as { extensions?: Record<string, unknown> } | undefined
-  const extensions = capabilities?.extensions ?? {}
-  return Object.keys(extensions).some((key) => /(?:mcp.*(?:apps|ui)|apps.*ui)/i.test(key))
-}
 
 function advertisedRoots(): Promise<string[]> {
   advertisedRootsPromise ??= server.server.listRoots()
@@ -72,7 +46,7 @@ async function contextFor(root: string): Promise<HostContext> {
     workspaceRoot,
     interactive: process.env.DRAW2CODE_HEADLESS !== '1',
     uiCapabilities: {
-      mcpUi: uiSupported(),
+      mcpUi: false,
       externalBrowser: process.env.DRAW2CODE_HEADLESS !== '1' && process.env.CI !== 'true',
     },
   }
@@ -132,20 +106,35 @@ server.registerTool('draw2code_create', {
 
 server.registerTool('draw2code_update', {
   title: 'Update Draw2Code board',
-  description: 'Apply conflict-safe normalized Excalidraw operations. Omit board to use the active visible board.',
+  description: 'Write conflict-safe Excalidraw operations or record a visible review without mutating the board. Omit board to use the active visible board.',
   inputSchema: {
     root,
     board: z.string().optional(),
-    ops: z.array(z.record(z.unknown())),
+    action: z.enum(['write', 'review', 'commit_pending']).optional(),
+    ops: z.array(z.record(z.unknown())).optional(),
     force: z.boolean().optional(),
     safeMode: z.boolean().optional(),
+    reviewToken: z.string().optional(),
+    phase: z.enum(['representative', 'final']).optional(),
+    passed: z.boolean().optional(),
+    inspectedPageIds: z.array(z.string()).optional(),
+    observations: z.array(z.string()).optional(),
+    pendingUpdateId: z.string().optional(),
     visualReview: z.record(z.unknown()).optional(),
   },
-}, async ({ root, board, ops, force, safeMode, visualReview }) => execute({
-  type: 'update', root, ops,
+}, async ({ root, board, action, ops, force, safeMode, reviewToken, phase, passed, inspectedPageIds, observations, pendingUpdateId, visualReview }) => execute({
+  type: 'update', root,
   ...(board === undefined ? {} : { board }),
+  ...(action === undefined ? {} : { action }),
+  ...(ops === undefined ? {} : { ops }),
   ...(force === undefined ? {} : { force }),
   ...(safeMode === undefined ? {} : { safeMode }),
+  ...(reviewToken === undefined ? {} : { reviewToken }),
+  ...(phase === undefined ? {} : { phase }),
+  ...(passed === undefined ? {} : { passed }),
+  ...(inspectedPageIds === undefined ? {} : { inspectedPageIds }),
+  ...(observations === undefined ? {} : { observations }),
+  ...(pendingUpdateId === undefined ? {} : { pendingUpdateId }),
   ...(visualReview === undefined ? {} : { visualReview }),
 }))
 
@@ -180,26 +169,27 @@ server.registerTool('draw2code_generate', {
 
 server.registerTool('draw2code_open', {
   title: 'Open Draw2Code canvas',
-  description: 'Restore and display the active board, or the empty board picker when none exists. Never creates a project.',
+  description: 'Return a short-lived canvas URL for the host to open, or explicitly open it in an external browser. Never creates a project.',
   inputSchema: {
     root,
     board: z.string().optional(),
     presentation: z.enum(['auto', 'inline', 'browser', 'handoff']).optional()
-      .describe('Use handoff when the host will open the returned URL in its own sidebar browser.'),
+      .describe('Defaults to handoff. auto and inline are compatibility aliases for handoff; browser explicitly launches an external browser.'),
   },
-  _meta: {
-    ui: { resourceUri: DRAW2CODE_UI_URI },
-    'openai/outputTemplate': DRAW2CODE_UI_URI,
-    'openai/toolInvocation/invoking': '正在打开画码…',
-    'openai/toolInvocation/invoked': '画码已就绪',
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
   },
 }, async ({ root, board, presentation }) => {
   const context = await contextFor(root)
   const workspaceRoot = context.workspaceRoot
+  const requestedPresentation = presentation === 'browser' ? 'browser' : 'handoff'
   const opened = await client.execute({
     type: 'open', root: workspaceRoot,
     ...(board === undefined ? {} : { board }),
-    ...(presentation === undefined ? {} : { presentation }),
+    presentation: requestedPresentation,
   }, context)
   if (!opened.ok) return toolResult(opened)
   const selectedBoard = typeof opened.data.board === 'string' ? opened.data.board : null
@@ -227,6 +217,10 @@ server.registerTool('draw2code_open', {
 
 server.server.oninitialized = () => {
   if (configuredWorkspaceRoot === undefined) void advertisedRoots()
+  // Opening the canvas is an explicit UI action. Start the shared daemon while
+  // the MCP connection is becoming ready so the first open call only needs to
+  // mint a workspace-scoped canvas URL.
+  void client.ensure().catch(() => undefined)
 }
 
 await server.connect(new StdioServerTransport())

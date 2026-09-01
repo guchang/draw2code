@@ -1,0 +1,6 @@
+interface:
+  display_name: "打开 Draw2Code / 画码"
+  short_description: "直接在侧边栏恢复当前画板，不进入产品工作流"
+  default_prompt: "使用 $draw2code-open 直接打开画码，不要分析需求或进入质量门禁。"
+policy:
+  allow_implicit_invocation: true

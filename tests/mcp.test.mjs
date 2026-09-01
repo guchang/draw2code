@@ -90,8 +90,21 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
     'draw2code_open',
   ])
   const open = listed.result.tools.find((tool) => tool.name === 'draw2code_open')
-  assert.equal(open._meta.ui.resourceUri, 'ui://draw2code/canvas.html')
+  assert.equal(open._meta?.ui?.resourceUri, undefined)
+  assert.equal(open._meta?.['openai/outputTemplate'], undefined)
+  assert.deepEqual(open.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  })
   const generate = listed.result.tools.find((tool) => tool.name === 'draw2code_generate')
+  const update = listed.result.tools.find((tool) => tool.name === 'draw2code_update')
+  assert.deepEqual(update.inputSchema.properties.action.enum, ['write', 'review', 'commit_pending'])
+  assert.ok(update.inputSchema.properties.reviewToken)
+  assert.ok(update.inputSchema.properties.phase)
+  assert.ok(update.inputSchema.properties.pendingUpdateId)
+  assert.equal(update.inputSchema.required?.includes('ops') ?? false, false)
   assert.ok(generate.inputSchema.properties.pages)
   assert.ok(generate.inputSchema.properties.frames)
   assert.ok(generate.inputSchema.properties.styleNote)
@@ -122,7 +135,7 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
 
   const openedForHostSidebar = await client.request('tools/call', {
     name: 'draw2code_open',
-    arguments: { root, board: '共享画板', presentation: 'handoff' },
+    arguments: { root, board: '共享画板' },
   })
   assert.equal(openedForHostSidebar.result.structuredContent.ok, true)
   assert.equal(openedForHostSidebar.result.structuredContent.data.board, '共享画板')
@@ -130,6 +143,13 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   assert.equal(openedForHostSidebar.result.structuredContent.data.displayState, 'handoff-ready')
   assert.equal(openedForHostSidebar.result.structuredContent.data.opened, false)
   assert.equal(new URL(openedForHostSidebar.result.structuredContent.data.url).searchParams.get('board'), '共享画板')
+
+  const openedFromLegacyInlineRequest = await client.request('tools/call', {
+    name: 'draw2code_open',
+    arguments: { root, board: '共享画板', presentation: 'inline' },
+  })
+  assert.equal(openedFromLegacyInlineRequest.result.structuredContent.data.presentation, 'handoff')
+  assert.equal(openedFromLegacyInlineRequest.result.structuredContent.data.displayState, 'handoff-ready')
 })
 
 test('stdio MCP does not report a canvas opened when no browser launcher exists', async (t) => {
@@ -275,6 +295,24 @@ test('stdio MCP prewarms advertised roots before the first tool call', async (t)
 
   await client.waitForRootsRequest()
   assert.equal(client.rootsRequestCount(), 1)
+
+  const daemon = await Promise.race([
+    (async () => {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const descriptor = await validateDaemonDescriptor(descriptorPath)
+        if (descriptor !== null) return descriptor
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      throw new Error('daemon was not prewarmed after MCP initialization')
+    })(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('daemon prewarm timed out')), 2500)),
+  ])
+  assert.ok(daemon.port > 0)
+  const health = await fetch(`http://127.0.0.1:${daemon.port}/health`, {
+    headers: { authorization: `Bearer ${daemon.token}` },
+  })
+  assert.equal(health.ok, true)
+  assert.equal((await health.json()).nonce, daemon.nonce)
 
   const opened = await client.request('tools/call', {
     name: 'draw2code_open',

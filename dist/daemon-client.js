@@ -57,6 +57,7 @@ var INTERACTIVE_ROLES = /* @__PURE__ */ new Set([
 
 // src/tools.ts
 var MAX_ELEMENTS_JSON = 120 * 1024;
+var PENDING_REVIEW_WRITE_TTL_MS = 10 * 6e4;
 
 // src/runtime.ts
 async function validateDaemonDescriptor(path) {

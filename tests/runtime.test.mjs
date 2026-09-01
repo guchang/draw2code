@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, stat } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, realpath, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import {
   Draw2CodeRuntimeImpl,
+  SceneStore,
   choosePresentation,
   createDaemonDescriptor,
   validateDaemonDescriptor,
-} from '../dist/runtime.js'
+} from '../dist/index.js'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'draw2code-runtime-'))
@@ -93,6 +94,45 @@ test('runtime emits shared scene and active-board events after mutation', async 
     'board.reveal-requested',
   ])
   assert.ok(events.every((event) => event.sourceClientId === 'codex-test'))
+})
+
+test('runtime review action does not emit mutation events or change the board revision', async () => {
+  const { root, context, runtime } = await fixture()
+  const written = await runtime.execute({
+    type: 'update',
+    root,
+    board: 'review-events',
+    ops: [
+      { op: 'upsert', element: { id: 'page', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '首页', mockDataMin: 1 } } },
+      { op: 'upsert', element: { id: 'page-label', type: 'text', text: '首页', x: 0, y: 4, width: 120, height: 28, customData: { role: 'prototype-page-label', pageId: 'page' } } },
+      { op: 'upsert', element: { id: 'mock', type: 'text', text: '提交产品周报', x: 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    ],
+  }, context)
+  assert.equal(written.ok, true)
+  const canonicalRoot = await realpath(root)
+  const store = new SceneStore({ workspaceRegistry: { list: () => [{ path: canonicalRoot }] }, logger: { warn() {} } })
+  assert.equal((await store.ackBoardReveal(root, written.data.revealRequestId, 'review-events')).ok, true)
+
+  const events = []
+  const dispose = runtime.subscribe(context, (event) => events.push(event))
+  const reviewed = await runtime.execute({
+    type: 'update',
+    root,
+    board: 'review-events',
+    action: 'review',
+    reviewToken: written.data.reviewToken,
+    phase: 'representative',
+    passed: true,
+    inspectedPageIds: ['page'],
+    observations: ['页面内容可见'],
+  }, context)
+  dispose()
+
+  assert.equal(reviewed.ok, true)
+  assert.equal(reviewed.data.rev, written.data.rev)
+  assert.equal(reviewed.data.writeVerified, false)
+  assert.equal(reviewed.data.reviewVerified, true)
+  assert.deepEqual(events, [])
 })
 
 test('explicit update of a non-active board selects and reveals the target board', async () => {

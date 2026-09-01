@@ -32,14 +32,21 @@ test('bundle patch mounts only Draw2Code and leaves the sidebar in its own bundl
   assert.doesNotMatch(patch, /id:\s*better-sidebar/)
 })
 
-test('Codex skill distinguishes user-led drawing from agent-led creation', async () => {
+test('Codex full workflow handles a user-completed drawing', async () => {
   const skill = await readFile(new URL('skills/draw2code/SKILL.md', root), 'utf8')
-  assert.match(skill, /我自己画/)
-  assert.match(skill, /presentation=handoff/)
-  assert.match(skill, /复用.*同一 workspace.*标签页/)
-  assert.match(skill, /宿主原生.*导航/)
-  assert.match(skill, /不要.*通用浏览器自动化/)
-  assert.match(skill, /侧边栏.*真正可见/)
   assert.match(skill, /我画好了/)
   assert.match(skill, /draw2code_read/)
+})
+
+test('Codex exposes a focused fast path for opening Draw2Code', async () => {
+  const skill = await readFile(new URL('skills/draw2code-open/SKILL.md', root), 'utf8')
+  const metadata = await readFile(new URL('skills/draw2code-open/agents/openai.yaml', root), 'utf8')
+  const manifest = JSON.parse(await readFile(new URL('.codex-plugin/plugin.json', root), 'utf8'))
+
+  assert.match(skill, /只调用一次 `draw2code_open`/)
+  assert.match(skill, /presentation=handoff/)
+  assert.match(skill, /不要.*workflow contract/)
+  assert.doesNotMatch(skill, /draw2code_(?:create|read|update|generate)/)
+  assert.match(metadata, /allow_implicit_invocation:\s*true/)
+  assert.ok(manifest.interface.defaultPrompt.some((prompt) => prompt.includes('$draw2code-open')))
 })

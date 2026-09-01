@@ -1,4 +1,4 @@
 interface:
   display_name: "Draw2Code / 画码"
   short_description: "把产品想法变成可共同编辑的原型画板与可验收前端页面"
-  default_prompt: "打开 Draw2Code，我自己画一个原型示意。"
+  default_prompt: "使用 Draw2Code 帮我澄清需求、绘制或修改产品原型。"

@@ -1,6 +1,6 @@
 ---
 name: draw2code
-description: Use Draw2Code or 画码 to clarify a product, draw or edit an editable prototype, open the shared canvas, or generate verified frontend pages. Activate for explicit Draw2Code/画码 mentions or a clear request to 画原型; do not activate for a generic request to build an app or write code.
+description: Use Draw2Code or 画码 to clarify a product, draw or edit an editable prototype, review a board, or generate verified frontend pages. Activate for explicit requests to design, draw, edit, review, or generate with Draw2Code; when opening the canvas is the whole request, use draw2code-open instead. Do not activate for a generic request to build an app or write code.
 ---
 
 # Draw2Code / 画码
@@ -9,7 +9,6 @@ description: Use Draw2Code or 画码 to clarify a product, draw or edit an edita
 
 ## 路由
 
-- 用户只说“打开 Draw2Code / 打开画码”，或明确说“我自己画一下 / 我画个示意给你 / 给我一块空白画板”：只调用 `draw2code_open`。不要开始需求提问，不要进入 Create。
 - 用户说“我画好了 / 按我画的看看 / 根据这个示意继续”：先调用 `draw2code_read` 读取当前可见画板并复述页面、组件和交互关系；用户没有要求修改或生成时，不要自行调用 Update 或 Generate。
 - 用户明确要从零设计、创建或画一个新产品原型：调用 `draw2code_create action=start`，忠实传入 idea，并基于完整语义概括简短 `projectName`。
 - 用户修改现有原型：先 `draw2code_read`，再用 `draw2code_update` 提交最小 ops。
@@ -26,9 +25,9 @@ Create 的 `start` 返回 `discovery` 时，不要套用固定问卷。先读取
 
 Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得重新总结、缩写或另写一份简报。随后展示最后一张页面范围确认卡，明确列出将绘制的全部页面，并只提供“确认这些页面并绘制 / 调整页面范围 / 调整产品方向”；确认后的 `draw2code_update` 必须消费同一份 `brief.pages`、`pageBlueprints`、`pageMockData`、`pageRelations` 和验收要求。
 
-`draw2code_update` 返回冲突或 `requiresConfirmation=true` 时，只询问相关覆盖选择；用户确认后用相同 ops 和 `force=true` 重试。无冲突直接继续，不增加模板化确认。Create brief 包含 3 个及以上页面时，先按 `pageBlueprints` 画一个代表页并查看真实画板，再以 `visualReview.phase=representative` 添加剩余页面；visualReview 必须携带最近一次成功 update 返回的 `boardRevision=rev` 和 `revealRequestId`。全部页面可见后查看真实画板，再用空 ops 单独提交 `phase=final`，`inspectedPageIds` 必须覆盖所有页面。
+`draw2code_update action=write` 返回冲突或 `requiresConfirmation=true` 时，只询问相关覆盖选择；用户确认后用相同 ops 和 `force=true` 重试。无冲突直接继续，不增加模板化确认。Create brief 包含 3 个及以上页面时，严格执行 confirmed 返回的 `drawingPlan`：本轮只为 `allowedPageIds` 生成代表页 ops，禁止预先生成整套大 JSON。写入后等真实画板消费 reveal，再用 `draw2code_update action=review`，传入返回的 `reviewToken`、`phase=representative`、`passed=true`、代表页 id 和可见观察；review 不传 ops，也不会改变 revision 或发布新 reveal。收到 `nextActionCode=write_remaining_pages` 后才生成 `remainingPageIds`。如果工具返回 `pendingUpdateId`，说明误提前提交的剩余页面 ops 已被保存；完成代表页复核后调用 `action=commit_pending` 并只传该 ID，禁止重新生成或重传大 JSON。全部页面可见后，再用 `action=review`、`phase=final` 覆盖所有页面 id。旧 `visualReview` 只为兼容，不在新流程手工拼 `boardRevision` 或 `revealRequestId`。
 
-第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。内嵌 UI、浏览器与 headless 的选择由工具 capability detection 决定；不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
+第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。MCP/Codex 默认返回 `presentation=handoff` 的短期 URL，不生成对话内嵌卡片；只有用户明确要求外部浏览器时才传 `presentation=browser`。不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
 
 用户要亲自绘制且宿主提供侧边栏浏览器时，以 `presentation=handoff` 调用 `draw2code_open`。优先复用同一 workspace 的画码标签页并依靠事件刷新；没有时才打开工具返回的短期 `url`。单纯打开或切换 URL 时优先使用宿主原生打开/导航能力，不要为此初始化通用浏览器自动化；只有需要检查画布 DOM、控制台或交互且没有更轻量证据时才接管浏览器。确认标签页已经显示目标画板且画布真正可见后，才能告诉用户“画码已经在侧边栏打开”。若只得到 `displayState=handoff-ready`，但侧边栏未显示，不得把“URL 已准备”误报成“已打开”；无法自动展示时应返回可点击 URL。没有 active board 时展示画板选择器或空白画布，不进入 Create。
 

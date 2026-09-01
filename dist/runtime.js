@@ -29,6 +29,7 @@ var MAX_VERSIONS = 30;
 var CLIENT_ARCHIVE_INTERVAL_MS = 10 * 6e4;
 var WRITE_QUEUES = /* @__PURE__ */ new Map();
 var BOARD_REVEALS = /* @__PURE__ */ new Map();
+var BOARD_REVIEWS = /* @__PURE__ */ new Map();
 var revealCounter = 0;
 var ALLOWED_TYPES = /* @__PURE__ */ new Set([
   "rectangle",
@@ -521,6 +522,46 @@ var SceneStore = class {
     BOARD_REVEALS.set(gated.value, acknowledged);
     return { ok: true, value: acknowledged };
   }
+  /** Record a visible review of the latest reveal without writing the board. */
+  async recordBoardReview(root, input) {
+    const gated = await this.gate(root);
+    if (!gated.ok) return gated;
+    const named = this.checkName(input.board);
+    if (!named.ok) return named;
+    const current = BOARD_REVEALS.get(gated.value);
+    if (current === void 0 || current.id !== input.token || current.board !== named.value) {
+      return err("visual-review-stale", "review token does not match the latest visible-board reveal");
+    }
+    if (Math.abs(current.revision - input.boardRevision) > 0.5) {
+      return err("visual-review-stale", `review token revision ${current.revision} does not match current board revision ${input.boardRevision}`);
+    }
+    if (typeof current.consumedAt !== "number") {
+      return err("visual-review-not-visible", "the canvas has not acknowledged opening this review token");
+    }
+    const key = `${gated.value}\0${named.value}\0${input.phase}`;
+    const existing = BOARD_REVIEWS.get(key);
+    if (existing?.token === input.token) return { ok: true, value: existing };
+    const { boardRevision, ...reviewInput } = input;
+    const receipt = {
+      ...reviewInput,
+      board: named.value,
+      revision: boardRevision,
+      inspectedPageIds: [...input.inspectedPageIds],
+      observations: [...input.observations],
+      reviewedAt: Date.now()
+    };
+    BOARD_REVIEWS.set(key, receipt);
+    return { ok: true, value: receipt };
+  }
+  /** Read the latest stored review for one board and phase. */
+  async getBoardReview(root, board, phase) {
+    const gated = await this.gate(root);
+    if (!gated.ok) return gated;
+    const named = this.checkName(board);
+    if (!named.ok) return named;
+    const key = `${gated.value}\0${named.value}\0${phase}`;
+    return { ok: true, value: { receipt: BOARD_REVIEWS.get(key) ?? null } };
+  }
   /** The versions directory of one board (inside draw2code/.versions/<name>). */
   versionsDir(canonicalRoot, name) {
     return join(this.dir(canonicalRoot), VERSIONS_DIR, name);
@@ -863,6 +904,8 @@ var SceneStore = class {
         });
       }
       BOARD_REVEALS.delete(gated.value);
+      BOARD_REVIEWS.delete(`${gated.value}\0${named.value}\0representative`);
+      BOARD_REVIEWS.delete(`${gated.value}\0${named.value}\0final`);
       return { ok: true, value: { deleted: true } };
     });
   }
@@ -2515,6 +2558,28 @@ function createConfirmation(brief) {
     }
   };
 }
+function createDrawingPlan(brief) {
+  if (typeof brief !== "object" || brief === null || Array.isArray(brief)) {
+    return { mode: "single-batch", nextActionCode: "write_pages", allowedPageIds: [], remainingPageIds: [] };
+  }
+  const value = brief;
+  const pageIds = Array.isArray(value.pages) ? value.pages.flatMap((page) => {
+    if (typeof page !== "object" || page === null || Array.isArray(page)) return [];
+    const id = page.id;
+    return typeof id === "string" && id.trim() !== "" ? [id.trim()] : [];
+  }) : [];
+  const layout = typeof value.prototypeLayout === "object" && value.prototypeLayout !== null && !Array.isArray(value.prototypeLayout) ? value.prototypeLayout : {};
+  const requestedRepresentative = typeof layout.representativePageId === "string" ? layout.representativePageId : "";
+  const representativePageId = pageIds.includes(requestedRepresentative) ? requestedRepresentative : pageIds[0];
+  const phased = pageIds.length >= 3 && representativePageId !== void 0;
+  return {
+    mode: phased ? "representative-first" : "single-batch",
+    nextActionCode: phased ? "write_representative" : "write_pages",
+    ...representativePageId === void 0 ? {} : { representativePageId },
+    allowedPageIds: phased ? [representativePageId] : pageIds,
+    remainingPageIds: phased ? pageIds.filter((id) => id !== representativePageId) : []
+  };
+}
 function prototypeBriefContract() {
   return {
     requiredTopLevel: [
@@ -2581,6 +2646,7 @@ function responseFor(projects, draft, extras = {}) {
     ...draft.briefMarkdown === void 0 || draft.briefMarkdown === null ? {} : { briefMarkdown: draft.briefMarkdown },
     ...draft.flowVersion === CREATE_FLOW_VERSION && draft.status === "draft" ? { briefContract: prototypeBriefContract() } : {},
     ...status === "ready" ? { confirmation: createConfirmation(draft.brief) } : {},
+    ...status === "confirmed" && draft.brief !== null ? { drawingPlan: createDrawingPlan(draft.brief) } : {},
     ...draft.boardName === null ? {} : { boardName: draft.boardName },
     ...extras
   };
@@ -2719,7 +2785,7 @@ function migrateLegacyDraft(draft) {
 function draw2codeCreateTool(projects, scenes) {
   return defineTool({
     name: "draw2code_create",
-    description: "Create a new \u753B\u7801 project through adaptive product discovery and one executable prototype brief. This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. Call action=start as soon as a new-project intent is clear; pass the user's idea faithfully, infer a concise semantic projectName from the entire idea, and never call draw2code_update first. Explicit facts returned in discovery must not be asked again. A discovery result means the Agent must choose the single highest-impact unresolved product decision. If information is insufficient, call action=propose_question with a product-specific insight, one decision question, 2\u20134 tradeoff-rich options, a recommendation, decisionImpact and dependencies. To make the native card lossless, question.text itself must be \u201C\u5224\u65AD\uFF1A{insight}\\n\\n\u95EE\u9898\uFF1A{self-contained insight + decision question}\u201D; the text after \u201C\u95EE\u9898\uFF1A\u201D must repeat the product judgment so it remains meaningful even if an Agent extracts only that part. question.options must already include synthesize-now/\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5, unknown/\u8FD8\u6CA1\u60F3\u597D and other/\u5176\u4ED6 in addition to the product directions. question.dimension must use one returned openDimensions ID exactly: trigger-context, existing-alternative, core-outcome, unique-mechanism, core-loop, critical-risk, scope-proof, target-user, target-platform, or product-architecture. Never invent shorter aliases such as mechanism or risk. Never use the old fixed platform/user/goal/flow/modules/pages sequence, and never ask modules and pages as separate checklist questions. After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D, \u201C\u8FD8\u6CA1\u60F3\u597D\u201D and \u201C\u5176\u4ED6\u201D; never truncate or silently replace options. Map the selected label back to its option id and call action=answer. The synthesize-now choice returns discovery.nextAction=synthesize. When the core scenario, outcome, unique mechanism, first-version flow and scope are clear\u2014or the user asks to stop\u2014call action=synthesize with stopReason and a complete PrototypeBrief. Discovery may stop early and must stop after ten questions. The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim, then show one explicit page-range confirmation card listing every page: \u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D; do not summarize it. Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update; the model must then call draw2code_update with the returned boardName. projectName is required for action=start, should usually be 4\u201312 Chinese characters, and becomes the board name directly; never append \u201C\u539F\u578B\u201D or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. Options are structured for native choice cards when available; otherwise render them as numbered choices. \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D ends discovery without requiring a hidden chat input; \u201COther\u201D requires text and is stored directly; silence or \u201C\u8FD8\u6CA1\u60F3\u597D\u201D is an explicit pending decision, not pause or cancellation.",
+    description: "Create a new \u753B\u7801 project through adaptive product discovery and one executable prototype brief. This is the mandatory entry point when the user says they want to create, build, or design a new product from scratch. Call action=start as soon as a new-project intent is clear; pass the user's idea faithfully, infer a concise semantic projectName from the entire idea, and never call draw2code_update first. Explicit facts returned in discovery must not be asked again. A discovery result means the Agent must choose the single highest-impact unresolved product decision. If information is insufficient, call action=propose_question with a product-specific insight, one decision question, 2\u20134 tradeoff-rich options, a recommendation, decisionImpact and dependencies. To make the native card lossless, question.text itself must be \u201C\u5224\u65AD\uFF1A{insight}\\n\\n\u95EE\u9898\uFF1A{self-contained insight + decision question}\u201D; the text after \u201C\u95EE\u9898\uFF1A\u201D must repeat the product judgment so it remains meaningful even if an Agent extracts only that part. question.options must already include synthesize-now/\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5, unknown/\u8FD8\u6CA1\u60F3\u597D and other/\u5176\u4ED6 in addition to the product directions. question.dimension must use one returned openDimensions ID exactly: trigger-context, existing-alternative, core-outcome, unique-mechanism, core-loop, critical-risk, scope-proof, target-user, target-platform, or product-architecture. Never invent shorter aliases such as mechanism or risk. Never use the old fixed platform/user/goal/flow/modules/pages sequence, and never ask modules and pages as separate checklist questions. After every question result, call the host ask_user_question interaction with exactly one question and every returned choice, including \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D, \u201C\u8FD8\u6CA1\u60F3\u597D\u201D and \u201C\u5176\u4ED6\u201D; never truncate or silently replace options. Map the selected label back to its option id and call action=answer. The synthesize-now choice returns discovery.nextAction=synthesize. When the core scenario, outcome, unique mechanism, first-version flow and scope are clear\u2014or the user asks to stop\u2014call action=synthesize with stopReason and a complete PrototypeBrief. Discovery may stop early and must stop after ten questions. The tool validates PrototypeBrief, derives pageBlueprints/pageMockData, and deterministically renders briefMarkdown. When status=ready, show the complete briefMarkdown verbatim, then show one explicit page-range confirmation card listing every page: \u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D; do not summarize it. Use action=answer for a choice, action=skip when the user skips the pending question, action=revise to change an earlier answer and invalidate only dependent questions, action=rename to edit the project name, action=resume to reopen a draft, action=list to show unfinished projects, and action=confirm only after the user confirms the ready brief. The tool stores product intent separately from scene files. It creates an isolated empty board only after confirmation and returns nextAction=draw2code_update plus a machine-readable drawingPlan. For three or more pages, drawingPlan allows only the representative page first; the model must not generate the remaining page ops until action=review returns nextActionCode=write_remaining_pages. The model must call draw2code_update with the returned boardName and drawingPlan. projectName is required for action=start, should usually be 4\u201312 Chinese characters, and becomes the board name directly; never append \u201C\u539F\u578B\u201D or another workflow suffix. The tool validates this Agent-authored name but does not derive it from the raw idea. The prototype is semantic low-fi: do not ask for brand colors, fonts, 3D/2D, flat/skeuomorphic style here, but restrained semantic tones for categories, states, and primary actions are encouraged. If the user volunteers a style preference, pass it as styleNote so it is deferred to draw2code_generate. Options are structured for native choice cards when available; otherwise render them as numbered choices. \u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D ends discovery without requiring a hidden chat input; \u201COther\u201D requires text and is stored directly; silence or \u201C\u8FD8\u6CA1\u60F3\u597D\u201D is an explicit pending decision, not pause or cancellation.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       action: {
@@ -2763,6 +2829,7 @@ function draw2codeCreateTool(projects, scenes) {
           boardName: { type: "string" },
           activeBoard: { type: "string" },
           nextAction: { type: "string" },
+          drawingPlan: { type: "json" },
           error: { type: "json" },
           current: { type: "json" },
           drafts: { type: "json" },
@@ -2801,8 +2868,11 @@ ${markdown}
 
 \u8BF7\u5B8C\u6574\u5C55\u793A\u4EE5\u4E0A\u9879\u76EE\u7B80\u62A5\uFF0C\u4E0D\u8981\u81EA\u884C\u7F29\u5199\u6216\u91CD\u65B0\u603B\u7ED3\u3002\u968F\u540E\u4F7F\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u590D\u5236 confirmation.askUserQuestionArgs\uFF1B\u8FD9\u5F20\u5361\u4F1A\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u5E76\u4E14\u4EC5\u5305\u542B\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u3002\u786E\u8BA4\u540E\u8C03\u7528 action=confirm\u3002\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 action=propose_question\uFF0C\u53EA\u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF1B\u65E7\u7B80\u62A5\u4F1A\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0 synthesize \u5B8C\u6574\u7B80\u62A5\u3002`);
         }
-        if (value.status === "confirmed") return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ""} activeBoard=${value.activeBoard ?? ""} nextAction=${value.nextAction ?? "draw2code_update"}
-\u9879\u76EE\u300C${value.projectName ?? ""}\u300D\u5DF2\u786E\u8BA4\uFF0C\u72EC\u7ACB\u753B\u677F\u5DF2\u521B\u5EFA\u3002\u4E0B\u4E00\u6B65\u5FC5\u987B\u540C\u65F6\u6309 brief.pageBlueprints \u548C brief.pageMockData \u8C03\u7528 draw2code_update\uFF0C\u5E76\u660E\u786E\u4F20\u5165\u4E0A\u9762\u7684 boardName\uFF1B\u9996\u8F6E\u6709 3 \u4E2A\u53CA\u4EE5\u4E0A\u9875\u9762\u65F6\u5148\u753B\u4E00\u4E2A\u4EE3\u8868\u9875\u5E76\u67E5\u770B\u771F\u5B9E\u753B\u677F\uFF0C\u518D\u63D0\u4EA4 representative visualReview \u540E\u6DFB\u52A0\u5176\u4F59\u9875\u9762\uFF0C\u6700\u7EC8\u53EA\u6709 completionReady=true \u624D\u80FD\u62A5\u544A\u5B8C\u6210\u3002\u6BCF\u4E2A\u91CD\u590D\u5185\u5BB9\u7EC4\u4EF6\u81F3\u5C11\u63D0\u4F9B 3 \u6761\u53EF\u89C1 mock \u6570\u636E\uFF0C\u4E0D\u8981\u56DE\u5199\u65E7\u753B\u677F\u3002`);
+        if (value.status === "confirmed") {
+          const drawingPlan = value.drawingPlan;
+          return text(`${continuation(value)} status=confirmed boardName=${value.boardName ?? ""} activeBoard=${value.activeBoard ?? ""} nextAction=${value.nextAction ?? "draw2code_update"} drawingNextAction=${drawingPlan?.nextActionCode ?? "write_pages"} allowedPageIds=${(drawingPlan?.allowedPageIds ?? []).join(",")} remainingPageIds=${(drawingPlan?.remainingPageIds ?? []).join(",")}
+\u9879\u76EE\u300C${value.projectName ?? ""}\u300D\u5DF2\u786E\u8BA4\uFF0C\u72EC\u7ACB\u753B\u677F\u5DF2\u521B\u5EFA\u3002\u5FC5\u987B\u4E25\u683C\u6267\u884C drawingPlan\uFF1A\u5F53 drawingNextAction=write_representative \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A allowedPageIds \u751F\u6210 ops\uFF1B\u5199\u5165\u540E\u7B49\u5F85\u753B\u5E03\u53EF\u89C1\uFF0C\u518D\u7528 draw2code_update action=review \u548C\u8FD4\u56DE\u7684 reviewToken \u8BB0\u5F55 representative \u590D\u6838\uFF0C\u968F\u540E\u624D\u751F\u6210 remainingPageIds\u3002\u4E0D\u8981\u9884\u5148\u751F\u6210\u5168\u90E8\u9875\u9762\u7684\u5927\u6279 ops\u3002\u6700\u7EC8\u7528 action=review phase=final \u6536\u53E3\uFF0C\u53EA\u6709 completionReady=true \u624D\u80FD\u62A5\u544A\u5B8C\u6210\u3002\u6BCF\u4E2A\u91CD\u590D\u5185\u5BB9\u7EC4\u4EF6\u81F3\u5C11\u63D0\u4F9B 3 \u6761\u53EF\u89C1 mock \u6570\u636E\uFF0C\u4E0D\u8981\u56DE\u5199\u65E7\u753B\u677F\u3002`);
+        }
         if (value.status === "drafts") {
           const drafts = value.drafts ?? [];
           const summary = drafts.map((draft) => `${draft.sessionId ?? ""} ${draft.projectName ?? ""} (${draft.status ?? ""})`).join("\n");
@@ -3776,6 +3846,29 @@ function customData3(value) {
   return typeof value?.customData === "object" && value.customData !== null ? value.customData : {};
 }
 var boardCache = /* @__PURE__ */ new Map();
+var pendingReviewWrites = /* @__PURE__ */ new Map();
+var PENDING_REVIEW_WRITE_MAX = 20;
+var PENDING_REVIEW_WRITE_TTL_MS = 10 * 6e4;
+function prunePendingReviewWrites(now2 = Date.now()) {
+  for (const [id, pending] of pendingReviewWrites) {
+    if (now2 - pending.createdAt > PENDING_REVIEW_WRITE_TTL_MS) pendingReviewWrites.delete(id);
+  }
+  while (pendingReviewWrites.size >= PENDING_REVIEW_WRITE_MAX) {
+    const oldest = [...pendingReviewWrites.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
+    if (oldest === void 0) break;
+    pendingReviewWrites.delete(oldest.id);
+  }
+}
+function rememberPendingReviewWrite(input) {
+  prunePendingReviewWrites();
+  const pending = { ...input, id: `pending-${randomUUID2()}`, createdAt: Date.now() };
+  pendingReviewWrites.set(pending.id, pending);
+  return pending;
+}
+function pendingReviewWriteFor(root, board, baseRev) {
+  prunePendingReviewWrites();
+  return [...pendingReviewWrites.values()].filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+}
 async function resolveBoard(store, root, requested) {
   const active = await store.getActiveBoard(root);
   const activeBoard = active.ok && active.value.name !== null ? active.value.name : void 0;
@@ -4031,6 +4124,18 @@ function parseVisualReview(input) {
     observations
   };
 }
+function parseReviewAction(args) {
+  const phase = str3(args.phase);
+  if (phase !== "representative" && phase !== "final") {
+    throw new Error("visual-review-invalid: action=review requires phase=representative or phase=final");
+  }
+  const inspectedPageIds = Array.isArray(args.inspectedPageIds) ? args.inspectedPageIds.filter((item) => typeof item === "string" && item.trim() !== "") : [];
+  const observations = Array.isArray(args.observations) ? args.observations.filter((item) => typeof item === "string" && item.trim() !== "") : [];
+  if (args.passed !== true) throw new Error("visual-review-failed: passed must be true before the workflow can continue");
+  if (inspectedPageIds.length === 0) throw new Error("visual-review-invalid: inspectedPageIds must include at least one visible page id");
+  if (observations.length === 0) throw new Error("visual-review-invalid: observations must describe what was visibly checked");
+  return { phase, passed: true, inspectedPageIds, observations };
+}
 async function validateVisualReviewEvidence(store, root, boardName, boardRevision, evidence) {
   if (evidence === null) return;
   if (boardRevision === null || Math.abs(evidence.boardRevision - boardRevision) > 0.5) {
@@ -4049,7 +4154,7 @@ async function validateVisualReviewEvidence(store, root, boardName, boardRevisio
     throw new Error("visual-review-not-visible: the browser has not acknowledged opening this reveal request; wait for \u753B\u7801 to open before submitting visualReview");
   }
 }
-function validatePhasedDrawing(currentElements, prospectiveElements, visualReview) {
+function validatePhasedDrawing(currentElements, prospectiveElements, visualReview, storedRepresentativeReviewed = false) {
   const currentPages = prototypePages(currentElements);
   const currentPageIds = new Set(currentPages.map((page) => page.id));
   const newPages = prototypePages(prospectiveElements).filter((page) => !currentPageIds.has(page.id));
@@ -4058,8 +4163,8 @@ function validatePhasedDrawing(currentElements, prospectiveElements, visualRevie
   }
   if (currentPages.length > 0 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
     const representativeReviewed = visualReview?.phase === "representative" && visualReview.passed && visualReview.observations.length > 0 && visualReview.inspectedPageIds.some((id) => currentPageIds.has(id));
-    if (!representativeReviewed) {
-      throw new Error('visual-review-required: before adding multiple remaining pages, submit visualReview={phase:"representative",passed:true,inspectedPageIds:["<existing page id>"],observations:["what was checked"]}');
+    if (!representativeReviewed && !storedRepresentativeReviewed) {
+      throw new Error("visual-review-required: before adding multiple remaining pages, visibly inspect the existing representative page and call draw2code_update with action=review, the latest reviewToken, phase=representative, passed=true, inspectedPageIds and observations");
     }
   }
 }
@@ -4450,14 +4555,21 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
 function draw2codeUpdateTool(store) {
   return defineTool2({
     name: "draw2code_update",
-    description: `Draw on / edit one \u753B\u7801 prototype board with ops \u2014 this is how you turn the user's idea into a visible prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, {op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when absent. Triggers: \u753B\u539F\u578B / \u753B\u4E00\u4E0B / \u5728\u753B\u677F\u4E0A\u2026 / draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Use semantic roles as a component API: page-heading/page-header for headers, content-card/task-card/stat-card/category-card for information blocks, input/select/search-field for form fields, chip/filter-chip for choices, bottom-navigation plus bottom-navigation-item for global navigation, and exactly one primary-action for the page's main task. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw's reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Three or more first-batch pages are rejected: draw one representative page, inspect it visibly, then add the rest with representative visualReview evidence. verified/writeVerified only prove persistence; report completion only when completionReady=true after final visualReview covers every page. Omit name to target the board currently selected in the \u753B\u7801 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.`,
+    description: `Draw on / edit one \u753B\u7801 prototype board with ops \u2014 this is how you turn the user's idea into a visible prototype in the right sidebar. Canonical ops: {op:"upsert",element:{...}} (insert or replace by id), {op:"delete",id}, {op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when absent. Triggers: \u753B\u539F\u578B / \u753B\u4E00\u4E0B / \u5728\u753B\u677F\u4E0A\u2026 / draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Use semantic roles as a component API: page-heading/page-header for headers, content-card/task-card/stat-card/category-card for information blocks, input/select/search-field for form fields, chip/filter-chip for choices, bottom-navigation plus bottom-navigation-item for global navigation, and exactly one primary-action for the page's main task. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw's reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. For three or more pages, obey create.drawingPlan and write only the representative page first. After the returned reviewToken is visible in Canvas, call action=review with phase=representative; this pure review does not write or publish another reveal. Then write the remaining pages and finish with action=review phase=final. If remaining-page ops arrive before representative review, the tool preserves them and returns pendingUpdateId; after review, call action=commit_pending with that id and do not regenerate or resend the ops. verified/writeVerified only prove persistence; report completion only when completionReady=true. Omit name to target the board currently selected in the \u753B\u7801 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.`,
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       name: { type: "string", description: "Board name. Omit to target the board currently selected in the \u753B\u7801 UI." },
-      ops: { type: "json", required: true, description: 'Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"\u9996\u9875",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
+      action: { type: "string", enum: ["write", "review", "commit_pending"], description: "write applies ops (default). review records a visible-canvas review without writing the board or publishing a new reveal. commit_pending applies a previously preserved batch after representative review." },
+      ops: { type: "json", description: 'Required for action=write. Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"\u9996\u9875",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
       force: { type: "boolean", description: "\u5DF2\u8BFB\u5230\u51B2\u7A81\u5E76\u4E14\u7528\u6237\u786E\u8BA4\u540E\u53EF\u8BBE\u7F6E\u4E3A true\uFF0C\u5F3A\u5236\u6267\u884C\u3002\u9ED8\u8BA4 false\u3002" },
       safeMode: { type: "boolean", description: "\u662F\u5426\u5728\u6709\u98CE\u9669\u6539\u52A8\u65F6\u8981\u6C42\u786E\u8BA4\uFF08\u9ED8\u8BA4 true\uFF09\u3002\u8BBE\u4E3A false \u4F1A\u76F4\u63A5\u6267\u884C\uFF0C\u53EF\u80FD\u8986\u76D6\u7528\u6237\u624B\u5DE5\u6539\u52A8\u3002" },
-      visualReview: { type: "json", description: 'Visible-canvas review evidence tied to the latest successful update: {phase:"representative"|"final",passed:true,boardRevision:<returned rev>,revealRequestId:"<returned revealRequestId>",inspectedPageIds:[...],observations:[...]}. Final review includes every page id and must be sent with empty ops after inspecting the updated board.' }
+      reviewToken: { type: "string", description: "Opaque token returned by the latest successful write. Required for action=review." },
+      phase: { type: "string", enum: ["representative", "final"], description: "Review phase for action=review." },
+      passed: { type: "boolean", description: "Set true only after the requested pages are visibly inspected." },
+      inspectedPageIds: { type: "array", items: { type: "string" }, description: "Visible page-shell ids inspected during action=review." },
+      observations: { type: "array", items: { type: "string" }, description: "Concrete visible observations from the review." },
+      pendingUpdateId: { type: "string", description: "Preserved write batch returned when representative review is the only blocker. Use with action=commit_pending; do not resend the original ops." },
+      visualReview: { type: "json", description: "Deprecated compatibility input. New calls use action=review with reviewToken, phase, passed, inspectedPageIds and observations, without ops." }
     },
     output: {
       schema: {
@@ -4471,10 +4583,15 @@ function draw2codeUpdateTool(store) {
           applied: { type: "integer", required: true },
           verified: { type: "boolean", required: true },
           writeVerified: { type: "boolean", required: true },
+          reviewVerified: { type: "boolean" },
           completionReady: { type: "boolean", required: true },
           nextAction: { type: "string", required: true },
+          nextActionCode: { type: "string" },
           prototypeQuality: { type: "json", required: true },
           revealRequestId: { type: "string" },
+          reviewToken: { type: "string" },
+          reviewRequest: { type: "json" },
+          pendingUpdateId: { type: "string" },
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
           requiresConfirmation: { type: "boolean" },
           pending: { type: "boolean" },
@@ -4494,7 +4611,7 @@ function draw2codeUpdateTool(store) {
       render: (_args, value) => text2(
         value.pending === true ? `\u3010\u5F85\u786E\u8BA4\u3011\u68C0\u6D4B\u5230\u6F5C\u5728\u51B2\u7A81\uFF08${value.conflicts?.length ?? 0} \u6761\uFF09\uFF1A
 ${value.planSummary ?? ""}
-\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""} updated and selected. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. ${value.nextAction ?? ""} The \u753B\u7801 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `
+\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}; reviewToken=${value.reviewToken ?? "missing"}; pendingUpdateId=${value.pendingUpdateId ?? "none"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ""}. ${value.nextAction ?? ""}${value.writeVerified === true ? " The \u753B\u7801 sidebar opens automatically on this board." : ""}${(value.layoutWarnings ?? []).length > 0 ? `
 \u7ED3\u6784\u4E0E\u5E03\u5C40\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       )
@@ -4503,12 +4620,103 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const safeMode = args.safeMode !== false;
       const force = args.force === true;
       const visualReview = parseVisualReview(args.visualReview);
-      const parsedOps = parseUpdateOps(args.ops);
+      let parsedOps = args.ops === void 0 ? [] : parseUpdateOps(args.ops);
+      let targetName = args.name;
+      let pendingCommit = null;
+      const requestedAction = args.action ?? (visualReview !== null && parsedOps.length === 0 ? "review" : "write");
+      const action = requestedAction === "commit_pending" ? "write" : requestedAction;
+      if (requestedAction === "commit_pending") {
+        if (typeof args.pendingUpdateId !== "string" || args.pendingUpdateId === "") {
+          throw new Error("pending-update-invalid: action=commit_pending requires pendingUpdateId");
+        }
+        prunePendingReviewWrites();
+        pendingCommit = pendingReviewWrites.get(args.pendingUpdateId) ?? null;
+        if (pendingCommit === null || pendingCommit.root !== args.root) {
+          throw new Error("pending-update-stale: pendingUpdateId is missing, expired, or belongs to another workspace");
+        }
+        if (targetName !== void 0 && targetName !== pendingCommit.board) {
+          throw new Error("pending-update-stale: pendingUpdateId belongs to another board");
+        }
+        targetName = pendingCommit.board;
+        parsedOps = pendingCommit.ops;
+      }
+      if (action === "review") {
+        if (parsedOps.length > 0) throw new Error("visual-review-requires-empty-ops: action=review cannot mutate the board");
+        const target2 = await resolveBoard(store, args.root, targetName);
+        const board2 = await store.read(args.root, target2.name);
+        if (!board2.ok) throw new Error(`${board2.error.code}: ${board2.error.message}`);
+        const evidence = visualReview === null ? parseReviewAction(args) : {
+          phase: visualReview.phase,
+          passed: visualReview.passed,
+          inspectedPageIds: visualReview.inspectedPageIds,
+          observations: visualReview.observations
+        };
+        const reviewToken = args.reviewToken ?? visualReview?.revealRequestId ?? "";
+        if (reviewToken === "") throw new Error("visual-review-invalid: action=review requires reviewToken from the latest successful write");
+        if (visualReview !== null) {
+          await validateVisualReviewEvidence(store, args.root, target2.name, board2.value.rev, visualReview);
+        }
+        const pages2 = prototypePages(board2.value.scene.elements);
+        const pageIds = new Set(pages2.map((page) => page.id));
+        if (!evidence.inspectedPageIds.some((id) => pageIds.has(id))) {
+          throw new Error("visual-review-invalid: inspectedPageIds do not include a page on the current board");
+        }
+        if (evidence.phase === "final" && !pages2.every((page) => evidence.inspectedPageIds.includes(page.id))) {
+          throw new Error("visual-review-incomplete: final review must include every current page id");
+        }
+        const recorded = await store.recordBoardReview(args.root, {
+          token: reviewToken,
+          board: target2.name,
+          boardRevision: board2.value.rev,
+          phase: evidence.phase,
+          inspectedPageIds: evidence.inspectedPageIds,
+          observations: evidence.observations
+        });
+        if (!recorded.ok) throw new Error(`${recorded.error.code}: ${recorded.error.message}`);
+        const prototypeQuality2 = inspectPrototypeQuality(board2.value.scene.elements);
+        const completionReady2 = evidence.phase === "final" && prototypeQuality2.structurePassed && prototypeQuality2.contentPassed && prototypeQuality2.layoutPassed && prototypeQuality2.warnings.length === 0;
+        prototypeQuality2.visualReviewRequired = !completionReady2 && pages2.length > 0;
+        const pendingWrite = evidence.phase === "representative" ? pendingReviewWriteFor(args.root, target2.name, board2.value.rev) : null;
+        const nextActionCode2 = completionReady2 ? "complete" : evidence.phase === "representative" ? pendingWrite === null ? "write_remaining_pages" : "commit_pending_write" : "fix_layout";
+        const nextAction2 = completionReady2 ? "\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u4E14\u7ED3\u6784\u3001\u5185\u5BB9\u548C\u5E03\u5C40\u95E8\u7981\u5168\u90E8\u901A\u8FC7" : evidence.phase === "representative" ? pendingWrite === null ? "\u4EE3\u8868\u9875\u590D\u6838\u5DF2\u8BB0\u5F55\uFF1B\u53EF\u4EE5\u5199\u5165\u5176\u4F59\u9875\u9762\uFF0C\u4E0D\u9700\u8981\u518D\u6B21\u4F20\u9012\u65E7 revision \u6216 revealRequestId" : "\u4EE3\u8868\u9875\u590D\u6838\u5DF2\u8BB0\u5F55\uFF1B\u6B64\u524D\u63D0\u4EA4\u7684\u5269\u4F59\u9875\u9762 ops \u5DF2\u4FDD\u7559\uFF0C\u8BF7\u7528 action=commit_pending \u548C pendingUpdateId \u63D0\u4EA4\uFF0C\u4E0D\u8981\u91CD\u53D1\u5927 JSON" : "\u6700\u7EC8\u590D\u6838\u5DF2\u8BB0\u5F55\uFF0C\u4F46\u4ECD\u9700\u5148\u4FEE\u590D prototypeQuality.warnings\uFF0C\u518D\u91CD\u65B0\u67E5\u770B\u6700\u65B0\u753B\u677F";
+        const active = await store.getActiveBoard(args.root);
+        if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`);
+        return {
+          rev: board2.value.rev,
+          targetBoard: target2.name,
+          ...active.value.name === null ? {} : { activeBoard: active.value.name },
+          elementCount: board2.value.scene.elements.length,
+          applied: 0,
+          verified: true,
+          writeVerified: false,
+          reviewVerified: true,
+          completionReady: completionReady2,
+          nextAction: nextAction2,
+          nextActionCode: nextActionCode2,
+          prototypeQuality: prototypeQuality2,
+          revealRequestId: reviewToken,
+          reviewToken,
+          reviewRequest: {
+            token: reviewToken,
+            boardRevision: board2.value.rev,
+            phase: evidence.phase,
+            pageIds: evidence.inspectedPageIds
+          },
+          ...pendingWrite === null ? {} : { pendingUpdateId: pendingWrite.id },
+          layoutWarnings: layoutWarnings(board2.value.scene.elements),
+          requiresConfirmation: false,
+          pending: false
+        };
+      }
+      if (requestedAction === "write" && args.ops === void 0) throw new Error("invalid arguments: action=write requires ops");
       if (visualReview?.phase === "final" && parsedOps.length > 0) {
         throw new Error("visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]");
       }
-      const target = await resolveBoard(store, args.root, args.name);
+      const target = await resolveBoard(store, args.root, targetName);
       const board = await store.read(args.root, target.name);
+      if (pendingCommit !== null && (!board.ok || Math.abs(board.value.rev - pendingCommit.baseRev) > 0.5)) {
+        throw new Error("pending-update-stale: board changed after the pending batch was preserved; read the latest board and create a new minimal update");
+      }
       await validateVisualReviewEvidence(store, args.root, target.name, board.ok ? board.value.rev : null, visualReview);
       const key = makeKey(args.root, target.name);
       const cache = boardCache.get(key);
@@ -4518,7 +4726,57 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
       const ops = normalizePageShellUpserts(currentElements, semanticOps);
       const prospectiveElements = previewElements(currentElements, ops);
-      validatePhasedDrawing(currentElements, prospectiveElements, visualReview);
+      const storedRepresentative = await store.getBoardReview(args.root, target.name, "representative");
+      if (!storedRepresentative.ok) throw new Error(`${storedRepresentative.error.code}: ${storedRepresentative.error.message}`);
+      const storedRepresentativeReviewed = board.ok && storedRepresentative.value.receipt !== null && Math.abs(storedRepresentative.value.receipt.revision - board.value.rev) <= 0.5 && storedRepresentative.value.receipt.inspectedPageIds.some((id) => prototypePages(currentElements).some((page) => page.id === id));
+      try {
+        validatePhasedDrawing(currentElements, prospectiveElements, visualReview, storedRepresentativeReviewed);
+      } catch (error2) {
+        const message = error2 instanceof Error ? error2.message : String(error2);
+        const currentPages = prototypePages(currentElements);
+        if (!message.startsWith("visual-review-required:") || currentPages.length === 0 || !board.ok || requestedAction !== "write") throw error2;
+        const pendingWrite = rememberPendingReviewWrite({
+          root: args.root,
+          board: target.name,
+          baseRev: board.value.rev,
+          ops
+        });
+        const reveal = await store.getBoardReveal(args.root);
+        if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
+        const request = reveal.value.request;
+        if (request === null || request.board !== target.name || Math.abs(request.revision - board.value.rev) > 0.5) {
+          pendingReviewWrites.delete(pendingWrite.id);
+          throw error2;
+        }
+        const prototypeQuality2 = inspectPrototypeQuality(currentElements);
+        prototypeQuality2.visualReviewRequired = true;
+        return {
+          rev: board.value.rev,
+          targetBoard: target.name,
+          ...target.activeBoard === void 0 ? {} : { activeBoard: target.activeBoard },
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: "\u5269\u4F59\u9875\u9762 ops \u5DF2\u5B89\u5168\u6682\u5B58\uFF1B\u5148\u67E5\u770B\u5F53\u524D\u4EE3\u8868\u9875\u5E76\u7528 action=review\u3001reviewToken \u548C phase=representative \u5B8C\u6210\u590D\u6838\uFF0C\u4E4B\u540E\u53EA\u63D0\u4EA4 pendingUpdateId\uFF0C\u4E0D\u8981\u91CD\u53D1\u5927 JSON",
+          nextActionCode: "review_representative",
+          prototypeQuality: prototypeQuality2,
+          revealRequestId: request.id,
+          reviewToken: request.id,
+          reviewRequest: {
+            token: request.id,
+            boardRevision: board.value.rev,
+            phase: "representative",
+            pageIds: currentPages.map((page) => page.id)
+          },
+          pendingUpdateId: pendingWrite.id,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false
+        };
+      }
       validateNewPrototypePageContracts(currentElements, prospectiveElements);
       const layoutReport = inspectPrototypeLayout(prospectiveElements, {
         focusIds: layoutFocusIdsWithPages(ops, currentElements, prospectiveElements)
@@ -4577,6 +4835,7 @@ ${formatLayoutIssues(layoutReport.errors)}
       }
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements);
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`);
+      if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id);
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements });
       const selected = await store.setActiveBoard(args.root, target.name);
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`);
@@ -4587,7 +4846,8 @@ ${formatLayoutIssues(layoutReport.errors)}
       const prototypeQuality = inspectPrototypeQuality(refreshed.value.scene.elements);
       const completionReady = ops.length === 0 && reviewedEveryPage(visualReview, pages) && prototypeQuality.structurePassed && prototypeQuality.contentPassed && prototypeQuality.layoutPassed && prototypeQuality.warnings.length === 0;
       prototypeQuality.visualReviewRequired = !completionReady && pages.length > 0;
-      const nextAction = completionReady ? "\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF1B\u53EF\u4EE5\u6839\u636E prototypeQuality \u7684\u5269\u4F59 warnings \u51B3\u5B9A\u662F\u5426\u7EE7\u7EED\u6253\u78E8" : pages.length === 0 ? "\u5F53\u524D\u753B\u677F\u6CA1\u6709\u53EF\u8BC6\u522B\u9875\u9762\uFF1B\u5148\u521B\u5EFA prototype-page" : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0 ? "\u5148\u6309 prototypeQuality.warnings \u4FEE\u590D\u7ED3\u6784\u3001\u9996\u5C4F\u5185\u5BB9\u548C\u5E03\u5C40\uFF1B\u5168\u90E8\u901A\u8FC7\u540E\u5728\u771F\u5B9E\u753B\u677F\u9010\u9875\u68C0\u67E5\uFF0C\u518D\u7528\u7A7A ops \u63D0\u4EA4 phase=final visualReview" : ops.length > 0 && visualReview?.phase === "final" ? "\u672C\u8F6E\u4ECD\u5199\u5165\u4E86\u5143\u7D20\uFF0C\u4E0D\u80FD\u540C\u65F6\u8BC1\u660E\u5199\u5165\u540E\u7684\u89C6\u89C9\u7ED3\u679C\uFF1B\u8BF7\u67E5\u770B\u771F\u5B9E\u753B\u677F\u540E\uFF0C\u7528\u7A7A ops \u5355\u72EC\u63D0\u4EA4 phase=final visualReview" : "\u5728\u771F\u5B9E\u53EF\u89C1\u753B\u677F\u9010\u9875\u68C0\u67E5\u9996\u5C4F\u4EFB\u52A1\u3001\u5C42\u7EA7\u3001\u5BF9\u9F50\u3001mock \u6570\u636E\u548C\u5BFC\u822A\uFF0C\u518D\u7528\u7A7A ops \u63D0\u4EA4\u8986\u76D6\u5168\u90E8 page id \u7684 phase=final visualReview";
+      const nextActionCode = completionReady ? "complete" : pages.length === 0 ? "write_representative" : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0 ? "fix_layout" : pages.length >= 3 ? "review_final" : "review_visible_board";
+      const nextAction = completionReady ? "\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF1B\u53EF\u4EE5\u6839\u636E prototypeQuality \u7684\u5269\u4F59 warnings \u51B3\u5B9A\u662F\u5426\u7EE7\u7EED\u6253\u78E8" : pages.length === 0 ? "\u5F53\u524D\u753B\u677F\u6CA1\u6709\u53EF\u8BC6\u522B\u9875\u9762\uFF1B\u5148\u521B\u5EFA prototype-page" : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0 ? "\u5148\u6309 prototypeQuality.warnings \u4FEE\u590D\u7ED3\u6784\u3001\u9996\u5C4F\u5185\u5BB9\u548C\u5E03\u5C40\uFF1B\u5168\u90E8\u901A\u8FC7\u540E\u5728\u771F\u5B9E\u753B\u677F\u9010\u9875\u68C0\u67E5\uFF0C\u518D\u7528 action=review \u548C\u6700\u65B0 reviewToken \u63D0\u4EA4 phase=final" : ops.length > 0 && visualReview?.phase === "final" ? "\u672C\u8F6E\u4ECD\u5199\u5165\u4E86\u5143\u7D20\uFF0C\u4E0D\u80FD\u540C\u65F6\u8BC1\u660E\u5199\u5165\u540E\u7684\u89C6\u89C9\u7ED3\u679C\uFF1B\u8BF7\u67E5\u770B\u771F\u5B9E\u753B\u677F\u540E\uFF0C\u7528 action=review \u548C\u6700\u65B0 reviewToken \u5355\u72EC\u63D0\u4EA4 phase=final" : "\u5728\u771F\u5B9E\u53EF\u89C1\u753B\u677F\u9010\u9875\u505A\u89C6\u89C9\u68C0\u67E5\uFF1A\u9996\u5C4F\u4EFB\u52A1\u3001\u5C42\u7EA7\u3001\u5BF9\u9F50\u3001mock \u6570\u636E\u548C\u5BFC\u822A\uFF1B\u518D\u7528 action=review\u3001\u6700\u65B0 reviewToken \u548C\u8986\u76D6\u5168\u90E8 page id \u7684 phase=final \u6536\u53E3";
       return {
         rev: result.value.rev,
         targetBoard: target.name,
@@ -4596,10 +4856,18 @@ ${formatLayoutIssues(layoutReport.errors)}
         applied: result.value.applied,
         verified: true,
         writeVerified: true,
+        reviewVerified: false,
         completionReady,
         nextAction,
+        nextActionCode,
         prototypeQuality,
         revealRequestId: revealed.value.id,
+        reviewToken: revealed.value.id,
+        reviewRequest: {
+          token: revealed.value.id,
+          boardRevision: refreshed.value.rev,
+          pageIds: pages.map((page) => page.id)
+        },
         layoutWarnings: qualityWarnings,
         requiresConfirmation: false,
         pending: false,
@@ -5661,9 +5929,16 @@ var Draw2CodeRuntimeImpl = class {
       data = await draw2codeUpdateTool(scenes).execute({
         root: command.root,
         ...command.board === void 0 ? {} : { name: command.board },
-        ops: command.ops,
+        ...command.action === void 0 ? {} : { action: command.action },
+        ...command.ops === void 0 ? {} : { ops: command.ops },
         ...command.force === void 0 ? {} : { force: command.force },
         ...command.safeMode === void 0 ? {} : { safeMode: command.safeMode },
+        ...command.reviewToken === void 0 ? {} : { reviewToken: command.reviewToken },
+        ...command.phase === void 0 ? {} : { phase: command.phase },
+        ...command.passed === void 0 ? {} : { passed: command.passed },
+        ...command.inspectedPageIds === void 0 ? {} : { inspectedPageIds: command.inspectedPageIds },
+        ...command.observations === void 0 ? {} : { observations: command.observations },
+        ...command.pendingUpdateId === void 0 ? {} : { pendingUpdateId: command.pendingUpdateId },
         ...command.visualReview === void 0 ? {} : { visualReview: command.visualReview }
       }, {});
     } else if (command.type === "generate") {
@@ -5687,7 +5962,7 @@ var Draw2CodeRuntimeImpl = class {
         opened: false
       };
     }
-    if (command.type === "update" && data.verified === true) {
+    if (command.type === "update" && data.writeVerified === true) {
       const board = String(data.targetBoard ?? command.board ?? "prototype");
       const revision = Number(data.rev ?? 0);
       this.emit({ type: "scene.updated", root: command.root, board, revision, sourceClientId: context.clientId });

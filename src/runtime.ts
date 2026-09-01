@@ -22,7 +22,22 @@ export type Draw2CodeCommand =
   | { type: 'list'; root: string }
   | { type: 'read'; root: string; board?: string }
   | { type: 'create'; root: string; input: Record<string, unknown> }
-  | { type: 'update'; root: string; board?: string; ops: unknown[]; force?: boolean; safeMode?: boolean; visualReview?: Record<string, unknown> }
+  | {
+      type: 'update'
+      root: string
+      board?: string
+      action?: 'write' | 'review' | 'commit_pending'
+      ops?: unknown[]
+      force?: boolean
+      safeMode?: boolean
+      reviewToken?: string
+      phase?: 'representative' | 'final'
+      passed?: boolean
+      inspectedPageIds?: string[]
+      observations?: string[]
+      pendingUpdateId?: string
+      visualReview?: Record<string, unknown>
+    }
   | { type: 'generate'; root: string; input: Record<string, unknown> }
   | { type: 'open'; root: string; board?: string; presentation?: 'auto' | 'inline' | 'browser' | 'handoff' }
 
@@ -136,9 +151,16 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
       data = await draw2codeUpdateTool(scenes).execute({
         root: command.root,
         ...(command.board === undefined ? {} : { name: command.board }),
-        ops: command.ops,
+        ...(command.action === undefined ? {} : { action: command.action }),
+        ...(command.ops === undefined ? {} : { ops: command.ops }),
         ...(command.force === undefined ? {} : { force: command.force }),
         ...(command.safeMode === undefined ? {} : { safeMode: command.safeMode }),
+        ...(command.reviewToken === undefined ? {} : { reviewToken: command.reviewToken }),
+        ...(command.phase === undefined ? {} : { phase: command.phase }),
+        ...(command.passed === undefined ? {} : { passed: command.passed }),
+        ...(command.inspectedPageIds === undefined ? {} : { inspectedPageIds: command.inspectedPageIds }),
+        ...(command.observations === undefined ? {} : { observations: command.observations }),
+        ...(command.pendingUpdateId === undefined ? {} : { pendingUpdateId: command.pendingUpdateId }),
         ...(command.visualReview === undefined ? {} : { visualReview: command.visualReview }),
       } as never, {} as never) as Record<string, unknown>
     } else if (command.type === 'generate') {
@@ -163,7 +185,7 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
       } satisfies CanvasHandle as unknown as Record<string, unknown>
     }
 
-    if (command.type === 'update' && data.verified === true) {
+    if (command.type === 'update' && data.writeVerified === true) {
       const board = String(data.targetBoard ?? command.board ?? 'prototype')
       const revision = Number(data.rev ?? 0)
       this.emit({ type: 'scene.updated', root: command.root, board, revision, sourceClientId: context.clientId })

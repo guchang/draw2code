@@ -6,7 +6,7 @@
 
 - 仅在用户明确说 `Draw2Code`、`画码`，或意图明确为“画原型”时进入 Draw2Code。普通“做一个 App / 写一个页面”不自动拦截。
 - 同一任务首次唤醒后保持 Draw2Code 会话；后续“改首页”“生成页面”不要求重复唤醒词。
-- “打开 Draw2Code / 画码”“我自己画一下”“我画个示意给你”只调用 `draw2code_open`：有 active board 就恢复；没有则展示空状态与创建入口，不能擅自开始 Create。
+- “打开 Draw2Code / 画码”“我自己画一下”“我画个示意给你”由独立 `draw2code-open` 快速入口处理，只调用一次 `draw2code_open`：不读取本契约的其余工作流，不调用其他 Draw2Code 工具，不进入代表页复核或质量门禁；有 active board 就恢复，没有则展示空状态与创建入口。
 - “我画好了”“按我画的看看”先调用 `draw2code_read` 读取当前可见画板并复述页面、组件和交互；用户没有要求时不自动修改或生成。
 
 ## 工具顺序
@@ -14,7 +14,7 @@
 - 新产品先走 `draw2code_create` 的可恢复状态机。`start` 返回 `discovery` 后，Agent 根据已明确事实、历史回答和 `recommendedDimensions` 选择当前最高影响的未知项；第一题必须优先采用推荐维度，不能先问模块、页面或通用信息架构。普通待办优先深挖触发场景或现有替代，雷达社交优先深挖信任与独特连接机制，穿搭产品优先深挖推荐依据或使用时刻。信息不足时调用 `propose_question`，每次只展示一个带 insight、取舍说明和推荐项的结构化问题；信息足够或用户要求停止时调用 `synthesize`。禁止固定询问平台、用户、目标、流程、模块和页面，最多提问 10 次。
 - `synthesize` 提交一份结构化 `PrototypeBrief`；工具校验后确定性生成完整 `briefMarkdown`、`pageBlueprints` 和 `pageMockData`。`ready` 时必须完整展示该 Markdown，不能自行缩写；随后用最后一张页面范围确认卡明确列出将绘制的页面，只进行一次“确认这些页面并绘制 / 调整页面范围 / 调整产品方向”确认。
 - 每道原生问题卡片都保留“直接整理项目简报”；选择后按 `synthesize-now` 回答，工具明确返回 `nextAction=synthesize`。用户跳过当前问题时调用 `skip` 并把该项保留为待验证假设；即使已有待答问题也可调用 `synthesize`。`ready` 后选择调整时直接调用 `propose_question` 追问受影响的一项，旧简报失效，回答后必须重新生成完整简报。
-- Create 返回 `confirmed` 后，按 `boardName` 和同一份 `brief` 调用 `draw2code_update`。首轮有 3 个及以上页面时先画一个代表页并在可见画板检查，再带 `phase=representative` 的 `visualReview` 添加其余页面；复核必须携带最近一次 update 返回的 `rev` 与 `revealRequestId`，不能重放旧结果。全部页面完成后用空 ops 提交覆盖所有 page id 的 `phase=final` 复核。已有画板修改必须先 `draw2code_read` 再 `draw2code_update`。
+- Create 返回 `confirmed` 后，按 `boardName`、同一份 `brief` 和结构化 `drawingPlan` 调用 `draw2code_update`。当 `drawingPlan.nextActionCode=write_representative` 时，本轮只为 `allowedPageIds` 生成 ops，不能预先构造全部页面。代表页写入后等待 Canvas 消费返回的 reveal，再以 `action=review`、`reviewToken`、`phase=representative`、`passed=true`、`inspectedPageIds` 和 `observations` 单独记录可见复核；review 不传 ops、不改变 revision、不发布新 reveal。工具返回 `nextActionCode=write_remaining_pages` 后才生成 `remainingPageIds`。如果 Agent 误在复核前提交其余页面，工具返回 `nextActionCode=review_representative` 和 `pendingUpdateId`，并保留该批 ops；完成代表页复核后用 `action=commit_pending` 和该 ID 提交，不重新生成或重传 ops。全部页面完成后用 `action=review`、`phase=final` 覆盖所有 page id。旧 `visualReview` 只保留兼容；新流程不手工拼 `rev` 与 `revealRequestId`。已有画板修改必须先 `draw2code_read` 再 `draw2code_update`。
 - 省略 `board` / DSH 的 `name` 始终表示用户当前可见 active board。只有用户明确点名另一块画板时才显式传入。
 - MCP/Codex 从 workspace 内的子目录调用时，所有画板操作统一归到宿主注册的 workspace root；不能因当前 cwd 是子仓库而悄悄创建第二套画板。
 - Update 返回 `requiresConfirmation=true` 时停止写入并只询问冲突覆盖；得到确认后才以 `force=true` 重试。不得直接写 `.excalidraw.json` 绕过 CAS、布局门禁和回读验证。
@@ -22,10 +22,10 @@
 
 ## 展示与共同编辑
 
-- 第一次创建、读取或用户明确打开时展示画板：支持 MCP UI 就内嵌；否则本地图形环境打开 daemon 的短期 URL；headless 只返回 URL。不要根据宿主产品名分支。
-- 宿主具有自己的侧边栏浏览器时使用 `presentation=handoff`：工具只准备短期 URL 并返回 `displayState=handoff-ready`，宿主负责在侧边栏导航和验证可见性。单纯导航优先使用宿主原生能力，不为此初始化通用浏览器自动化；只有需要 DOM、控制台或交互证据时才接管浏览器。只有画布在侧边栏真正可见后，Agent 才能报告“已打开”；不能把 URL 就绪或 daemon 启动成功当作可见性证据。
+- MCP/Codex 的 `draw2code_open` 默认使用 `presentation=handoff`，不注册静态 `openai/outputTemplate`，也不把动态 localhost 画板套进 MCP App iframe。工具只准备短期 URL 并返回 `displayState=handoff-ready`；`auto` 与 `inline` 仅作为兼容别名，同样回退到 handoff。只有用户明确要求外部浏览器时才使用 `presentation=browser`。
+- 宿主负责把 handoff URL 导航到自己的侧边栏或浏览器并验证可见性。单纯导航优先使用宿主原生能力，不为此初始化通用浏览器自动化；只有需要 DOM、控制台或交互证据时才接管浏览器。只有画布真正可见后，Agent 才能报告“已打开”；不能把 URL 就绪或 daemon 启动成功当作可见性证据。若未来需要对话内嵌画板，必须单独实现直接运行 Canvas 的 MCP App，不能恢复动态 localhost iframe 壳。
 - 同一 workspace 的外部浏览器只首次打开一次；后续复用现有标签页并依靠事件刷新，不能反复抢焦点。
-- `verified=true` / `writeVerified=true` 只证明目标画板写盘并回读，不代表原型已经完成。成功更新会把目标设为 active board、发布带目标 revision 的 reveal request 并自动打开画码；Canvas 实际加载到同一 board + revision 后才回传消费确认。只有此后提交的 `completionReady=true` 才说明最终视觉复核已覆盖全部页面，即使如此，仍应把 `prototypeQuality.warnings` 作为继续打磨依据。
+- `verified=true` / `writeVerified=true` 只证明目标画板写盘并回读，不代表原型已经完成。成功 write 会把目标设为 active board、发布带目标 revision 的 reveal request、返回不透明 `reviewToken` 并自动打开画码；Canvas 实际加载到同一 board + revision 后才回传消费确认。`action=review` 只记录该可见版本的 review receipt，返回 `reviewVerified=true`，不会写画板或发布新 reveal；重复提交同一 token 是幂等的。只有 final review 返回 `completionReady=true` 才说明最终视觉复核已覆盖全部页面，即使如此，仍应把 `prototypeQuality.warnings` 作为继续打磨依据。
 - 用户拖动产生的 scene write 与 Agent update 都通过 daemon；WebSocket 是主通知通道，revision polling 是断线降级。
 - 独立画码可以列出当前 workspace 和本机已由宿主明确注册、持久化且确实含有画板的其他 workspace；插件缓存和空 root 不进入切换菜单。切换前必须先落盘当前待保存编辑，再用当前短期会话换取目标 root 的新 workspace-scoped token。旧 token 不能直接访问目标 root，Agent 工具默认范围也不能因为 UI 切换而扩大。
 

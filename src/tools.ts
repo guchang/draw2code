@@ -87,7 +87,44 @@ interface Snapshot {
   elements: Array<Record<string, unknown>>
 }
 
+interface PendingReviewWrite {
+  id: string
+  root: string
+  board: string
+  baseRev: number
+  ops: ParsedOp[]
+  createdAt: number
+}
+
 const boardCache = new Map<string, Snapshot>()
+const pendingReviewWrites = new Map<string, PendingReviewWrite>()
+const PENDING_REVIEW_WRITE_MAX = 20
+const PENDING_REVIEW_WRITE_TTL_MS = 10 * 60_000
+
+function prunePendingReviewWrites(now = Date.now()): void {
+  for (const [id, pending] of pendingReviewWrites) {
+    if (now - pending.createdAt > PENDING_REVIEW_WRITE_TTL_MS) pendingReviewWrites.delete(id)
+  }
+  while (pendingReviewWrites.size >= PENDING_REVIEW_WRITE_MAX) {
+    const oldest = [...pendingReviewWrites.values()].sort((a, b) => a.createdAt - b.createdAt)[0]
+    if (oldest === undefined) break
+    pendingReviewWrites.delete(oldest.id)
+  }
+}
+
+function rememberPendingReviewWrite(input: Omit<PendingReviewWrite, 'id' | 'createdAt'>): PendingReviewWrite {
+  prunePendingReviewWrites()
+  const pending = { ...input, id: `pending-${randomUUID()}`, createdAt: Date.now() }
+  pendingReviewWrites.set(pending.id, pending)
+  return pending
+}
+
+function pendingReviewWriteFor(root: string, board: string, baseRev: number): PendingReviewWrite | null {
+  prunePendingReviewWrites()
+  return [...pendingReviewWrites.values()]
+    .filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5)
+    .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+}
 
 async function resolveBoard(store: SceneStore, root: string, requested?: string): Promise<{ name: string; activeBoard?: string }> {
   const active = await store.getActiveBoard(root)
@@ -386,6 +423,15 @@ interface VisualReviewEvidence {
   observations: string[]
 }
 
+type ReviewPhase = VisualReviewEvidence['phase']
+
+interface ReviewActionEvidence {
+  phase: ReviewPhase
+  passed: boolean
+  inspectedPageIds: string[]
+  observations: string[]
+}
+
 function parseVisualReview(input: unknown): VisualReviewEvidence | null {
   if (typeof input !== 'object' || input === null) return null
   const value = input as Record<string, unknown>
@@ -405,6 +451,28 @@ function parseVisualReview(input: unknown): VisualReviewEvidence | null {
     inspectedPageIds,
     observations,
   }
+}
+
+function parseReviewAction(args: {
+  phase?: unknown
+  passed?: unknown
+  inspectedPageIds?: unknown
+  observations?: unknown
+}): ReviewActionEvidence {
+  const phase = str(args.phase)
+  if (phase !== 'representative' && phase !== 'final') {
+    throw new Error('visual-review-invalid: action=review requires phase=representative or phase=final')
+  }
+  const inspectedPageIds = Array.isArray(args.inspectedPageIds)
+    ? args.inspectedPageIds.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : []
+  const observations = Array.isArray(args.observations)
+    ? args.observations.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : []
+  if (args.passed !== true) throw new Error('visual-review-failed: passed must be true before the workflow can continue')
+  if (inspectedPageIds.length === 0) throw new Error('visual-review-invalid: inspectedPageIds must include at least one visible page id')
+  if (observations.length === 0) throw new Error('visual-review-invalid: observations must describe what was visibly checked')
+  return { phase, passed: true, inspectedPageIds, observations }
 }
 
 async function validateVisualReviewEvidence(
@@ -436,6 +504,7 @@ function validatePhasedDrawing(
   currentElements: Array<Record<string, unknown>>,
   prospectiveElements: Array<Record<string, unknown>>,
   visualReview: VisualReviewEvidence | null,
+  storedRepresentativeReviewed = false,
 ): void {
   const currentPages = prototypePages(currentElements)
   const currentPageIds = new Set(currentPages.map((page) => page.id))
@@ -448,8 +517,8 @@ function validatePhasedDrawing(
       && visualReview.passed
       && visualReview.observations.length > 0
       && visualReview.inspectedPageIds.some((id) => currentPageIds.has(id))
-    if (!representativeReviewed) {
-      throw new Error('visual-review-required: before adding multiple remaining pages, submit visualReview={phase:"representative",passed:true,inspectedPageIds:["<existing page id>"],observations:["what was checked"]}')
+    if (!representativeReviewed && !storedRepresentativeReviewed) {
+      throw new Error('visual-review-required: before adding multiple remaining pages, visibly inspect the existing representative page and call draw2code_update with action=review, the latest reviewToken, phase=representative, passed=true, inspectedPageIds and observations')
     }
   }
 }
@@ -902,14 +971,21 @@ export function draw2codeUpdateTool(store: SceneStore) {
       + '{op:"clear"}, {op:"replace",scene:{elements:[...]}}. Elements need id + type (rectangle|text|arrow|line|ellipse|'
       + 'diamond|frame) + x/y/width/height (+text for text); missing fields are defaulted. Unambiguous upsert shorthands are accepted: a direct {id,type,...} element, {element:{...}} without op, or flat {op:"upsert",id,type,...}. Delete also accepts elementId or element.id when op="delete". Canvas-absolute x/y are canonical. New prototype pages use an ordinary rectangle with customData.role=prototype-page, customData.pageName, and customData.mockDataMin; add a separate text above it with role=prototype-page-label and pageId. Keep all new-page children frameId=null so user-drawn cross-page arrows cannot be clipped. Existing named Frames remain supported; their unambiguous frame-local coordinates are still converted for compatibility. The board is auto-created when '
       + 'absent. Triggers: 画原型 / 画一下 / 在画板上… / '
-      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Use semantic roles as a component API: page-heading/page-header for headers, content-card/task-card/stat-card/category-card for information blocks, input/select/search-field for form fields, chip/filter-chip for choices, bottom-navigation plus bottom-navigation-item for global navigation, and exactly one primary-action for the page\'s main task. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. Three or more first-batch pages are rejected: draw one representative page, inspect it visibly, then add the rest with representative visualReview evidence. verified/writeVerified only prove persistence; report completion only when completionReady=true after final visualReview covers every page. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
+      + 'draw the prototype / update the board. Low-fi quality is checked before writing: multiline text needs enough height, shape text must be a separate text element, and bottom navigation must use a semantic shell in the page bottom safe area. A completed page from draw2code_create must use a rectangle page shell with role=prototype-page, pageName, and mockDataMin (normally 3), plus an external prototype-page-label; mark each visible realistic example text with role=mock-data. Empty boxes and placeholder labels do not satisfy the content gate. Use semantic roles as a component API: page-heading/page-header for headers, content-card/task-card/stat-card/category-card for information blocks, input/select/search-field for form fields, chip/filter-chip for choices, bottom-navigation plus bottom-navigation-item for global navigation, and exactly one primary-action for the page\'s main task. Page membership is inferred from canvas geometry; containerId is only for one visible label bound to a rectangle/diamond/ellipse. New page children must keep frameId=null. Existing legacy Frame pages and their frameId children remain supported and are never migrated implicitly. For a one-label shape, set the text containerId to the shape id and declare customData.role on the shape or label: button/primary-action/chip/tab labels become center/middle, while input/select/dropdown/search-field values stay left/middle. Missing component roles are rejected instead of silently defaulting labels to the top-left. The tool completes Excalidraw\'s reciprocal boundElements relation so the label is visible on first render. A bottom-navigation shell uses separate text labels with customData.role=bottom-navigation-item so each slot is centered. Use customData.tone=primary|success|warning|danger|info|neutral on category/status/action shapes for restrained semantic color; explicit strokeColor/backgroundColor always win. Invalid layout returns layout-invalid and is not written. For three or more pages, obey create.drawingPlan and write only the representative page first. After the returned reviewToken is visible in Canvas, call action=review with phase=representative; this pure review does not write or publish another reveal. Then write the remaining pages and finish with action=review phase=final. If remaining-page ops arrive before representative review, the tool preserves them and returns pendingUpdateId; after review, call action=commit_pending with that id and do not regenerate or resend the ops. verified/writeVerified only prove persistence; report completion only when completionReady=true. Omit name to target the board currently selected in the 画码 UI; only pass name when the user explicitly names another board. Never edit the scene file with Bash or another direct file-writing path; use this tool so conflicts and read-back verification are enforced.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       name: { type: 'string', description: 'Board name. Omit to target the board currently selected in the 画码 UI.' },
-      ops: { type: 'json', required: true, description: 'Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"首页",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
+      action: { type: 'string', enum: ['write', 'review', 'commit_pending'], description: 'write applies ops (default). review records a visible-canvas review without writing the board or publishing a new reveal. commit_pending applies a previously preserved batch after representative review.' },
+      ops: { type: 'json', description: 'Required for action=write. Ops array (or a JSON string encoding it). For a new page, first upsert {id:"page",type:"rectangle",customData:{role:"prototype-page",pageName:"首页",mockDataMin:3},x,y,width,height}, then an external prototype-page-label text and page children with canvas-absolute coordinates and frameId=null. Direct elements, {element:{...}} without op, and flat upserts are accepted when id+type make the intent unambiguous. Delete accepts id, elementId, or element.id. Legacy named Frames remain compatible, including unambiguous frame-local child coordinate conversion.' },
       force: { type: 'boolean', description: '已读到冲突并且用户确认后可设置为 true，强制执行。默认 false。' },
       safeMode: { type: 'boolean', description: '是否在有风险改动时要求确认（默认 true）。设为 false 会直接执行，可能覆盖用户手工改动。' },
-      visualReview: { type: 'json', description: 'Visible-canvas review evidence tied to the latest successful update: {phase:"representative"|"final",passed:true,boardRevision:<returned rev>,revealRequestId:"<returned revealRequestId>",inspectedPageIds:[...],observations:[...]}. Final review includes every page id and must be sent with empty ops after inspecting the updated board.' },
+      reviewToken: { type: 'string', description: 'Opaque token returned by the latest successful write. Required for action=review.' },
+      phase: { type: 'string', enum: ['representative', 'final'], description: 'Review phase for action=review.' },
+      passed: { type: 'boolean', description: 'Set true only after the requested pages are visibly inspected.' },
+      inspectedPageIds: { type: 'array', items: { type: 'string' }, description: 'Visible page-shell ids inspected during action=review.' },
+      observations: { type: 'array', items: { type: 'string' }, description: 'Concrete visible observations from the review.' },
+      pendingUpdateId: { type: 'string', description: 'Preserved write batch returned when representative review is the only blocker. Use with action=commit_pending; do not resend the original ops.' },
+      visualReview: { type: 'json', description: 'Deprecated compatibility input. New calls use action=review with reviewToken, phase, passed, inspectedPageIds and observations, without ops.' },
     },
     output: {
       schema: {
@@ -923,10 +999,15 @@ export function draw2codeUpdateTool(store: SceneStore) {
           applied: { type: 'integer', required: true },
           verified: { type: 'boolean', required: true },
           writeVerified: { type: 'boolean', required: true },
+          reviewVerified: { type: 'boolean' },
           completionReady: { type: 'boolean', required: true },
           nextAction: { type: 'string', required: true },
+          nextActionCode: { type: 'string' },
           prototypeQuality: { type: 'json', required: true },
           revealRequestId: { type: 'string' },
+          reviewToken: { type: 'string' },
+          reviewRequest: { type: 'json' },
+          pendingUpdateId: { type: 'string' },
           layoutWarnings: { type: 'array', items: { type: 'json' }, required: true },
           requiresConfirmation: { type: 'boolean' },
           pending: { type: 'boolean' },
@@ -943,22 +1024,145 @@ export function draw2codeUpdateTool(store: SceneStore) {
           },
         },
       },
-      render: (_args, value: { rev?: number; targetBoard?: string; activeBoard?: string; pending?: boolean; elementCount?: number; applied?: number; verified?: boolean; writeVerified?: boolean; completionReady?: boolean; nextAction?: string; prototypeQuality?: JsonValue; revealRequestId?: string; layoutWarnings?: JsonValue[]; conflicts?: unknown[]; planSummary?: string }) => text(
+      render: (_args, value: { rev?: number; targetBoard?: string; activeBoard?: string; pending?: boolean; elementCount?: number; applied?: number; verified?: boolean; writeVerified?: boolean; reviewVerified?: boolean; completionReady?: boolean; nextAction?: string; nextActionCode?: string; prototypeQuality?: JsonValue; revealRequestId?: string; reviewToken?: string; pendingUpdateId?: string; layoutWarnings?: JsonValue[]; conflicts?: unknown[]; planSummary?: string }) => text(
         value.pending === true
           ? `【待确认】检测到潜在冲突（${value.conflicts?.length ?? 0} 条）：\n${value.planSummary ?? ''}\n请先确认后再重试：在你确认了之后，请重新调用 draw2code_update 并设置 force=true。`
-          : `board ${value.targetBoard ?? ''} updated and selected. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === 'object' && (value.prototypeQuality as Record<string, JsonValue>).visualReviewRequired === true}; boardRevision=${value.rev ?? 'missing'}; revealRequestId=${value.revealRequestId ?? 'missing'}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. ${value.nextAction ?? ''} The 画码 sidebar opens automatically on this board.${(value.layoutWarnings ?? []).length > 0 ? `\n结构与布局提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : ''}`,
+          : `board ${value.targetBoard ?? ''}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === 'object' && (value.prototypeQuality as Record<string, JsonValue>).visualReviewRequired === true}; boardRevision=${value.rev ?? 'missing'}; revealRequestId=${value.revealRequestId ?? 'missing'}; reviewToken=${value.reviewToken ?? 'missing'}; pendingUpdateId=${value.pendingUpdateId ?? 'none'}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ''}. ${value.nextAction ?? ''}${value.writeVerified === true ? ' The 画码 sidebar opens automatically on this board.' : ''}${(value.layoutWarnings ?? []).length > 0 ? `\n结构与布局提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : ''}`,
       ),
     },
-    async execute(args: { root: string; name?: string; ops: unknown; force?: boolean; safeMode?: boolean; visualReview?: unknown }) {
+    async execute(args: {
+      root: string
+      name?: string
+      action?: 'write' | 'review' | 'commit_pending'
+      ops?: unknown
+      force?: boolean
+      safeMode?: boolean
+      reviewToken?: string
+      phase?: ReviewPhase
+      passed?: boolean
+      inspectedPageIds?: string[]
+      observations?: string[]
+      pendingUpdateId?: string
+      visualReview?: unknown
+    }) {
       const safeMode = args.safeMode !== false
       const force = args.force === true
       const visualReview = parseVisualReview(args.visualReview)
-      const parsedOps = parseUpdateOps(args.ops)
+      let parsedOps = args.ops === undefined ? [] : parseUpdateOps(args.ops)
+      let targetName = args.name
+      let pendingCommit: PendingReviewWrite | null = null
+      const requestedAction = args.action ?? (visualReview !== null && parsedOps.length === 0 ? 'review' : 'write')
+      const action = requestedAction === 'commit_pending' ? 'write' : requestedAction
+      if (requestedAction === 'commit_pending') {
+        if (typeof args.pendingUpdateId !== 'string' || args.pendingUpdateId === '') {
+          throw new Error('pending-update-invalid: action=commit_pending requires pendingUpdateId')
+        }
+        prunePendingReviewWrites()
+        pendingCommit = pendingReviewWrites.get(args.pendingUpdateId) ?? null
+        if (pendingCommit === null || pendingCommit.root !== args.root) {
+          throw new Error('pending-update-stale: pendingUpdateId is missing, expired, or belongs to another workspace')
+        }
+        if (targetName !== undefined && targetName !== pendingCommit.board) {
+          throw new Error('pending-update-stale: pendingUpdateId belongs to another board')
+        }
+        targetName = pendingCommit.board
+        parsedOps = pendingCommit.ops
+      }
+      if (action === 'review') {
+        if (parsedOps.length > 0) throw new Error('visual-review-requires-empty-ops: action=review cannot mutate the board')
+        const target = await resolveBoard(store, args.root, targetName)
+        const board = await store.read(args.root, target.name)
+        if (!board.ok) throw new Error(`${board.error.code}: ${board.error.message}`)
+        const evidence = visualReview === null
+          ? parseReviewAction(args)
+          : {
+              phase: visualReview.phase,
+              passed: visualReview.passed,
+              inspectedPageIds: visualReview.inspectedPageIds,
+              observations: visualReview.observations,
+            }
+        const reviewToken = args.reviewToken ?? visualReview?.revealRequestId ?? ''
+        if (reviewToken === '') throw new Error('visual-review-invalid: action=review requires reviewToken from the latest successful write')
+        if (visualReview !== null) {
+          await validateVisualReviewEvidence(store, args.root, target.name, board.value.rev, visualReview)
+        }
+        const pages = prototypePages(board.value.scene.elements)
+        const pageIds = new Set(pages.map((page) => page.id))
+        if (!evidence.inspectedPageIds.some((id) => pageIds.has(id))) {
+          throw new Error('visual-review-invalid: inspectedPageIds do not include a page on the current board')
+        }
+        if (evidence.phase === 'final' && !pages.every((page) => evidence.inspectedPageIds.includes(page.id))) {
+          throw new Error('visual-review-incomplete: final review must include every current page id')
+        }
+        const recorded = await store.recordBoardReview(args.root, {
+          token: reviewToken,
+          board: target.name,
+          boardRevision: board.value.rev,
+          phase: evidence.phase,
+          inspectedPageIds: evidence.inspectedPageIds,
+          observations: evidence.observations,
+        })
+        if (!recorded.ok) throw new Error(`${recorded.error.code}: ${recorded.error.message}`)
+        const prototypeQuality = inspectPrototypeQuality(board.value.scene.elements)
+        const completionReady = evidence.phase === 'final'
+          && prototypeQuality.structurePassed
+          && prototypeQuality.contentPassed
+          && prototypeQuality.layoutPassed
+          && prototypeQuality.warnings.length === 0
+        prototypeQuality.visualReviewRequired = !completionReady && pages.length > 0
+        const pendingWrite = evidence.phase === 'representative'
+          ? pendingReviewWriteFor(args.root, target.name, board.value.rev)
+          : null
+        const nextActionCode = completionReady
+          ? 'complete'
+          : evidence.phase === 'representative'
+            ? pendingWrite === null ? 'write_remaining_pages' : 'commit_pending_write'
+            : 'fix_layout'
+        const nextAction = completionReady
+          ? '视觉复核已覆盖全部页面，且结构、内容和布局门禁全部通过'
+          : evidence.phase === 'representative'
+            ? pendingWrite === null
+              ? '代表页复核已记录；可以写入其余页面，不需要再次传递旧 revision 或 revealRequestId'
+              : '代表页复核已记录；此前提交的剩余页面 ops 已保留，请用 action=commit_pending 和 pendingUpdateId 提交，不要重发大 JSON'
+            : '最终复核已记录，但仍需先修复 prototypeQuality.warnings，再重新查看最新画板'
+        const active = await store.getActiveBoard(args.root)
+        if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`)
+        return {
+          rev: board.value.rev,
+          targetBoard: target.name,
+          ...(active.value.name === null ? {} : { activeBoard: active.value.name }),
+          elementCount: board.value.scene.elements.length,
+          applied: 0,
+          verified: true,
+          writeVerified: false,
+          reviewVerified: true,
+          completionReady,
+          nextAction,
+          nextActionCode,
+          prototypeQuality: prototypeQuality as unknown as JsonValue,
+          revealRequestId: reviewToken,
+          reviewToken,
+          reviewRequest: {
+            token: reviewToken,
+            boardRevision: board.value.rev,
+            phase: evidence.phase,
+            pageIds: evidence.inspectedPageIds,
+          } as JsonValue,
+          ...(pendingWrite === null ? {} : { pendingUpdateId: pendingWrite.id }),
+          layoutWarnings: layoutWarnings(board.value.scene.elements),
+          requiresConfirmation: false,
+          pending: false,
+        }
+      }
+      if (requestedAction === 'write' && args.ops === undefined) throw new Error('invalid arguments: action=write requires ops')
       if (visualReview?.phase === 'final' && parsedOps.length > 0) {
         throw new Error('visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]')
       }
-      const target = await resolveBoard(store, args.root, args.name)
+      const target = await resolveBoard(store, args.root, targetName)
       const board = await store.read(args.root, target.name)
+      if (pendingCommit !== null && (!board.ok || Math.abs(board.value.rev - pendingCommit.baseRev) > 0.5)) {
+        throw new Error('pending-update-stale: board changed after the pending batch was preserved; read the latest board and create a new minimal update')
+      }
       await validateVisualReviewEvidence(store, args.root, target.name, board.ok ? board.value.rev : null, visualReview)
       const key = makeKey(args.root, target.name)
       const cache = boardCache.get(key)
@@ -968,7 +1172,60 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
       const ops = normalizePageShellUpserts(currentElements, semanticOps)
       const prospectiveElements = previewElements(currentElements, ops)
-      validatePhasedDrawing(currentElements, prospectiveElements, visualReview)
+      const storedRepresentative = await store.getBoardReview(args.root, target.name, 'representative')
+      if (!storedRepresentative.ok) throw new Error(`${storedRepresentative.error.code}: ${storedRepresentative.error.message}`)
+      const storedRepresentativeReviewed = board.ok
+        && storedRepresentative.value.receipt !== null
+        && Math.abs(storedRepresentative.value.receipt.revision - board.value.rev) <= 0.5
+        && storedRepresentative.value.receipt.inspectedPageIds.some((id) => prototypePages(currentElements).some((page) => page.id === id))
+      try {
+        validatePhasedDrawing(currentElements, prospectiveElements, visualReview, storedRepresentativeReviewed)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const currentPages = prototypePages(currentElements)
+        if (!message.startsWith('visual-review-required:') || currentPages.length === 0 || !board.ok || requestedAction !== 'write') throw error
+        const pendingWrite = rememberPendingReviewWrite({
+          root: args.root,
+          board: target.name,
+          baseRev: board.value.rev,
+          ops,
+        })
+        const reveal = await store.getBoardReveal(args.root)
+        if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`)
+        const request = reveal.value.request
+        if (request === null || request.board !== target.name || Math.abs(request.revision - board.value.rev) > 0.5) {
+          pendingReviewWrites.delete(pendingWrite.id)
+          throw error
+        }
+        const prototypeQuality = inspectPrototypeQuality(currentElements)
+        prototypeQuality.visualReviewRequired = true
+        return {
+          rev: board.value.rev,
+          targetBoard: target.name,
+          ...(target.activeBoard === undefined ? {} : { activeBoard: target.activeBoard }),
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: '剩余页面 ops 已安全暂存；先查看当前代表页并用 action=review、reviewToken 和 phase=representative 完成复核，之后只提交 pendingUpdateId，不要重发大 JSON',
+          nextActionCode: 'review_representative',
+          prototypeQuality: prototypeQuality as unknown as JsonValue,
+          revealRequestId: request.id,
+          reviewToken: request.id,
+          reviewRequest: {
+            token: request.id,
+            boardRevision: board.value.rev,
+            phase: 'representative',
+            pageIds: currentPages.map((page) => page.id),
+          } as JsonValue,
+          pendingUpdateId: pendingWrite.id,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false,
+        }
+      }
       validateNewPrototypePageContracts(currentElements, prospectiveElements)
       const layoutReport = inspectPrototypeLayout(prospectiveElements, {
         focusIds: layoutFocusIdsWithPages(ops, currentElements, prospectiveElements),
@@ -1030,6 +1287,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
       }
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements)
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`)
+      if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id)
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements })
       const selected = await store.setActiveBoard(args.root, target.name)
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`)
@@ -1045,15 +1303,24 @@ export function draw2codeUpdateTool(store: SceneStore) {
         && prototypeQuality.layoutPassed
         && prototypeQuality.warnings.length === 0
       prototypeQuality.visualReviewRequired = !completionReady && pages.length > 0
+      const nextActionCode = completionReady
+        ? 'complete'
+        : pages.length === 0
+          ? 'write_representative'
+          : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0
+            ? 'fix_layout'
+            : pages.length >= 3
+              ? 'review_final'
+              : 'review_visible_board'
       const nextAction = completionReady
         ? '视觉复核已覆盖全部页面；可以根据 prototypeQuality 的剩余 warnings 决定是否继续打磨'
         : pages.length === 0
           ? '当前画板没有可识别页面；先创建 prototype-page'
           : !prototypeQuality.structurePassed || !prototypeQuality.contentPassed || !prototypeQuality.layoutPassed || prototypeQuality.warnings.length > 0
-            ? '先按 prototypeQuality.warnings 修复结构、首屏内容和布局；全部通过后在真实画板逐页检查，再用空 ops 提交 phase=final visualReview'
+            ? '先按 prototypeQuality.warnings 修复结构、首屏内容和布局；全部通过后在真实画板逐页检查，再用 action=review 和最新 reviewToken 提交 phase=final'
             : ops.length > 0 && visualReview?.phase === 'final'
-              ? '本轮仍写入了元素，不能同时证明写入后的视觉结果；请查看真实画板后，用空 ops 单独提交 phase=final visualReview'
-              : '在真实可见画板逐页检查首屏任务、层级、对齐、mock 数据和导航，再用空 ops 提交覆盖全部 page id 的 phase=final visualReview'
+              ? '本轮仍写入了元素，不能同时证明写入后的视觉结果；请查看真实画板后，用 action=review 和最新 reviewToken 单独提交 phase=final'
+              : '在真实可见画板逐页做视觉检查：首屏任务、层级、对齐、mock 数据和导航；再用 action=review、最新 reviewToken 和覆盖全部 page id 的 phase=final 收口'
       return {
         rev: result.value.rev,
         targetBoard: target.name,
@@ -1062,10 +1329,18 @@ export function draw2codeUpdateTool(store: SceneStore) {
         applied: result.value.applied,
         verified: true,
         writeVerified: true,
+        reviewVerified: false,
         completionReady,
         nextAction,
+        nextActionCode,
         prototypeQuality: prototypeQuality as unknown as JsonValue,
         revealRequestId: revealed.value.id,
+        reviewToken: revealed.value.id,
+        reviewRequest: {
+          token: revealed.value.id,
+          boardRevision: refreshed.value.rev,
+          pageIds: pages.map((page) => page.id),
+        } as JsonValue,
         layoutWarnings: qualityWarnings,
         requiresConfirmation: false,
         pending: false,
