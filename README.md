@@ -72,7 +72,7 @@ Draw2Code 把画板注册到 `dsh-better-sidebar` 提供的右侧栏中。DSH �
 dsh plugin --profile web add dsh-better-sidebar
 
 # 2. 安装 Draw2Code 稳定版
-dsh plugin --profile web add github:guchang/draw2code#v0.1.2
+dsh plugin --profile web add github:guchang/draw2code#v0.5.0
 
 # 3. 重启 dsh web；如果已经在运行，请先停止旧进程再启动
 dsh web
