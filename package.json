@@ -47,6 +47,7 @@
   "scripts": {
     "build": "node build.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "benchmark:capacity": "npm run build && node benchmarks/scene-capacity.mjs",
     "watch": "node build.mjs --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "mcp": "node dist/draw2code-mcp.js",

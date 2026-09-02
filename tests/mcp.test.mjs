@@ -99,7 +99,13 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
     openWorldHint: false,
   })
   const generate = listed.result.tools.find((tool) => tool.name === 'draw2code_generate')
+  const read = listed.result.tools.find((tool) => tool.name === 'draw2code_read')
   const update = listed.result.tools.find((tool) => tool.name === 'draw2code_update')
+  assert.deepEqual(read.inputSchema.properties.detail.enum, ['index', 'full'])
+  assert.ok(read.inputSchema.properties.pageIds)
+  assert.ok(read.inputSchema.properties.elementIds)
+  assert.ok(read.inputSchema.properties.region)
+  assert.ok(read.inputSchema.properties.changesSince)
   assert.deepEqual(update.inputSchema.properties.action.enum, ['write', 'review', 'commit_pending'])
   assert.ok(update.inputSchema.properties.reviewToken)
   assert.ok(update.inputSchema.properties.phase)
@@ -130,6 +136,12 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
     },
   })
   assert.equal(updatedFromNested.result.structuredContent.ok, true)
+  const scopedRead = await client.request('tools/call', {
+    name: 'draw2code_read',
+    arguments: { root, board: '共享画板', elementIds: ['shared-title'] },
+  })
+  assert.equal(scopedRead.result.structuredContent.ok, true)
+  assert.deepEqual(scopedRead.result.structuredContent.data.elements.map((element) => element.id), ['shared-title'])
   const listedFromWorkspace = await client.request('tools/call', { name: 'draw2code_list', arguments: { root } })
   assert.deepEqual(listedFromWorkspace.result.structuredContent.data.scenes.map((scene) => scene.name), ['共享画板'])
 

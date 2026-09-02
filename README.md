@@ -21,9 +21,9 @@ Vibe Coding 很容易从一句模糊需求直接跳到代码，结果往往是�
    - URL 就绪、daemon 启动和画布真正可见是三个不同状态；只有侧边栏实际显示后才报告“已经打开”。
 3. **Update：共同画原型**
    - `draw2code_update action=write` 把语义化低保真页面写入 Excalidraw，用户可以直接拖动、删除、改字或添加便签；`action=review` 使用写入返回的 `reviewToken` 记录可见复核，不改画板 revision，也不发布新的 reveal。
-   - Agent 更新前只需读取一次当前画板；`draw2code_read` 和 `draw2code_open` 会直接返回精确容量、当前 review/pending 状态及可执行的下一步参数，不需要搜索会话历史。已有 3 页以上画板的独立小改动不会被旧的首次代表页门禁拦截。
+   - Agent 更新前先读取当前画板索引；`draw2code_read` 默认只返回页面、关系、分层容量和当前 review/pending 状态，不把整板元素塞进上下文。需要内容时再按 `pageIds`、`elementIds`、区域或近期 revision 增量读取。已有 3 页以上画板的独立小改动不会被旧的首次代表页门禁拦截。
    - Create 会逐页给出核心任务、首屏信息、主操作和语义组件蓝图；3 个及以上页面返回结构化 `drawingPlan`，强制先生成代表页，复核通过后才生成其余页面。若 Agent 仍误提前提交其余页面，Update 会返回 `pendingUpdateId` 暂存该批 ops，复核后以 `action=commit_pending` 直接提交，避免整批 JSON 被丢弃和重新生成。
-   - 超过 512KB 的批次会在布局检查和写盘前返回 `reduce_update_scope`；更新结果同时返回工具内部各阶段耗时。更新经过落盘回读验证后，DSH 会自动打开画码并切换到目标画板；写入成功与原型完成分开报告，最终必须逐页完成视觉复核。
+   - 单次 ops 默认限制为 500 项或 512 KiB，超出时在布局检查前返回 `reduce_batch_size`；这与完整画板容量分开治理。画板不再设置正常业务容量：默认 32 MiB 仅进入 large 提示，256 MiB 只作为异常输入保险丝，且可配置提高；元素异常保护同步提高到 50,000。磁盘缩进、内联资源、元素数与 gzip checkpoint / delta 历史分别报告。真正触发保险丝时返回 `archive_or_split_board`，不会误导 Agent 反复缩小同一批次。
 4. **Generate：生成并验收前端**
    - `draw2code_generate` 开始前先用普通对话询问是否有参考风格图片；随后读取最新画板，让用户多选页面范围，并结合参考图或产品语义智能推荐整体视觉方向。
    - 原型不完整时先回画板修复；不会在 HTML 中偷偷补出未经确认的产品功能。
@@ -137,7 +137,9 @@ draw2code-pages/
 - `draw2code_update` 使用原子写入、revision 和回读验证，不直接修改未知文件；
 - 涉及用户手工修改的危险覆盖会返回确认状态，不会静默写入；
 - Draw2Code 不上传画板、brief 或生成页面到外部服务；
-- 单画板上限为 2000 个元素、512KB。
+- 画布不设日常业务上限；默认 50,000 元素与 256 MiB 规范内容只作为异常输入保险丝，32 MiB 仅提示按页面读取，均可通过环境变量提高；单次 Agent ops 另设 500 项 / 512 KiB 传输预算。
+
+异常保险丝与传输预算可独立调整：`DRAW2CODE_MAX_SCENE_BYTES`、`DRAW2CODE_SOFT_SCENE_BYTES`、`DRAW2CODE_MAX_ELEMENTS`、`DRAW2CODE_MAX_OPS_BYTES`、`DRAW2CODE_MAX_OPS`、`DRAW2CODE_MAX_VERSION_STORAGE_BYTES`。它们不是套餐或业务配额；日常大画板不会因为磁盘缩进或历史快照增长而突然不可写。
 
 ## 架构
 

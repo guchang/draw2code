@@ -15,6 +15,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { realpath } from 'node:fs/promises'
 import { join } from 'node:path'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import type { Draw2CodeStoreContext } from './store-context.ts'
 
 /** Directory inside the workspace root that holds all scenes. */
@@ -31,9 +32,15 @@ const GENERATION_ID_RE = /^generation-[0-9a-f-]{36}$/
 /** Generated frontend pages land here, one subdirectory per board. */
 export const PAGES_DIR = 'draw2code-pages'
 
-/** Caps: scene JSON bytes, element count, per-element bytes, text length. */
-export const MAX_SCENE_BYTES = 512 * 1024
-const MAX_ELEMENTS = 2000
+/** Defensive caps: canonical scene bytes, element count, per-element bytes, text length. */
+export const DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024
+export const DEFAULT_SOFT_SCENE_BYTES = 32 * 1024 * 1024
+export const DEFAULT_MAX_OPS_BYTES = 512 * 1024
+export const DEFAULT_MAX_OPS = 500
+export const DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024
+export const DEFAULT_MAX_ELEMENTS = 50_000
+/** @deprecated Use DEFAULT_MAX_SCENE_BYTES or SceneStore.capacityLimits(). */
+export const MAX_SCENE_BYTES = DEFAULT_MAX_SCENE_BYTES
 const MAX_ELEMENT_BYTES = 16 * 1024
 const MAX_TEXT_CHARS = 4000
 
@@ -146,10 +153,39 @@ export interface SceneFile {
 }
 
 export interface SceneCapacity {
+  /** @deprecated Alias of hardCapBytes retained for existing hosts. */
   maxBytes: number
+  hardCapBytes: number
+  softCapBytes: number
+  /** @deprecated Alias of canonicalBytes retained for existing hosts. */
   usedBytes: number
+  canonicalBytes: number
+  persistedBytes: number
+  persistedOverheadBytes: number
+  assetBytes: number
+  elementCount: number
+  maxElements: number
   remainingBytes: number
   utilizationPercent: number
+  status: 'normal' | 'large' | 'hard-cap-exceeded'
+}
+
+export interface SceneCapacityOptions {
+  hardCapBytes?: number
+  softCapBytes?: number
+  maxElements?: number
+  maxBatchBytes?: number
+  maxBatchOps?: number
+  maxVersionStorageBytes?: number
+}
+
+export interface SceneCapacityLimits {
+  hardCapBytes: number
+  softCapBytes: number
+  maxElements: number
+  maxBatchBytes: number
+  maxBatchOps: number
+  maxVersionStorageBytes: number
 }
 
 /** Read one scene (rev = file mtime in ms). */
@@ -179,11 +215,21 @@ export interface BoardReviewReceipt {
 
 /** Snapshot file basenames: <ms-timestamp>-<random6>.json (unique within a
  * burst of same-millisecond writes; ts is parsed from the leading digits). */
-const VERSION_FILE_RE = /^(\d{9,})-[0-9a-z]{1,8}\.json$/
+const VERSION_FILE_RE = /^(\d{9,})-[0-9a-z]{1,8}\.json(?:\.gz)?$/
 
 function versionStamp(entry: string): number | null {
   const match = VERSION_FILE_RE.exec(entry)
   return match === null ? null : Number(match[1])
+}
+
+function versionId(entry: string): string {
+  return entry.replace(/\.json(?:\.gz)?$/, '')
+}
+
+function decodeVersion(entry: string, bytes: Buffer, maxOutputLength: number): string {
+  return entry.endsWith('.gz')
+    ? gunzipSync(bytes, { maxOutputLength }).toString('utf8')
+    : bytes.toString('utf8')
 }
 
 /** One archived version of a scene (id = snapshot file basename). */
@@ -191,11 +237,80 @@ export interface VersionMeta {
   id: string
   ts: number
   elementCount: number
+  storedBytes: number
+  format: 'json' | 'gzip-json' | 'gzip-delta'
 }
 
 /** One archived scene, read-only until restoreVersion is explicitly called. */
 export interface VersionRead extends VersionMeta {
   scene: SceneFile
+}
+
+interface DeltaVersionPayload {
+  schema: 'draw2code-version-v1'
+  kind: 'delta'
+  baseId: string
+  depth: number
+  elementCount: number
+  deletedIds: string[]
+  upserts: Array<Record<string, unknown>>
+  elementOrder?: string[]
+  appState: SceneFile['appState']
+}
+
+function isDeltaVersionPayload(value: unknown): value is DeltaVersionPayload {
+  if (typeof value !== 'object' || value === null) return false
+  const payload = value as Record<string, unknown>
+  return payload.schema === 'draw2code-version-v1'
+    && payload.kind === 'delta'
+    && typeof payload.baseId === 'string'
+    && Number.isSafeInteger(payload.depth)
+    && Array.isArray(payload.deletedIds)
+    && Array.isArray(payload.upserts)
+    && (payload.elementOrder === undefined || Array.isArray(payload.elementOrder))
+}
+
+function buildVersionDelta(baseId: string, depth: number, before: SceneFile, after: SceneFile): DeltaVersionPayload {
+  const beforeById = new Map(before.elements.map((element) => [String(element.id ?? ''), element]))
+  const afterById = new Map(after.elements.map((element) => [String(element.id ?? ''), element]))
+  const deletedIds = [...beforeById.keys()].filter((id) => !afterById.has(id))
+  const upserts = after.elements.filter((element) => {
+    const id = String(element.id ?? '')
+    const previous = beforeById.get(id)
+    return previous === undefined || JSON.stringify(previous) !== JSON.stringify(element)
+  })
+  const beforeOrder = before.elements.map((element) => String(element.id ?? ''))
+  const afterOrder = after.elements.map((element) => String(element.id ?? ''))
+  return {
+    schema: 'draw2code-version-v1',
+    kind: 'delta',
+    baseId,
+    depth,
+    elementCount: after.elements.length,
+    deletedIds,
+    upserts,
+    ...(JSON.stringify(beforeOrder) === JSON.stringify(afterOrder) ? {} : { elementOrder: afterOrder }),
+    appState: after.appState,
+  }
+}
+
+function applyVersionDelta(base: SceneFile, delta: DeltaVersionPayload): SceneFile {
+  const byId = new Map(base.elements.map((element) => [String(element.id ?? ''), element]))
+  for (const id of delta.deletedIds) byId.delete(id)
+  for (const element of delta.upserts) byId.set(String(element.id ?? ''), element)
+  const elementOrder = delta.elementOrder ?? base.elements
+    .map((element) => String(element.id ?? ''))
+    .filter((id) => !delta.deletedIds.includes(id))
+  return {
+    type: 'excalidraw',
+    version: 2,
+    source: 'dsh-draw2code',
+    elements: elementOrder.flatMap((id) => {
+      const element = byId.get(id)
+      return element === undefined ? [] : [element]
+    }),
+    appState: delta.appState,
+  }
 }
 
 function err(code: string, message: string): { ok: false; error: SceneError } {
@@ -308,7 +423,7 @@ export function normalizeElement(input: unknown): Record<string, unknown> {
     // values are discarded, but a valid Excalidraw link must survive a
     // client round-trip through normalizeScene().
     link: typeof el.link === 'string' ? el.link : null,
-    updated: now,
+    updated: num(el.updated, now),
     seed: num(el.seed, randomSeed()),
     version: num(el.version, 1),
     versionNonce: num(el.versionNonce, randomSeed()),
@@ -484,11 +599,11 @@ export function reconcileBoundTextBindings(
 }
 
 /** Validate and normalize a whole scene object. */
-function normalizeScene(input: unknown): SceneFile {
+function normalizeScene(input: unknown, maxElements = DEFAULT_MAX_ELEMENTS): SceneFile {
   if (typeof input !== 'object' || input === null) throw new Error('scene must be an object')
   const raw = input as Record<string, unknown>
   if (!Array.isArray(raw.elements)) throw new Error('scene.elements must be an array')
-  if (raw.elements.length > MAX_ELEMENTS) throw new Error(`scene has more than ${MAX_ELEMENTS} elements`)
+  if (raw.elements.length > maxElements) throw new Error(`scene has more than ${maxElements} elements`)
   const appState = (typeof raw.appState === 'object' && raw.appState !== null ? raw.appState : {}) as Record<string, unknown>
   return {
     type: 'excalidraw',
@@ -512,19 +627,66 @@ function normalizeScene(input: unknown): SceneFile {
   }
 }
 
-function capacityForNormalizedScene(scene: SceneFile): SceneCapacity {
-  const usedBytes = Buffer.byteLength(JSON.stringify(scene, null, 2), 'utf8')
+function positiveInteger(value: unknown, fallback: number): number {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function resolvedCapacityLimits(options: SceneCapacityOptions = {}): SceneCapacityLimits {
+  const hardCapBytes = positiveInteger(
+    options.hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
+    DEFAULT_MAX_SCENE_BYTES,
+  )
+  const softDefault = Math.min(DEFAULT_SOFT_SCENE_BYTES, Math.max(1, Math.floor(hardCapBytes * 0.8)))
+  const requestedSoft = positiveInteger(options.softCapBytes ?? process.env.DRAW2CODE_SOFT_SCENE_BYTES, softDefault)
   return {
-    maxBytes: MAX_SCENE_BYTES,
-    usedBytes,
-    remainingBytes: MAX_SCENE_BYTES - usedBytes,
-    utilizationPercent: Math.round((usedBytes / MAX_SCENE_BYTES) * 1000) / 10,
+    hardCapBytes,
+    softCapBytes: Math.min(requestedSoft, hardCapBytes),
+    maxElements: positiveInteger(options.maxElements ?? process.env.DRAW2CODE_MAX_ELEMENTS, DEFAULT_MAX_ELEMENTS),
+    maxBatchBytes: positiveInteger(options.maxBatchBytes ?? process.env.DRAW2CODE_MAX_OPS_BYTES, DEFAULT_MAX_OPS_BYTES),
+    maxBatchOps: positiveInteger(options.maxBatchOps ?? process.env.DRAW2CODE_MAX_OPS, DEFAULT_MAX_OPS),
+    maxVersionStorageBytes: positiveInteger(
+      options.maxVersionStorageBytes ?? process.env.DRAW2CODE_MAX_VERSION_STORAGE_BYTES,
+      DEFAULT_MAX_VERSION_STORAGE_BYTES,
+    ),
   }
 }
 
-/** Exact persisted size after applying the same normalization as write(). */
-export function measureSceneCapacity(input: unknown): SceneCapacity {
-  return capacityForNormalizedScene(normalizeScene(input))
+function inlineAssetBytes(value: unknown, seen = new Set<object>()): number {
+  if (typeof value === 'string') return value.startsWith('data:') ? Buffer.byteLength(value, 'utf8') : 0
+  if (typeof value !== 'object' || value === null || seen.has(value)) return 0
+  seen.add(value)
+  if (Array.isArray(value)) return value.reduce((total, item) => total + inlineAssetBytes(item, seen), 0)
+  return Object.values(value).reduce((total, item) => total + inlineAssetBytes(item, seen), 0)
+}
+
+function capacityForNormalizedScene(scene: SceneFile, limits: SceneCapacityLimits): SceneCapacity {
+  const canonicalBytes = Buffer.byteLength(JSON.stringify(scene), 'utf8')
+  const persistedBytes = Buffer.byteLength(`${JSON.stringify(scene, null, 2)}\n`, 'utf8')
+  const assetBytes = inlineAssetBytes(scene.elements)
+  return {
+    maxBytes: limits.hardCapBytes,
+    hardCapBytes: limits.hardCapBytes,
+    softCapBytes: limits.softCapBytes,
+    usedBytes: canonicalBytes,
+    canonicalBytes,
+    persistedBytes,
+    persistedOverheadBytes: persistedBytes - canonicalBytes,
+    assetBytes,
+    elementCount: scene.elements.length,
+    maxElements: limits.maxElements,
+    remainingBytes: limits.hardCapBytes - canonicalBytes,
+    utilizationPercent: Math.round((canonicalBytes / limits.hardCapBytes) * 1000) / 10,
+    status: canonicalBytes > limits.hardCapBytes
+      ? 'hard-cap-exceeded'
+      : canonicalBytes >= limits.softCapBytes ? 'large' : 'normal',
+  }
+}
+
+/** Layered size metrics after applying the same normalization as write(). */
+export function measureSceneCapacity(input: unknown, options: SceneCapacityOptions = {}): SceneCapacity {
+  const limits = resolvedCapacityLimits(options)
+  return capacityForNormalizedScene(normalizeScene(input, limits.maxElements), limits)
 }
 
 /** An empty scene. */
@@ -558,7 +720,7 @@ function typeName(value: unknown): string {
  * string — some harness transports deliver json-typed args as text). Every
  * error is indexed and actionable so the agent can self-correct in one
  * retry. */
-function parseOps(input: unknown): SceneOp[] {
+function parseOps(input: unknown, maxEntries = DEFAULT_MAX_ELEMENTS): SceneOp[] {
   let source: unknown = input
   if (typeof source === 'string') {
     try {
@@ -570,7 +732,7 @@ function parseOps(input: unknown): SceneOp[] {
   if (!Array.isArray(source)) {
     throw new Error(`ops must be an array, got ${typeName(source)}. Large payloads sometimes arrive as a JSON string (auto-parsed); if you still see this, check the ops argument is an array of op objects`)
   }
-  if (source.length > MAX_ELEMENTS) throw new Error(`ops has ${source.length} entries (max ${MAX_ELEMENTS})`)
+  if (source.length > maxEntries) throw new Error(`ops has ${source.length} entries (max ${maxEntries})`)
   return source.map((raw, index) => {
     const where = `ops[${index}]`
     if (typeof raw !== 'object' || raw === null) throw new Error(`${where} must be an object, got ${typeName(raw)}`)
@@ -611,7 +773,19 @@ function parseOps(input: unknown): SceneOp[] {
  * The workspace-gated scene store.
  */
 export class SceneStore {
-  constructor(private readonly ctx: Draw2CodeStoreContext) {}
+  private readonly limits: SceneCapacityLimits
+
+  constructor(private readonly ctx: Draw2CodeStoreContext, options: SceneCapacityOptions = {}) {
+    this.limits = resolvedCapacityLimits(options)
+  }
+
+  capacityLimits(): SceneCapacityLimits {
+    return { ...this.limits }
+  }
+
+  measureCapacity(input: unknown): SceneCapacity {
+    return capacityForNormalizedScene(normalizeScene(input, this.limits.maxElements), this.limits)
+  }
 
   /** Gate a requested root: must resolve on disk and sit inside a registered workspace. */
   private async gate(root: string): Promise<SceneResult<string>> {
@@ -788,6 +962,74 @@ export class SceneStore {
     return join(this.dir(canonicalRoot), VERSIONS_DIR, name)
   }
 
+  private async readVersionEntry(
+    dir: string,
+    id: string,
+    seen = new Set<string>(),
+  ): Promise<{ scene: SceneFile; storedBytes: number; format: VersionMeta['format']; depth: number }> {
+    if (seen.has(id) || seen.size >= 16) throw new Error(`version delta chain is cyclic or too deep at ${id}`)
+    seen.add(id)
+    let entry = ''
+    let bytes: Buffer | undefined
+    for (const candidate of [`${id}.json.gz`, `${id}.json`]) {
+      try {
+        bytes = await readFile(join(dir, candidate))
+        entry = candidate
+        break
+      } catch { /* try the compatible format */ }
+    }
+    if (bytes === undefined) throw new Error(`version ${id} does not exist`)
+    if (bytes.byteLength > this.limits.hardCapBytes * 4) throw new Error(`version ${id} exceeds the compressed read cap`)
+    const raw = decodeVersion(entry, bytes, this.limits.hardCapBytes * 4)
+    if (Buffer.byteLength(raw, 'utf8') > this.limits.hardCapBytes * 4) throw new Error(`version ${id} exceeds the read cap`)
+    const parsed = JSON.parse(raw) as unknown
+    if (isDeltaVersionPayload(parsed)) {
+      const base = await this.readVersionEntry(dir, parsed.baseId, seen)
+      return {
+        scene: normalizeScene(applyVersionDelta(base.scene, parsed), this.limits.maxElements),
+        storedBytes: bytes.byteLength,
+        format: 'gzip-delta',
+        depth: parsed.depth,
+      }
+    }
+    return {
+      scene: normalizeScene(parsed, this.limits.maxElements),
+      storedBytes: bytes.byteLength,
+      format: entry.endsWith('.gz') ? 'gzip-json' : 'json',
+      depth: 0,
+    }
+  }
+
+  private async writeCompressedVersion(dir: string, entry: string, json: string): Promise<number> {
+    const target = join(dir, entry)
+    const temp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    const compressed = gzipSync(Buffer.from(json, 'utf8'), { level: 6 })
+    await writeFile(temp, compressed)
+    await rename(temp, target)
+    return compressed.byteLength
+  }
+
+  private async materializeDependentVersion(dir: string, removedEntry: string, nextEntry: string | undefined): Promise<void> {
+    if (nextEntry === undefined) return
+    const removedId = versionId(removedEntry)
+    const nextId = versionId(nextEntry)
+    let raw: string
+    try {
+      raw = decodeVersion(nextEntry, await readFile(join(dir, nextEntry)), this.limits.hardCapBytes * 4)
+    } catch {
+      return
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return
+    }
+    if (!isDeltaVersionPayload(parsed) || parsed.baseId !== removedId) return
+    const resolved = await this.readVersionEntry(dir, nextId)
+    await this.writeCompressedVersion(dir, `${nextId}.json.gz`, JSON.stringify(resolved.scene))
+  }
+
   /**
    * Snapshot the CURRENT disk scene of a board before it gets overwritten.
    * Skipped when the scene file is absent, when the incoming content is
@@ -819,13 +1061,46 @@ export class SceneStore {
     try {
       await mkdir(dir, { recursive: true })
       const suffix = Math.random().toString(36).slice(2, 8).padEnd(6, '0')
-      await writeFile(join(dir, `${Date.now()}-${suffix}.json`), `${raw}\n`, 'utf8')
-      if (entries.length + 1 > MAX_VERSIONS) {
-        const doomed = entries
-          .map((entry) => ({ entry, stamp: versionStamp(entry) ?? 0 }))
-          .sort((a, b) => a.stamp - b.stamp)
-          .slice(0, entries.length + 1 - MAX_VERSIONS)
-        await Promise.all(doomed.map(({ entry }) => rm(join(dir, entry), { force: true }).catch(() => undefined)))
+      const orderedEntries = [...entries].sort((a, b) => (versionStamp(a) ?? 0) - (versionStamp(b) ?? 0))
+      const latestStamp = versionStamp(orderedEntries.at(-1) ?? '') ?? 0
+      const entry = `${Math.max(Date.now(), latestStamp + 1)}-${suffix}.json.gz`
+      const latestEntry = orderedEntries.at(-1)
+      const currentScene = normalizeScene(JSON.parse(currentJson), this.limits.maxElements)
+      const fullCompressed = gzipSync(Buffer.from(currentJson, 'utf8'), { level: 6 })
+      let snapshotJson = currentJson
+      if (latestEntry !== undefined) {
+        try {
+          const latest = await this.readVersionEntry(dir, versionId(latestEntry))
+          if (latest.depth < 8) {
+            const delta = buildVersionDelta(versionId(latestEntry), latest.depth + 1, latest.scene, currentScene)
+            const deltaJson = JSON.stringify(delta)
+            const deltaCompressed = gzipSync(Buffer.from(deltaJson, 'utf8'), { level: 6 })
+            if (deltaCompressed.byteLength < fullCompressed.byteLength * 0.9) snapshotJson = deltaJson
+          }
+        } catch {
+          // A corrupt prior snapshot must not prevent a new independent full checkpoint.
+        }
+      }
+      await this.writeCompressedVersion(dir, entry, snapshotJson)
+      const stored = await Promise.all([...entries, entry].map(async (candidate) => ({
+        entry: candidate,
+        stamp: versionStamp(candidate) ?? 0,
+        bytes: (await stat(join(dir, candidate))).size,
+      })))
+      stored.sort((a, b) => a.stamp - b.stamp)
+      let totalBytes = stored.reduce((total, candidate) => total + candidate.bytes, 0)
+      while (stored.length > MAX_VERSIONS || totalBytes > this.limits.maxVersionStorageBytes) {
+        const doomed = stored.shift()
+        if (doomed === undefined) break
+        const next = stored[0]
+        await this.materializeDependentVersion(dir, doomed.entry, next?.entry)
+        if (next !== undefined) {
+          const rewrittenBytes = (await stat(join(dir, next.entry))).size
+          totalBytes += rewrittenBytes - next.bytes
+          next.bytes = rewrittenBytes
+        }
+        totalBytes -= doomed.bytes
+        await rm(join(dir, doomed.entry), { force: true }).catch(() => undefined)
       }
     } catch (error) {
       this.ctx.logger.warn('draw2code version snapshot failed: %o', error)
@@ -850,12 +1125,13 @@ export class SceneStore {
       const stamp = versionStamp(entry)
       if (stamp === null) continue
       try {
-        const raw = await readFile(join(dir, entry), 'utf8')
-        const elements = (JSON.parse(raw) as { elements?: unknown }).elements
+        const resolved = await this.readVersionEntry(dir, versionId(entry))
         versions.push({
-          id: entry.slice(0, -'.json'.length),
+          id: versionId(entry),
           ts: stamp,
-          elementCount: Array.isArray(elements) ? elements.length : 0,
+          elementCount: resolved.scene.elements.length,
+          storedBytes: resolved.storedBytes,
+          format: resolved.format,
         })
       } catch {
         // Unreadable snapshots are skipped, never fatal.
@@ -865,6 +1141,21 @@ export class SceneStore {
     return { ok: true, value: versions }
   }
 
+  /** Independent history-storage budget and current compressed usage. */
+  async versionStorage(root: string, name: string): Promise<SceneResult<{ versionCount: number; storedBytes: number; maxStoredBytes: number; maxVersions: number }>> {
+    const versions = await this.listVersions(root, name)
+    if (!versions.ok) return versions
+    return {
+      ok: true,
+      value: {
+        versionCount: versions.value.length,
+        storedBytes: versions.value.reduce((total, version) => total + version.storedBytes, 0),
+        maxStoredBytes: this.limits.maxVersionStorageBytes,
+        maxVersions: MAX_VERSIONS,
+      },
+    }
+  }
+
   /** Read one archived version without changing the current board. */
   async readVersion(root: string, name: string, id: string): Promise<SceneResult<VersionRead>> {
     const gated = await this.gate(root)
@@ -872,35 +1163,24 @@ export class SceneStore {
     const named = this.checkName(name)
     if (!named.ok) return named
     if (!/^\d{9,}-[0-9a-z]{1,8}$/.test(id)) return err('bad-version', `version id "${id}" is invalid`)
-    let raw: string
     try {
-      raw = await readFile(join(this.versionsDir(gated.value, named.value), `${id}.json`), 'utf8')
-    } catch {
-      return err('not-found', `version ${id} of scene "${named.value}" does not exist`)
+      const resolved = await this.readVersionEntry(this.versionsDir(gated.value, named.value), id)
+      return {
+        ok: true,
+        value: {
+          id,
+          ts: Number(id.split('-', 1)[0]),
+          elementCount: resolved.scene.elements.length,
+          storedBytes: resolved.storedBytes,
+          format: resolved.format,
+          scene: resolved.scene,
+        },
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes('does not exist')) return err('not-found', `version ${id} of scene "${named.value}" does not exist`)
+      return err('corrupt', `version ${id} of scene "${named.value}" cannot be restored: ${message}`)
     }
-    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
-      return err('too-large', `version ${id} of scene "${named.value}" exceeds the read cap`)
-    }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      return err('corrupt', `version ${id} of scene "${named.value}" is not valid JSON`)
-    }
-    const elements = (parsed as { elements?: unknown }).elements
-    const scene: SceneFile = {
-      type: 'excalidraw',
-      version: 2,
-      source: 'dsh-draw2code',
-      elements: Array.isArray(elements) ? elements as Array<Record<string, unknown>> : [],
-      appState: {
-        viewBackgroundColor:
-          typeof (parsed as { appState?: { viewBackgroundColor?: unknown } }).appState?.viewBackgroundColor === 'string'
-            ? (parsed as { appState: { viewBackgroundColor: string } }).appState.viewBackgroundColor
-            : '#ffffff',
-      },
-    }
-    return { ok: true, value: { id, ts: Number(id.split('-', 1)[0]), elementCount: scene.elements.length, scene } }
   }
 
   /** Roll a board back to one archived version (snapshotting the current
@@ -1051,7 +1331,7 @@ export class SceneStore {
     } catch {
       return err('not-found', `scene "${named.value}" does not exist`)
     }
-    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+    if (Buffer.byteLength(raw) > this.limits.hardCapBytes * 4) {
       return err('too-large', `scene "${named.value}" exceeds the read cap`)
     }
     let parsed: unknown
@@ -1084,14 +1364,15 @@ export class SceneStore {
     if (!named.ok) return named
     let scene: SceneFile
     try {
-      scene = normalizeScene(sceneInput)
+      scene = normalizeScene(sceneInput, this.limits.maxElements)
     } catch (error) {
       return err('bad-scene', error instanceof Error ? error.message : String(error))
     }
-    const json = JSON.stringify(scene, null, 2)
-    if (Buffer.byteLength(json, 'utf8') > MAX_SCENE_BYTES) {
-      return err('too-large', `scene exceeds ${MAX_SCENE_BYTES} bytes`)
+    const capacity = this.measureCapacity(scene)
+    if (capacity.canonicalBytes > capacity.hardCapBytes) {
+      return err('too-large', `scene canonical content is ${capacity.canonicalBytes} bytes and exceeds the ${capacity.hardCapBytes}-byte hard cap`)
     }
+    const json = JSON.stringify(scene, null, 2)
     const path = await this.scenePath(gated.value, named.value)
     return this.withWriteLock(path, async () => {
       if (typeof baseRev === 'number') {
@@ -1176,7 +1457,7 @@ export class SceneStore {
   async applyOps(root: string, name: string, opsInput: unknown, baseRev?: number): Promise<SceneResult<SceneMeta & { applied: number }>> {
     let ops: SceneOp[]
     try {
-      ops = parseOps(opsInput)
+      ops = parseOps(opsInput, this.limits.maxElements)
     } catch (error) {
       return err('bad-ops', error instanceof Error ? error.message : String(error))
     }
@@ -1199,7 +1480,7 @@ export class SceneStore {
     for (const op of ops) {
       if (op.op === 'replace') {
         try {
-          scene = normalizeScene(op.scene)
+          scene = normalizeScene(op.scene, this.limits.maxElements)
         } catch (error) {
           return err('bad-scene', error instanceof Error ? error.message : String(error))
         }
@@ -1245,8 +1526,8 @@ export class SceneStore {
       applied += 1
     }
 
-    if (scene.elements.length > MAX_ELEMENTS) {
-      return err('too-many', `scene would exceed ${MAX_ELEMENTS} elements`)
+    if (scene.elements.length > this.limits.maxElements) {
+      return err('too-many', `scene would exceed ${this.limits.maxElements} elements`)
     }
     // Complete Excalidraw's two-way text binding only on the agent mutation
     // path. Reads and ordinary client writes remain non-mutating; existing

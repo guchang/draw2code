@@ -11,7 +11,7 @@ description: Use Draw2Code or 画码 to clarify a product, draw or edit an edita
 
 - 用户说“我画好了 / 按我画的看看 / 根据这个示意继续”：先调用 `draw2code_read` 读取当前可见画板并复述页面、组件和交互关系；用户没有要求修改或生成时，不要自行调用 Update 或 Generate。
 - 用户明确要从零设计、创建或画一个新产品原型：调用 `draw2code_create action=start`，忠实传入 idea，并基于完整语义概括简短 `projectName`。
-- 用户修改现有原型：只调用一次 `draw2code_read`，先看 `capacity` 与 `continuation`，再用 `draw2code_update` 提交最小 ops。不要搜索会话历史寻找旧 token；只有当前任务确实在恢复同一批暂存写入时才执行 `continuation.nextAction`，新的独立小改动直接按最新画板继续。
+- 用户修改现有原型：先调用 `draw2code_read detail=index` 看 `capacity`、`continuation` 和页面 id；需要元素内容时只按目标 `pageIds`、`elementIds`、`region` 或 `changesSince` 继续读取，再用 `draw2code_update` 提交最小 ops。不要搜索会话历史寻找旧 token；只有当前任务确实在恢复同一批暂存写入时才执行 `continuation.nextAction`，新的独立小改动直接按最新画板继续。
 - 用户明确要求根据画板生成或重新生成页面：先用普通对话问一次“有没有参考风格的图片”；这句话不用宿主选择题。有图就先查看并概括，没有则记为 `none`，随后调用 `draw2code_generate action=start` 并传入 `referenceStyle`，继续它返回的状态机直到 completed。用户已经随请求附图时不要重复问。
 - 普通“帮我做一个 App / 写一个页面”且没有 Draw2Code、画码或明确画原型意图：不要使用本 Skill。
 
@@ -27,7 +27,7 @@ Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得
 
 `draw2code_update action=write` 返回冲突或 `requiresConfirmation=true` 时，只询问相关覆盖选择；用户确认后用相同 ops 和 `force=true` 重试。无冲突直接继续，不增加模板化确认。Create brief 包含 3 个及以上页面时，严格执行 confirmed 返回的 `drawingPlan`：本轮只为 `allowedPageIds` 生成代表页 ops，禁止预先生成整套大 JSON。写入后等真实画板消费 reveal，再用 `draw2code_update action=review`，传入返回的 `reviewToken`、`phase=representative`、`passed=true`、代表页 id 和可见观察；review 不传 ops，也不会改变 revision 或发布新 reveal。收到 `nextActionCode=write_remaining_pages` 后才生成 `remainingPageIds`。如果工具返回 `pendingUpdateId`，说明误提前提交的剩余页面 ops 已被保存；完成代表页复核后调用 `action=commit_pending` 并只传该 ID，禁止重新生成或重传大 JSON。全部页面可见后，再用 `action=review`、`phase=final` 覆盖所有页面 id。旧 `visualReview` 只为兼容，不在新流程手工拼 `boardRevision` 或 `revealRequestId`。
 
-`draw2code_read` 与 `draw2code_open` 返回精确 `usedBytes`、`remainingBytes` 和当前 `continuation`。生成大批 ops 前先看容量；若 Update 返回 `nextActionCode=reduce_update_scope`，按 `nextActionParams` 拆成较小的独立批次，不要重建原批 JSON。`update.timings` 只统计工具内部读盘、预检、写盘、验证和发布，不包含工具调用前的 Agent 推理时间。已有 3 页以上画板的独立小改动不需要重新完成首次代表页门禁。
+`draw2code_read` 默认 `detail=index`，只返回有界的页面索引、关系、分层容量和 `continuation`；要修改内容时，用索引中的 page id 再按 `pageIds` 读取，或用 `elementIds`、`region`、`changesSince` 获取最小范围，禁止习惯性 `detail=full`。单次 ops 超过预算会返回 `nextActionCode=reduce_batch_size`，按页面或独立改动拆批；完整画板达到硬上限会返回 `archive_or_split_board`，应归档或拆板，不能反复缩小同一批次。`update.timings` 只统计工具内部读盘、预检、写盘、验证和发布，不包含工具调用前的 Agent 推理时间。已有 3 页以上画板的独立小改动不需要重新完成首次代表页门禁。
 
 第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。MCP/Codex 默认返回 `presentation=handoff` 的短期 URL，不生成对话内嵌卡片；只有用户明确要求外部浏览器时才传 `presentation=browser`。不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
 

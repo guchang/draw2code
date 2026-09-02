@@ -26,7 +26,7 @@ import { daemonTool, makeDaemonProxyRoutes } from './daemon-adapter.ts'
 // Re-exported for tests and downstream tooling (the cordis loader only reads
 // name/inject/apply/Config, extra exports are ignored).
 export { ProjectStore } from './project-store.ts'
-export { SceneStore, normalizeElement, emptyScene, isPathInside } from './scene-store.ts'
+export { SceneStore, normalizeElement, emptyScene, isPathInside, measureSceneCapacity } from './scene-store.ts'
 export { inspectPrototypeLayout, inspectPrototypeQuality, formatLayoutIssues } from './layout.ts'
 export { makeRoutes } from './routes.ts'
 export { draw2codeCreateTool } from './create-tool.ts'
@@ -90,7 +90,18 @@ export function apply(ctx: Context): void {
   const localTools = [draw2codeListTool(store), draw2codeReadTool(store), draw2codeCreateTool(projects, store), draw2codeUpdateTool(store), draw2codeGenerateTool(store, projects)]
   const tools = [
     daemonTool(ctx, client, localTools[0], (args) => ({ type: 'list', root: String(args.root ?? '') })),
-    daemonTool(ctx, client, localTools[1], (args) => ({ type: 'read', root: String(args.root ?? ''), ...(typeof args.name === 'string' ? { board: args.name } : {}) })),
+    daemonTool(ctx, client, localTools[1], (args) => ({
+      type: 'read',
+      root: String(args.root ?? ''),
+      ...(typeof args.name === 'string' ? { board: args.name } : {}),
+      ...(args.detail === 'full' ? { detail: 'full' as const } : {}),
+      ...(Array.isArray(args.pageIds) ? { pageIds: args.pageIds.filter((item): item is string => typeof item === 'string') } : {}),
+      ...(Array.isArray(args.elementIds) ? { elementIds: args.elementIds.filter((item): item is string => typeof item === 'string') } : {}),
+      ...(typeof args.region === 'object' && args.region !== null ? { region: args.region as { x: number; y: number; width: number; height: number } } : {}),
+      ...(typeof args.changesSince === 'number' ? { changesSince: args.changesSince } : {}),
+      ...(typeof args.cursor === 'string' ? { cursor: args.cursor } : {}),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+    })),
     daemonTool(ctx, client, localTools[2], (args) => { const { root, ...input } = args; return { type: 'create', root: String(root ?? ''), input } }),
     daemonTool(ctx, client, localTools[3], (args) => {
       const visualReview = normalizeVisualReviewArg(args.visualReview)

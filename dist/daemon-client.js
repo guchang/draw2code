@@ -9,7 +9,10 @@ import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/prom
 
 // src/scene-store.ts
 var SCENE_DIR = "draw2code";
-var MAX_SCENE_BYTES = 512 * 1024;
+var DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024;
+var DEFAULT_SOFT_SCENE_BYTES = 32 * 1024 * 1024;
+var DEFAULT_MAX_OPS_BYTES = 512 * 1024;
+var DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024;
 var MAX_ELEMENT_BYTES = 16 * 1024;
 var CLIENT_ARCHIVE_INTERVAL_MS = 10 * 6e4;
 

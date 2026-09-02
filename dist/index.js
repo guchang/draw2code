@@ -11,14 +11,19 @@ import { join as join2 } from "node:path";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 var SCENE_DIR = "draw2code";
 var ACTIVE_BOARD_FILE = ".active-board.json";
 var GENERATIONS_DIR = ".generations";
 var GENERATE_SETTINGS_DIR = ".generate-settings";
 var GENERATION_ID_RE = /^generation-[0-9a-f-]{36}$/;
 var PAGES_DIR = "draw2code-pages";
-var MAX_SCENE_BYTES = 512 * 1024;
-var MAX_ELEMENTS = 2e3;
+var DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024;
+var DEFAULT_SOFT_SCENE_BYTES = 32 * 1024 * 1024;
+var DEFAULT_MAX_OPS_BYTES = 512 * 1024;
+var DEFAULT_MAX_OPS = 500;
+var DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024;
+var DEFAULT_MAX_ELEMENTS = 5e4;
 var MAX_ELEMENT_BYTES = 16 * 1024;
 var MAX_TEXT_CHARS = 4e3;
 var NAME_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5 -]{0,63}$/;
@@ -104,10 +109,60 @@ function semanticTextGeometry(element, container, alignment) {
     height
   };
 }
-var VERSION_FILE_RE = /^(\d{9,})-[0-9a-z]{1,8}\.json$/;
+var VERSION_FILE_RE = /^(\d{9,})-[0-9a-z]{1,8}\.json(?:\.gz)?$/;
 function versionStamp(entry) {
   const match = VERSION_FILE_RE.exec(entry);
   return match === null ? null : Number(match[1]);
+}
+function versionId(entry) {
+  return entry.replace(/\.json(?:\.gz)?$/, "");
+}
+function decodeVersion(entry, bytes, maxOutputLength) {
+  return entry.endsWith(".gz") ? gunzipSync(bytes, { maxOutputLength }).toString("utf8") : bytes.toString("utf8");
+}
+function isDeltaVersionPayload(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value;
+  return payload.schema === "draw2code-version-v1" && payload.kind === "delta" && typeof payload.baseId === "string" && Number.isSafeInteger(payload.depth) && Array.isArray(payload.deletedIds) && Array.isArray(payload.upserts) && (payload.elementOrder === void 0 || Array.isArray(payload.elementOrder));
+}
+function buildVersionDelta(baseId, depth, before, after) {
+  const beforeById = new Map(before.elements.map((element) => [String(element.id ?? ""), element]));
+  const afterById = new Map(after.elements.map((element) => [String(element.id ?? ""), element]));
+  const deletedIds = [...beforeById.keys()].filter((id) => !afterById.has(id));
+  const upserts = after.elements.filter((element) => {
+    const id = String(element.id ?? "");
+    const previous = beforeById.get(id);
+    return previous === void 0 || JSON.stringify(previous) !== JSON.stringify(element);
+  });
+  const beforeOrder = before.elements.map((element) => String(element.id ?? ""));
+  const afterOrder = after.elements.map((element) => String(element.id ?? ""));
+  return {
+    schema: "draw2code-version-v1",
+    kind: "delta",
+    baseId,
+    depth,
+    elementCount: after.elements.length,
+    deletedIds,
+    upserts,
+    ...JSON.stringify(beforeOrder) === JSON.stringify(afterOrder) ? {} : { elementOrder: afterOrder },
+    appState: after.appState
+  };
+}
+function applyVersionDelta(base, delta) {
+  const byId = new Map(base.elements.map((element) => [String(element.id ?? ""), element]));
+  for (const id of delta.deletedIds) byId.delete(id);
+  for (const element of delta.upserts) byId.set(String(element.id ?? ""), element);
+  const elementOrder = delta.elementOrder ?? base.elements.map((element) => String(element.id ?? "")).filter((id) => !delta.deletedIds.includes(id));
+  return {
+    type: "excalidraw",
+    version: 2,
+    source: "dsh-draw2code",
+    elements: elementOrder.flatMap((id) => {
+      const element = byId.get(id);
+      return element === void 0 ? [] : [element];
+    }),
+    appState: delta.appState
+  };
 }
 function err(code, message) {
   return { ok: false, error: { code, message } };
@@ -183,7 +238,7 @@ function normalizeElement(input) {
     // values are discarded, but a valid Excalidraw link must survive a
     // client round-trip through normalizeScene().
     link: typeof el.link === "string" ? el.link : null,
-    updated: now2,
+    updated: num4(el.updated, now2),
     seed: num4(el.seed, randomSeed()),
     version: num4(el.version, 1),
     versionNonce: num4(el.versionNonce, randomSeed()),
@@ -314,11 +369,11 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
     };
   });
 }
-function normalizeScene(input) {
+function normalizeScene(input, maxElements = DEFAULT_MAX_ELEMENTS) {
   if (typeof input !== "object" || input === null) throw new Error("scene must be an object");
   const raw = input;
   if (!Array.isArray(raw.elements)) throw new Error("scene.elements must be an array");
-  if (raw.elements.length > MAX_ELEMENTS) throw new Error(`scene has more than ${MAX_ELEMENTS} elements`);
+  if (raw.elements.length > maxElements) throw new Error(`scene has more than ${maxElements} elements`);
   const appState = typeof raw.appState === "object" && raw.appState !== null ? raw.appState : {};
   return {
     type: "excalidraw",
@@ -337,17 +392,60 @@ function normalizeScene(input) {
     }
   };
 }
-function capacityForNormalizedScene(scene) {
-  const usedBytes = Buffer.byteLength(JSON.stringify(scene, null, 2), "utf8");
+function positiveInteger(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+function resolvedCapacityLimits(options = {}) {
+  const hardCapBytes = positiveInteger(
+    options.hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
+    DEFAULT_MAX_SCENE_BYTES
+  );
+  const softDefault = Math.min(DEFAULT_SOFT_SCENE_BYTES, Math.max(1, Math.floor(hardCapBytes * 0.8)));
+  const requestedSoft = positiveInteger(options.softCapBytes ?? process.env.DRAW2CODE_SOFT_SCENE_BYTES, softDefault);
   return {
-    maxBytes: MAX_SCENE_BYTES,
-    usedBytes,
-    remainingBytes: MAX_SCENE_BYTES - usedBytes,
-    utilizationPercent: Math.round(usedBytes / MAX_SCENE_BYTES * 1e3) / 10
+    hardCapBytes,
+    softCapBytes: Math.min(requestedSoft, hardCapBytes),
+    maxElements: positiveInteger(options.maxElements ?? process.env.DRAW2CODE_MAX_ELEMENTS, DEFAULT_MAX_ELEMENTS),
+    maxBatchBytes: positiveInteger(options.maxBatchBytes ?? process.env.DRAW2CODE_MAX_OPS_BYTES, DEFAULT_MAX_OPS_BYTES),
+    maxBatchOps: positiveInteger(options.maxBatchOps ?? process.env.DRAW2CODE_MAX_OPS, DEFAULT_MAX_OPS),
+    maxVersionStorageBytes: positiveInteger(
+      options.maxVersionStorageBytes ?? process.env.DRAW2CODE_MAX_VERSION_STORAGE_BYTES,
+      DEFAULT_MAX_VERSION_STORAGE_BYTES
+    )
   };
 }
-function measureSceneCapacity(input) {
-  return capacityForNormalizedScene(normalizeScene(input));
+function inlineAssetBytes(value, seen = /* @__PURE__ */ new Set()) {
+  if (typeof value === "string") return value.startsWith("data:") ? Buffer.byteLength(value, "utf8") : 0;
+  if (typeof value !== "object" || value === null || seen.has(value)) return 0;
+  seen.add(value);
+  if (Array.isArray(value)) return value.reduce((total, item) => total + inlineAssetBytes(item, seen), 0);
+  return Object.values(value).reduce((total, item) => total + inlineAssetBytes(item, seen), 0);
+}
+function capacityForNormalizedScene(scene, limits) {
+  const canonicalBytes = Buffer.byteLength(JSON.stringify(scene), "utf8");
+  const persistedBytes = Buffer.byteLength(`${JSON.stringify(scene, null, 2)}
+`, "utf8");
+  const assetBytes = inlineAssetBytes(scene.elements);
+  return {
+    maxBytes: limits.hardCapBytes,
+    hardCapBytes: limits.hardCapBytes,
+    softCapBytes: limits.softCapBytes,
+    usedBytes: canonicalBytes,
+    canonicalBytes,
+    persistedBytes,
+    persistedOverheadBytes: persistedBytes - canonicalBytes,
+    assetBytes,
+    elementCount: scene.elements.length,
+    maxElements: limits.maxElements,
+    remainingBytes: limits.hardCapBytes - canonicalBytes,
+    utilizationPercent: Math.round(canonicalBytes / limits.hardCapBytes * 1e3) / 10,
+    status: canonicalBytes > limits.hardCapBytes ? "hard-cap-exceeded" : canonicalBytes >= limits.softCapBytes ? "large" : "normal"
+  };
+}
+function measureSceneCapacity(input, options = {}) {
+  const limits = resolvedCapacityLimits(options);
+  return capacityForNormalizedScene(normalizeScene(input, limits.maxElements), limits);
 }
 function emptyScene() {
   return {
@@ -365,7 +463,7 @@ function typeName(value) {
   if (typeof value === "string") return `string(${value.length} chars)`;
   return typeof value;
 }
-function parseOps(input) {
+function parseOps(input, maxEntries = DEFAULT_MAX_ELEMENTS) {
   let source = input;
   if (typeof source === "string") {
     try {
@@ -377,7 +475,7 @@ function parseOps(input) {
   if (!Array.isArray(source)) {
     throw new Error(`ops must be an array, got ${typeName(source)}. Large payloads sometimes arrive as a JSON string (auto-parsed); if you still see this, check the ops argument is an array of op objects`);
   }
-  if (source.length > MAX_ELEMENTS) throw new Error(`ops has ${source.length} entries (max ${MAX_ELEMENTS})`);
+  if (source.length > maxEntries) throw new Error(`ops has ${source.length} entries (max ${maxEntries})`);
   return source.map((raw, index) => {
     const where = `ops[${index}]`;
     if (typeof raw !== "object" || raw === null) throw new Error(`${where} must be an object, got ${typeName(raw)}`);
@@ -412,8 +510,16 @@ function parseOps(input) {
   });
 }
 var SceneStore = class {
-  constructor(ctx) {
+  constructor(ctx, options = {}) {
     this.ctx = ctx;
+    this.limits = resolvedCapacityLimits(options);
+  }
+  limits;
+  capacityLimits() {
+    return { ...this.limits };
+  }
+  measureCapacity(input) {
+    return capacityForNormalizedScene(normalizeScene(input, this.limits.maxElements), this.limits);
   }
   /** Gate a requested root: must resolve on disk and sit inside a registered workspace. */
   async gate(root) {
@@ -576,6 +682,68 @@ var SceneStore = class {
   versionsDir(canonicalRoot, name2) {
     return join(this.dir(canonicalRoot), VERSIONS_DIR, name2);
   }
+  async readVersionEntry(dir, id, seen = /* @__PURE__ */ new Set()) {
+    if (seen.has(id) || seen.size >= 16) throw new Error(`version delta chain is cyclic or too deep at ${id}`);
+    seen.add(id);
+    let entry = "";
+    let bytes;
+    for (const candidate of [`${id}.json.gz`, `${id}.json`]) {
+      try {
+        bytes = await readFile(join(dir, candidate));
+        entry = candidate;
+        break;
+      } catch {
+      }
+    }
+    if (bytes === void 0) throw new Error(`version ${id} does not exist`);
+    if (bytes.byteLength > this.limits.hardCapBytes * 4) throw new Error(`version ${id} exceeds the compressed read cap`);
+    const raw = decodeVersion(entry, bytes, this.limits.hardCapBytes * 4);
+    if (Buffer.byteLength(raw, "utf8") > this.limits.hardCapBytes * 4) throw new Error(`version ${id} exceeds the read cap`);
+    const parsed = JSON.parse(raw);
+    if (isDeltaVersionPayload(parsed)) {
+      const base = await this.readVersionEntry(dir, parsed.baseId, seen);
+      return {
+        scene: normalizeScene(applyVersionDelta(base.scene, parsed), this.limits.maxElements),
+        storedBytes: bytes.byteLength,
+        format: "gzip-delta",
+        depth: parsed.depth
+      };
+    }
+    return {
+      scene: normalizeScene(parsed, this.limits.maxElements),
+      storedBytes: bytes.byteLength,
+      format: entry.endsWith(".gz") ? "gzip-json" : "json",
+      depth: 0
+    };
+  }
+  async writeCompressedVersion(dir, entry, json) {
+    const target = join(dir, entry);
+    const temp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const compressed = gzipSync(Buffer.from(json, "utf8"), { level: 6 });
+    await writeFile(temp, compressed);
+    await rename(temp, target);
+    return compressed.byteLength;
+  }
+  async materializeDependentVersion(dir, removedEntry, nextEntry) {
+    if (nextEntry === void 0) return;
+    const removedId = versionId(removedEntry);
+    const nextId = versionId(nextEntry);
+    let raw;
+    try {
+      raw = decodeVersion(nextEntry, await readFile(join(dir, nextEntry)), this.limits.hardCapBytes * 4);
+    } catch {
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!isDeltaVersionPayload(parsed) || parsed.baseId !== removedId) return;
+    const resolved = await this.readVersionEntry(dir, nextId);
+    await this.writeCompressedVersion(dir, `${nextId}.json.gz`, JSON.stringify(resolved.scene));
+  }
   /**
    * Snapshot the CURRENT disk scene of a board before it gets overwritten.
    * Skipped when the scene file is absent, when the incoming content is
@@ -608,11 +776,45 @@ var SceneStore = class {
     try {
       await mkdir(dir, { recursive: true });
       const suffix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-      await writeFile(join(dir, `${Date.now()}-${suffix}.json`), `${raw}
-`, "utf8");
-      if (entries.length + 1 > MAX_VERSIONS) {
-        const doomed = entries.map((entry) => ({ entry, stamp: versionStamp(entry) ?? 0 })).sort((a, b) => a.stamp - b.stamp).slice(0, entries.length + 1 - MAX_VERSIONS);
-        await Promise.all(doomed.map(({ entry }) => rm(join(dir, entry), { force: true }).catch(() => void 0)));
+      const orderedEntries = [...entries].sort((a, b) => (versionStamp(a) ?? 0) - (versionStamp(b) ?? 0));
+      const latestStamp = versionStamp(orderedEntries.at(-1) ?? "") ?? 0;
+      const entry = `${Math.max(Date.now(), latestStamp + 1)}-${suffix}.json.gz`;
+      const latestEntry = orderedEntries.at(-1);
+      const currentScene = normalizeScene(JSON.parse(currentJson), this.limits.maxElements);
+      const fullCompressed = gzipSync(Buffer.from(currentJson, "utf8"), { level: 6 });
+      let snapshotJson = currentJson;
+      if (latestEntry !== void 0) {
+        try {
+          const latest = await this.readVersionEntry(dir, versionId(latestEntry));
+          if (latest.depth < 8) {
+            const delta = buildVersionDelta(versionId(latestEntry), latest.depth + 1, latest.scene, currentScene);
+            const deltaJson = JSON.stringify(delta);
+            const deltaCompressed = gzipSync(Buffer.from(deltaJson, "utf8"), { level: 6 });
+            if (deltaCompressed.byteLength < fullCompressed.byteLength * 0.9) snapshotJson = deltaJson;
+          }
+        } catch {
+        }
+      }
+      await this.writeCompressedVersion(dir, entry, snapshotJson);
+      const stored = await Promise.all([...entries, entry].map(async (candidate) => ({
+        entry: candidate,
+        stamp: versionStamp(candidate) ?? 0,
+        bytes: (await stat(join(dir, candidate))).size
+      })));
+      stored.sort((a, b) => a.stamp - b.stamp);
+      let totalBytes = stored.reduce((total, candidate) => total + candidate.bytes, 0);
+      while (stored.length > MAX_VERSIONS || totalBytes > this.limits.maxVersionStorageBytes) {
+        const doomed = stored.shift();
+        if (doomed === void 0) break;
+        const next = stored[0];
+        await this.materializeDependentVersion(dir, doomed.entry, next?.entry);
+        if (next !== void 0) {
+          const rewrittenBytes = (await stat(join(dir, next.entry))).size;
+          totalBytes += rewrittenBytes - next.bytes;
+          next.bytes = rewrittenBytes;
+        }
+        totalBytes -= doomed.bytes;
+        await rm(join(dir, doomed.entry), { force: true }).catch(() => void 0);
       }
     } catch (error2) {
       this.ctx.logger.warn("draw2code version snapshot failed: %o", error2);
@@ -636,18 +838,33 @@ var SceneStore = class {
       const stamp = versionStamp(entry);
       if (stamp === null) continue;
       try {
-        const raw = await readFile(join(dir, entry), "utf8");
-        const elements = JSON.parse(raw).elements;
+        const resolved = await this.readVersionEntry(dir, versionId(entry));
         versions.push({
-          id: entry.slice(0, -".json".length),
+          id: versionId(entry),
           ts: stamp,
-          elementCount: Array.isArray(elements) ? elements.length : 0
+          elementCount: resolved.scene.elements.length,
+          storedBytes: resolved.storedBytes,
+          format: resolved.format
         });
       } catch {
       }
     }
     versions.sort((a, b) => b.ts - a.ts);
     return { ok: true, value: versions };
+  }
+  /** Independent history-storage budget and current compressed usage. */
+  async versionStorage(root, name2) {
+    const versions = await this.listVersions(root, name2);
+    if (!versions.ok) return versions;
+    return {
+      ok: true,
+      value: {
+        versionCount: versions.value.length,
+        storedBytes: versions.value.reduce((total, version) => total + version.storedBytes, 0),
+        maxStoredBytes: this.limits.maxVersionStorageBytes,
+        maxVersions: MAX_VERSIONS
+      }
+    };
   }
   /** Read one archived version without changing the current board. */
   async readVersion(root, name2, id) {
@@ -656,32 +873,24 @@ var SceneStore = class {
     const named = this.checkName(name2);
     if (!named.ok) return named;
     if (!/^\d{9,}-[0-9a-z]{1,8}$/.test(id)) return err("bad-version", `version id "${id}" is invalid`);
-    let raw;
     try {
-      raw = await readFile(join(this.versionsDir(gated.value, named.value), `${id}.json`), "utf8");
-    } catch {
-      return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
+      const resolved = await this.readVersionEntry(this.versionsDir(gated.value, named.value), id);
+      return {
+        ok: true,
+        value: {
+          id,
+          ts: Number(id.split("-", 1)[0]),
+          elementCount: resolved.scene.elements.length,
+          storedBytes: resolved.storedBytes,
+          format: resolved.format,
+          scene: resolved.scene
+        }
+      };
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      if (message.includes("does not exist")) return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
+      return err("corrupt", `version ${id} of scene "${named.value}" cannot be restored: ${message}`);
     }
-    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
-      return err("too-large", `version ${id} of scene "${named.value}" exceeds the read cap`);
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return err("corrupt", `version ${id} of scene "${named.value}" is not valid JSON`);
-    }
-    const elements = parsed.elements;
-    const scene = {
-      type: "excalidraw",
-      version: 2,
-      source: "dsh-draw2code",
-      elements: Array.isArray(elements) ? elements : [],
-      appState: {
-        viewBackgroundColor: typeof parsed.appState?.viewBackgroundColor === "string" ? parsed.appState.viewBackgroundColor : "#ffffff"
-      }
-    };
-    return { ok: true, value: { id, ts: Number(id.split("-", 1)[0]), elementCount: scene.elements.length, scene } };
   }
   /** Roll a board back to one archived version (snapshotting the current
    * state first, so the rollback itself is reversible). */
@@ -822,7 +1031,7 @@ var SceneStore = class {
     } catch {
       return err("not-found", `scene "${named.value}" does not exist`);
     }
-    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+    if (Buffer.byteLength(raw) > this.limits.hardCapBytes * 4) {
       return err("too-large", `scene "${named.value}" exceeds the read cap`);
     }
     let parsed;
@@ -851,14 +1060,15 @@ var SceneStore = class {
     if (!named.ok) return named;
     let scene;
     try {
-      scene = normalizeScene(sceneInput);
+      scene = normalizeScene(sceneInput, this.limits.maxElements);
     } catch (error2) {
       return err("bad-scene", error2 instanceof Error ? error2.message : String(error2));
     }
-    const json = JSON.stringify(scene, null, 2);
-    if (Buffer.byteLength(json, "utf8") > MAX_SCENE_BYTES) {
-      return err("too-large", `scene exceeds ${MAX_SCENE_BYTES} bytes`);
+    const capacity = this.measureCapacity(scene);
+    if (capacity.canonicalBytes > capacity.hardCapBytes) {
+      return err("too-large", `scene canonical content is ${capacity.canonicalBytes} bytes and exceeds the ${capacity.hardCapBytes}-byte hard cap`);
     }
+    const json = JSON.stringify(scene, null, 2);
     const path = await this.scenePath(gated.value, named.value);
     return this.withWriteLock(path, async () => {
       if (typeof baseRev === "number") {
@@ -927,7 +1137,7 @@ var SceneStore = class {
   async applyOps(root, name2, opsInput, baseRev) {
     let ops;
     try {
-      ops = parseOps(opsInput);
+      ops = parseOps(opsInput, this.limits.maxElements);
     } catch (error2) {
       return err("bad-ops", error2 instanceof Error ? error2.message : String(error2));
     }
@@ -947,7 +1157,7 @@ var SceneStore = class {
     for (const op of ops) {
       if (op.op === "replace") {
         try {
-          scene = normalizeScene(op.scene);
+          scene = normalizeScene(op.scene, this.limits.maxElements);
         } catch (error2) {
           return err("bad-scene", error2 instanceof Error ? error2.message : String(error2));
         }
@@ -987,8 +1197,8 @@ var SceneStore = class {
       }
       applied += 1;
     }
-    if (scene.elements.length > MAX_ELEMENTS) {
-      return err("too-many", `scene would exceed ${MAX_ELEMENTS} elements`);
+    if (scene.elements.length > this.limits.maxElements) {
+      return err("too-many", `scene would exceed ${this.limits.maxElements} elements`);
     }
     scene = {
       ...scene,
@@ -3836,6 +4046,9 @@ function text2(value) {
   return [{ type: "text", text: value }];
 }
 var MAX_ELEMENTS_JSON = 120 * 1024;
+var MAX_READ_DIAGNOSTICS = 20;
+var MAX_READ_PAGE_INDEX = 200;
+var MAX_READ_RELATIONS = 200;
 var SNAPSHOT_CACHE_MAX = 40;
 var DEFAULT_BOARD = "prototype";
 function str3(value) {
@@ -3848,6 +4061,7 @@ function customData3(value) {
   return typeof value?.customData === "object" && value.customData !== null ? value.customData : {};
 }
 var boardCache = /* @__PURE__ */ new Map();
+var boardHistoryCache = /* @__PURE__ */ new Map();
 var pendingReviewWrites = /* @__PURE__ */ new Map();
 var PENDING_REVIEW_WRITE_MAX = 20;
 var PENDING_REVIEW_WRITE_TTL_MS = 10 * 6e4;
@@ -3872,12 +4086,14 @@ function pendingReviewWriteFor(root, board, baseRev) {
   return [...pendingReviewWrites.values()].filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
 async function boardOperationalState(store, root, board, revision, scene) {
-  const [reveal, representativeReview] = await Promise.all([
+  const [reveal, representativeReview, history] = await Promise.all([
     store.getBoardReveal(root),
-    store.getBoardReview(root, board, "representative")
+    store.getBoardReview(root, board, "representative"),
+    store.versionStorage(root, board)
   ]);
   if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
   if (!representativeReview.ok) throw new Error(`${representativeReview.error.code}: ${representativeReview.error.message}`);
+  if (!history.ok) throw new Error(`${history.error.code}: ${history.error.message}`);
   const currentReveal = reveal.value.request !== null && reveal.value.request.board === board && Math.abs(reveal.value.request.revision - revision) <= 0.5 ? reveal.value.request : null;
   const currentRepresentativeReview = representativeReview.value.receipt !== null && Math.abs(representativeReview.value.receipt.revision - revision) <= 0.5 ? representativeReview.value.receipt : null;
   const pendingWrite = pendingReviewWriteFor(root, board, revision);
@@ -3916,7 +4132,8 @@ async function boardOperationalState(store, root, board, revision, scene) {
     continuation2 = { status: "idle", nextAction: null };
   }
   return {
-    capacity: measureSceneCapacity(scene),
+    capacity: store.measureCapacity(scene),
+    history: history.value,
     continuation: continuation2
   };
 }
@@ -4233,6 +4450,23 @@ function layoutWarnings(elements) {
     message: item.message
   }));
 }
+function boundedPrototypeQuality(report) {
+  const pages = report.pages.slice(0, MAX_READ_PAGE_INDEX).map((page) => ({
+    ...page,
+    warningCount: page.warnings.length,
+    warnings: page.warnings.slice(0, MAX_READ_DIAGNOSTICS),
+    warningsTruncated: page.warnings.length > MAX_READ_DIAGNOSTICS
+  }));
+  return {
+    ...report,
+    warningCount: report.warnings.length,
+    warnings: report.warnings.slice(0, MAX_READ_DIAGNOSTICS),
+    warningsTruncated: report.warnings.length > MAX_READ_DIAGNOSTICS,
+    pageCount: report.pages.length,
+    pages,
+    pagesTruncated: report.pages.length > MAX_READ_PAGE_INDEX
+  };
+}
 function prototypeQualitySummary(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const qualityScore = typeof value.qualityScore === "number" ? value.qualityScore : 0;
@@ -4285,7 +4519,9 @@ function computeChangeIds(before, after) {
     }
     const beforeElement = beforeMap.get(id);
     if (beforeElement === void 0) continue;
-    if (JSON.stringify(beforeElement) !== JSON.stringify(afterElement)) modified.add(id);
+    const { updated: _beforeUpdated, ...beforeComparable } = beforeElement;
+    const { updated: _afterUpdated, ...afterComparable } = afterElement;
+    if (JSON.stringify(beforeComparable) !== JSON.stringify(afterComparable)) modified.add(id);
   }
   for (const [id] of beforeMap.entries()) {
     if (!afterMap.has(id)) removed.add(id);
@@ -4465,11 +4701,60 @@ function buildUpdatePlan(currentElements, ops, safeMode, touchedManualIds, hasSn
 }
 function rememberSnapshot(key, snapshot) {
   boardCache.set(key, snapshot);
+  const history = boardHistoryCache.get(key) ?? [];
+  const withoutSameRevision = history.filter((item) => Math.abs(item.rev - snapshot.rev) > 0.5);
+  boardHistoryCache.set(key, [...withoutSameRevision, snapshot].slice(-6));
   while (boardCache.size > SNAPSHOT_CACHE_MAX) {
     const first = boardCache.keys().next();
     if (first.done) break;
     boardCache.delete(first.value);
+    boardHistoryCache.delete(first.value);
   }
+}
+function snapshotAtRevision(key, revision) {
+  return (boardHistoryCache.get(key) ?? []).find((snapshot) => Math.abs(snapshot.rev - revision) <= 0.5);
+}
+function parseStringArray(value, field) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      throw new Error(`read-scope-invalid: ${field} must be a string array`);
+    }
+  }
+  if (source === void 0) return [];
+  if (!Array.isArray(source) || source.some((item) => typeof item !== "string")) {
+    throw new Error(`read-scope-invalid: ${field} must be a string array`);
+  }
+  return [...new Set(source.map((item) => item.trim()).filter(Boolean))];
+}
+function parseReadRegion(value) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      throw new Error("read-scope-invalid: region must be {x,y,width,height}");
+    }
+  }
+  if (source === void 0) return null;
+  if (typeof source !== "object" || source === null) throw new Error("read-scope-invalid: region must be {x,y,width,height}");
+  const record = source;
+  const values = ["x", "y", "width", "height"].map((field) => record[field]);
+  if (values.some((item) => typeof item !== "number" || !Number.isFinite(item))) {
+    throw new Error("read-scope-invalid: region x/y/width/height must be finite numbers");
+  }
+  const [x, y, width, height] = values;
+  if (width <= 0 || height <= 0) throw new Error("read-scope-invalid: region width/height must be positive");
+  return { x, y, width, height };
+}
+function intersectsRegion(element, region) {
+  const left = num3(element.x);
+  const top = num3(element.y);
+  const right = left + Math.max(0, num3(element.width));
+  const bottom = top + Math.max(0, num3(element.height));
+  return right >= region.x && left <= region.x + region.width && bottom >= region.y && top <= region.y + region.height;
 }
 function describeElement(el) {
   const type = str3(el.type);
@@ -4531,10 +4816,17 @@ function draw2codeListTool(store) {
 function draw2codeReadTool(store) {
   return defineTool2({
     name: "draw2code_read",
-    description: "Read one \u753B\u7801 prototype board: current elements, exact scene capacity, and continuation with opaque review/pending IDs plus executable next-action arguments. Call this once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. A new independent small edit may proceed even when an older review is available; only resume continuation when it belongs to the user's current requested batch. Also required before generating frontend pages. Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
+    description: "Read one \u753B\u7801 prototype board. The default detail=index is bounded: it returns page metadata, relations, layered capacity, quality, and continuation without serializing every element. Use detail=full only for a genuinely small board, or select content with pageIds, elementIds, region, or changesSince. Scoped results are byte-capped and paginated with nextCursor. Call once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. Also required before generating frontend pages. Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
-      name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." }
+      name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." },
+      detail: { type: "string", enum: ["index", "full"], description: "index (default) returns bounded board/page metadata. full explicitly requests all elements, still subject to byte pagination." },
+      pageIds: { type: "array", items: { type: "string" }, description: "Return elements belonging to these prototype page ids." },
+      elementIds: { type: "array", items: { type: "string" }, description: "Return these exact element ids." },
+      region: { type: "json", description: "Return elements intersecting canvas bounds {x,y,width,height}." },
+      changesSince: { type: "number", description: "Return elements added or modified since a revision retained by this running host, plus deletedElementIds." },
+      cursor: { type: "string", description: "Opaque continuation cursor from a previous scoped read." },
+      limit: { type: "number", description: "Maximum selected elements in this page (default 150, max 250)." }
     },
     output: {
       schema: {
@@ -4549,13 +4841,17 @@ function draw2codeReadTool(store) {
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
           prototypeQuality: { type: "json", required: true },
           capacity: { type: "json", required: true },
+          history: { type: "json", required: true },
           continuation: { type: "json", required: true },
           pageNames: { type: "array", items: { type: "string" }, required: true },
           pages: { type: "array", items: { type: "json" }, required: true },
           pageRelations: { type: "array", items: { type: "json" }, required: true },
           frameNames: { type: "array", items: { type: "string" }, required: true },
           file: { type: "string", required: true },
-          elements: { type: "json", required: true }
+          elements: { type: "json", required: true },
+          selection: { type: "json", required: true },
+          deletedElementIds: { type: "array", items: { type: "string" }, required: true },
+          nextCursor: { type: "string" }
         }
       },
       render: (_args, value) => text2(
@@ -4584,26 +4880,108 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         ...pageMembershipWarnings(scene.elements, pages)
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
       const prototypeQuality = inspectPrototypeQuality(scene.elements);
+      const returnedPages = pages.slice(0, MAX_READ_PAGE_INDEX);
+      const returnedRelations = relations.slice(0, MAX_READ_RELATIONS);
+      const returnedWarnings = qualityWarnings.slice(0, MAX_READ_DIAGNOSTICS);
       const operational = await boardOperationalState(store, args.root, target.name, rev, scene);
-      const summary = scene.elements.map(describeElement).join("\n");
-      const elementsJson = JSON.stringify(scene.elements);
-      const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
-      const payload = elementsBytes <= MAX_ELEMENTS_JSON ? scene.elements : [{ id: "__too_large__", type: "text", text: `elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); read the file directly instead` }];
+      const requestedPageIds = parseStringArray(args.pageIds, "pageIds");
+      const requestedElementIds = parseStringArray(args.elementIds, "elementIds");
+      const region = parseReadRegion(args.region);
+      const key = makeKey(args.root, target.name);
+      const hasSelectors = requestedPageIds.length > 0 || requestedElementIds.length > 0 || region !== null || typeof args.changesSince === "number";
+      const selectedIds = new Set(requestedElementIds);
+      const missingPageIds = requestedPageIds.filter((id) => !pages.some((page) => page.id === id));
+      for (const page of pages.filter((candidate) => requestedPageIds.includes(candidate.id))) {
+        selectedIds.add(page.id);
+        for (const id of pageElementIds(page, scene.elements, pages)) selectedIds.add(id);
+        for (const label of scene.elements.filter((element) => customData3(element).pageId === page.id)) selectedIds.add(str3(label.id));
+      }
+      if (region !== null) {
+        for (const element of scene.elements) if (intersectsRegion(element, region)) selectedIds.add(str3(element.id));
+      }
+      let deletedElementIds = [];
+      let changeTracking = { status: "not-requested" };
+      if (typeof args.changesSince === "number") {
+        const previous = Math.abs(args.changesSince - rev) <= 0.5 ? { rev, elements: scene.elements } : snapshotAtRevision(key, args.changesSince);
+        if (previous === void 0) {
+          changeTracking = {
+            status: "unavailable",
+            requestedRevision: args.changesSince,
+            availableRevisions: (boardHistoryCache.get(key) ?? []).map((snapshot) => snapshot.rev),
+            nextAction: "\u91CD\u65B0\u8BFB\u53D6\u76EE\u6807 pageIds \u6216 elementIds\uFF1BchangesSince \u53EA\u4FDD\u8BC1\u5F53\u524D\u5BBF\u4E3B\u8FD1\u671F\u4FEE\u8BA2"
+          };
+        } else {
+          const delta = computeChangeIds(previous.elements, scene.elements);
+          for (const id of delta.added) selectedIds.add(id);
+          for (const id of delta.modified) selectedIds.add(id);
+          deletedElementIds = [...delta.removed];
+          changeTracking = {
+            status: "available",
+            requestedRevision: args.changesSince,
+            added: [...delta.added],
+            modified: [...delta.modified],
+            removed: deletedElementIds
+          };
+        }
+      }
+      const selected = args.detail === "full" && !hasSelectors ? scene.elements : hasSelectors ? scene.elements.filter((element) => selectedIds.has(str3(element.id))) : [];
+      const cursor = args.cursor === void 0 ? 0 : Number.parseInt(args.cursor, 10);
+      if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("read-scope-invalid: cursor is invalid");
+      const requestedLimit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.floor(args.limit) : 150;
+      const limit = Math.max(1, Math.min(250, requestedLimit));
+      const payload = [];
+      let nextOffset = cursor;
+      while (nextOffset < selected.length && payload.length < limit) {
+        const candidate = [...payload, selected[nextOffset]];
+        if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > MAX_ELEMENTS_JSON) break;
+        payload.push(selected[nextOffset]);
+        nextOffset += 1;
+      }
+      const nextCursor = nextOffset < selected.length ? String(nextOffset) : void 0;
+      const summary = payload.length > 0 ? payload.map(describeElement).join("\n") : `index only: ${pages.length} pages, ${scene.elements.length} elements; use pageIds, elementIds, region, changesSince, or detail=full to fetch content`;
+      rememberSnapshot(key, { rev, elements: scene.elements });
       return {
         rev,
         board: target.name,
         ...target.activeBoard !== void 0 ? { activeBoard: target.activeBoard } : {},
         elementCount: scene.elements.length,
-        pageNames: pages.map((page) => page.name),
-        pages: publicPrototypePages(scene.elements, pages),
-        pageRelations: relations,
-        frameNames: pages.map((page) => page.name),
+        pageNames: returnedPages.map((page) => page.name),
+        pages: publicPrototypePages(scene.elements, pages).slice(0, MAX_READ_PAGE_INDEX),
+        pageRelations: returnedRelations,
+        frameNames: returnedPages.map((page) => page.name),
         summary,
-        layoutWarnings: qualityWarnings,
-        prototypeQuality,
+        layoutWarnings: returnedWarnings,
+        prototypeQuality: boundedPrototypeQuality(prototypeQuality),
         ...operational,
         file: `draw2code/${target.name}.excalidraw.json`,
-        elements: payload
+        elements: payload,
+        selection: {
+          detail: args.detail ?? "index",
+          selectedElementCount: selected.length,
+          returnedElementCount: payload.length,
+          returnedBytes: Buffer.byteLength(JSON.stringify(payload), "utf8"),
+          maxReturnedBytes: MAX_ELEMENTS_JSON,
+          pageIds: requestedPageIds,
+          missingPageIds,
+          elementIds: requestedElementIds,
+          region,
+          changeTracking,
+          diagnostics: {
+            totalWarnings: qualityWarnings.length,
+            returnedWarnings: returnedWarnings.length,
+            truncated: qualityWarnings.length > returnedWarnings.length
+          },
+          pageIndex: {
+            totalPages: pages.length,
+            returnedPages: returnedPages.length,
+            truncated: pages.length > returnedPages.length,
+            totalRelations: relations.length,
+            returnedRelations: returnedRelations.length,
+            relationsTruncated: relations.length > returnedRelations.length
+          }
+        },
+        deletedElementIds,
+        ...nextCursor === void 0 ? {} : { nextCursor }
       };
     }
   });
@@ -4644,6 +5022,7 @@ function draw2codeUpdateTool(store) {
           nextAction: { type: "string", required: true },
           nextActionCode: { type: "string" },
           nextActionParams: { type: "json" },
+          operationBudget: { type: "json" },
           capacity: { type: "json" },
           timings: { type: "json" },
           prototypeQuality: { type: "json", required: true },
@@ -4769,7 +5148,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           completionReady: completionReady2,
           nextAction: nextAction2,
           nextActionCode: nextActionCode2,
-          capacity: measureSceneCapacity(board2.value.scene),
+          capacity: store.measureCapacity(board2.value.scene),
           prototypeQuality: prototypeQuality2,
           revealRequestId: reviewToken,
           reviewToken,
@@ -4802,15 +5181,9 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const cache = boardCache.get(key);
       const currentElements = board.ok ? board.value.scene.elements : [];
       const preflightStartedAt = performance.now();
-      rejectNewPrototypeFrames(currentElements, parsedOps);
-      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
-      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
-      const ops = normalizePageShellUpserts(currentElements, semanticOps);
-      const prospectiveElements = previewElements(currentElements, ops);
-      const currentScene = board.ok ? board.value.scene : { elements: [] };
-      const currentCapacity = measureSceneCapacity(currentScene);
-      const projectedCapacity = measureSceneCapacity({ ...currentScene, elements: prospectiveElements });
-      if (projectedCapacity.usedBytes > projectedCapacity.maxBytes) {
+      const batchLimits = store.capacityLimits();
+      const batchBytes = Buffer.byteLength(JSON.stringify(parsedOps), "utf8");
+      if (parsedOps.length > batchLimits.maxBatchOps || batchBytes > batchLimits.maxBatchBytes) {
         stageTimings.preflightMs += performance.now() - preflightStartedAt;
         const prototypeQuality2 = inspectPrototypeQuality(currentElements);
         return {
@@ -4823,18 +5196,62 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           writeVerified: false,
           reviewVerified: false,
           completionReady: false,
-          nextAction: "\u672C\u6279\u6B21\u4F1A\u8D85\u8FC7\u753B\u677F\u5BB9\u91CF\uFF1B\u4FDD\u7559\u5F53\u524D\u753B\u677F\u4E0D\u5199\u5165\uFF0C\u5C06\u66F4\u65B0\u62C6\u6210\u66F4\u5C0F\u7684\u72EC\u7ACB\u6279\u6B21\u540E\u91CD\u8BD5",
-          nextActionCode: "reduce_update_scope",
+          nextAction: "\u672C\u6B21\u5DE5\u5177\u8C03\u7528\u7684 ops \u8D1F\u8F7D\u8FC7\u5927\uFF1B\u753B\u677F\u672C\u8EAB\u53EF\u80FD\u4ECD\u6709\u5BB9\u91CF\u3002\u6309\u9875\u9762\u6216\u72EC\u7ACB\u6539\u52A8\u62C6\u5206\u672C\u6279\u6B21\u540E\u91CD\u8BD5\u3002",
+          nextActionCode: "reduce_batch_size",
           nextActionParams: {
             tool: "draw2code_update",
-            arguments: { root: args.root, name: target.name, action: "write", ops: "<smaller independent batch>" }
+            arguments: { root: args.root, name: target.name, action: "write", ops: "<one page or one independent change batch>" }
+          },
+          operationBudget: {
+            opCount: parsedOps.length,
+            maxOps: batchLimits.maxBatchOps,
+            bytes: batchBytes,
+            maxBytes: batchLimits.maxBatchBytes
+          },
+          capacity: store.measureCapacity(board.ok ? board.value.scene : { elements: [] }),
+          timings: timings(),
+          prototypeQuality: prototypeQuality2,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false
+        };
+      }
+      rejectNewPrototypeFrames(currentElements, parsedOps);
+      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
+      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
+      const ops = normalizePageShellUpserts(currentElements, semanticOps);
+      const prospectiveElements = previewElements(currentElements, ops);
+      const currentScene = board.ok ? board.value.scene : { elements: [] };
+      const currentCapacity = store.measureCapacity(currentScene);
+      const projectedCapacity = store.measureCapacity({ ...currentScene, elements: prospectiveElements });
+      if (projectedCapacity.canonicalBytes > projectedCapacity.hardCapBytes) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
+        const prototypeQuality2 = inspectPrototypeQuality(currentElements);
+        return {
+          rev: board.ok ? board.value.rev : 0,
+          targetBoard: target.name,
+          ...target.activeBoard === void 0 ? {} : { activeBoard: target.activeBoard },
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: "\u5199\u5165\u540E\u7684\u5B8C\u6574\u753B\u677F\u4F1A\u8D85\u8FC7\u5BB9\u91CF\u786C\u4E0A\u9650\uFF1B\u7F29\u5C0F\u540C\u4E00\u6539\u52A8\u6279\u6B21\u4E0D\u80FD\u89E3\u51B3\u3002\u8BF7\u5148\u5F52\u6863\u6216\u62C6\u5206\u753B\u677F\uFF0C\u518D\u628A\u76EE\u6807\u9875\u9762\u5199\u5165\u65B0\u753B\u677F\u3002",
+          nextActionCode: "archive_or_split_board",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: "<new board>", action: "write", ops: "<pages moved from the full board>" }
           },
           capacity: {
-            maxBytes: projectedCapacity.maxBytes,
-            usedBytes: currentCapacity.usedBytes,
+            hardCapBytes: projectedCapacity.hardCapBytes,
+            softCapBytes: projectedCapacity.softCapBytes,
+            canonicalBytes: currentCapacity.canonicalBytes,
+            persistedBytes: currentCapacity.persistedBytes,
             remainingBytes: currentCapacity.remainingBytes,
-            projectedBytes: projectedCapacity.usedBytes,
-            excessBytes: projectedCapacity.usedBytes - projectedCapacity.maxBytes
+            projectedCanonicalBytes: projectedCapacity.canonicalBytes,
+            projectedPersistedBytes: projectedCapacity.persistedBytes,
+            excessBytes: projectedCapacity.canonicalBytes - projectedCapacity.hardCapBytes
           },
           timings: timings(),
           prototypeQuality: prototypeQuality2,
@@ -5000,7 +5417,7 @@ ${formatLayoutIssues(layoutReport.errors)}
         completionReady,
         nextAction,
         nextActionCode,
-        capacity: measureSceneCapacity(refreshed.value.scene),
+        capacity: store.measureCapacity(refreshed.value.scene),
         timings: timings(),
         prototypeQuality,
         revealRequestId: revealed.value.id,
@@ -5994,7 +6411,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 }
 
 // references/workflow-contract.md
-var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u7531\u72EC\u7ACB `draw2code-open` \u5FEB\u901F\u5165\u53E3\u5904\u7406\uFF0C\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_open`\uFF1A\u4E0D\u8BFB\u53D6\u672C\u5951\u7EA6\u7684\u5176\u4F59\u5DE5\u4F5C\u6D41\uFF0C\u4E0D\u8C03\u7528\u5176\u4ED6 Draw2Code \u5DE5\u5177\uFF0C\u4E0D\u8FDB\u5165\u4EE3\u8868\u9875\u590D\u6838\u6216\u8D28\u91CF\u95E8\u7981\uFF1B\u6709 active board \u5C31\u6062\u590D\uFF0C\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName`\u3001\u540C\u4E00\u4EFD `brief` \u548C\u7ED3\u6784\u5316 `drawingPlan` \u8C03\u7528 `draw2code_update`\u3002\u5F53 `drawingPlan.nextActionCode=write_representative` \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A `allowedPageIds` \u751F\u6210 ops\uFF0C\u4E0D\u80FD\u9884\u5148\u6784\u9020\u5168\u90E8\u9875\u9762\u3002\u4EE3\u8868\u9875\u5199\u5165\u540E\u7B49\u5F85 Canvas \u6D88\u8D39\u8FD4\u56DE\u7684 reveal\uFF0C\u518D\u4EE5 `action=review`\u3001`reviewToken`\u3001`phase=representative`\u3001`passed=true`\u3001`inspectedPageIds` \u548C `observations` \u5355\u72EC\u8BB0\u5F55\u53EF\u89C1\u590D\u6838\uFF1Breview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\u3002\u5DE5\u5177\u8FD4\u56DE `nextActionCode=write_remaining_pages` \u540E\u624D\u751F\u6210 `remainingPageIds`\u3002\u5982\u679C Agent \u8BEF\u5728\u590D\u6838\u524D\u63D0\u4EA4\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u8FD4\u56DE `nextActionCode=review_representative` \u548C `pendingUpdateId`\uFF0C\u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u5B8C\u6210\u4EE3\u8868\u9875\u590D\u6838\u540E\u7528 `action=commit_pending` \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u4E0D\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20 ops\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528 `action=review`\u3001`phase=final` \u8986\u76D6\u6240\u6709 page id\u3002\u65E7 `visualReview` \u53EA\u4FDD\u7559\u517C\u5BB9\uFF1B\u65B0\u6D41\u7A0B\u4E0D\u624B\u5DE5\u62FC `rev` \u4E0E `revealRequestId`\u3002\u5DF2\u6709\u753B\u677F\u4FEE\u6539\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_read`\uFF0C\u76F4\u63A5\u4F7F\u7528\u5B83\u8FD4\u56DE\u7684 `capacity`\u3001`continuation` \u548C\u4E0D\u900F\u660E ID\uFF0C\u4E0D\u641C\u7D22\u5BF9\u8BDD\u5386\u53F2\uFF1B\u53EA\u6709\u6062\u590D\u540C\u4E00\u6279\u6682\u5B58\u64CD\u4F5C\u65F6\u624D\u6267\u884C `continuation.nextAction`\uFF0C\u5DF2\u6709 3 \u9875\u4EE5\u4E0A\u753B\u677F\u7684\u72EC\u7ACB\u5C0F\u6539\u52A8\u76F4\u63A5\u63D0\u4EA4\u6700\u5C0F ops\u3002\n- `draw2code_read` / `draw2code_open` \u8FD4\u56DE\u753B\u677F `usedBytes`\u3001`remainingBytes` \u4E0E\u5F53\u524D workflow continuation\u3002\u5927\u6279\u66F4\u65B0\u5FC5\u987B\u5148\u770B\u5BB9\u91CF\uFF1B\u9884\u68C0\u8FD4\u56DE `nextActionCode=reduce_update_scope` \u65F6\u6309 `nextActionParams` \u62C6\u6279\uFF0C\u4E0D\u80FD\u91CD\u590D\u751F\u6210\u539F\u59CB\u5927 JSON\u3002`update.timings` \u7684\u8303\u56F4\u4EC5\u4E3A\u5DE5\u5177\u6267\u884C\uFF0C\u4E0D\u5305\u542B\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- MCP/Codex \u7684 `draw2code_open` \u9ED8\u8BA4\u4F7F\u7528 `presentation=handoff`\uFF0C\u4E0D\u6CE8\u518C\u9759\u6001 `openai/outputTemplate`\uFF0C\u4E5F\u4E0D\u628A\u52A8\u6001 localhost \u753B\u677F\u5957\u8FDB MCP App iframe\u3002\u5DE5\u5177\u53EA\u51C6\u5907\u77ED\u671F URL \u5E76\u8FD4\u56DE `displayState=handoff-ready`\uFF1B`auto` \u4E0E `inline` \u4EC5\u4F5C\u4E3A\u517C\u5BB9\u522B\u540D\uFF0C\u540C\u6837\u56DE\u9000\u5230 handoff\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u8981\u6C42\u5916\u90E8\u6D4F\u89C8\u5668\u65F6\u624D\u4F7F\u7528 `presentation=browser`\u3002\n- \u5BBF\u4E3B\u8D1F\u8D23\u628A handoff URL \u5BFC\u822A\u5230\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6216\u6D4F\u89C8\u5668\u5E76\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u5355\u7EAF\u5BFC\u822A\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u80FD\u529B\uFF0C\u4E0D\u4E3A\u6B64\u521D\u59CB\u5316\u901A\u7528\u6D4F\u89C8\u5668\u81EA\u52A8\u5316\uFF1B\u53EA\u6709\u9700\u8981 DOM\u3001\u63A7\u5236\u53F0\u6216\u4EA4\u4E92\u8BC1\u636E\u65F6\u624D\u63A5\u7BA1\u6D4F\u89C8\u5668\u3002\u53EA\u6709\u753B\u5E03\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\u82E5\u672A\u6765\u9700\u8981\u5BF9\u8BDD\u5185\u5D4C\u753B\u677F\uFF0C\u5FC5\u987B\u5355\u72EC\u5B9E\u73B0\u76F4\u63A5\u8FD0\u884C Canvas \u7684 MCP App\uFF0C\u4E0D\u80FD\u6062\u590D\u52A8\u6001 localhost iframe \u58F3\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u590D\u7528\u73B0\u6709\u6807\u7B7E\u9875\u5E76\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F write \u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request\u3001\u8FD4\u56DE\u4E0D\u900F\u660E `reviewToken` \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002`action=review` \u53EA\u8BB0\u5F55\u8BE5\u53EF\u89C1\u7248\u672C\u7684 review receipt\uFF0C\u8FD4\u56DE `reviewVerified=true`\uFF0C\u4E0D\u4F1A\u5199\u753B\u677F\u6216\u53D1\u5E03\u65B0 reveal\uFF1B\u91CD\u590D\u63D0\u4EA4\u540C\u4E00 token \u662F\u5E42\u7B49\u7684\u3002\u53EA\u6709 final review \u8FD4\u56DE `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n- \u72EC\u7ACB\u753B\u7801\u53EF\u4EE5\u5217\u51FA\u5F53\u524D workspace \u548C\u672C\u673A\u5DF2\u7531\u5BBF\u4E3B\u660E\u786E\u6CE8\u518C\u3001\u6301\u4E45\u5316\u4E14\u786E\u5B9E\u542B\u6709\u753B\u677F\u7684\u5176\u4ED6 workspace\uFF1B\u63D2\u4EF6\u7F13\u5B58\u548C\u7A7A root \u4E0D\u8FDB\u5165\u5207\u6362\u83DC\u5355\u3002\u5207\u6362\u524D\u5FC5\u987B\u5148\u843D\u76D8\u5F53\u524D\u5F85\u4FDD\u5B58\u7F16\u8F91\uFF0C\u518D\u7528\u5F53\u524D\u77ED\u671F\u4F1A\u8BDD\u6362\u53D6\u76EE\u6807 root \u7684\u65B0 workspace-scoped token\u3002\u65E7 token \u4E0D\u80FD\u76F4\u63A5\u8BBF\u95EE\u76EE\u6807 root\uFF0CAgent \u5DE5\u5177\u9ED8\u8BA4\u8303\u56F4\u4E5F\u4E0D\u80FD\u56E0\u4E3A UI \u5207\u6362\u800C\u6269\u5927\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F\u3001\u6D3B\u52A8\u7EED\u671F\u7684 workspace-scoped token\uFF0C\u53EF\u5728\u8BE5 root \u5185\u7BA1\u7406\u591A\u4E2A\u753B\u677F\u4F46\u4E0D\u80FD\u8DE8 root \u8BBF\u95EE\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n- \u4E0D\u9012\u5F52\u626B\u63CF\u6574\u53F0\u7535\u8111\u5BFB\u627E workspace\uFF0C\u4E5F\u4E0D\u81EA\u52A8\u590D\u5236\u3001\u5408\u5E76\u6216\u8FC1\u79FB\u4E0D\u540C root \u7684\u753B\u677F\uFF1B\u65B0\u6253\u5F00\u7684\u753B\u7801\u53EA\u83B7\u5F97\u6253\u5F00\u5F53\u65F6\u5DF2\u6CE8\u518C workspace \u7684\u5FEB\u7167\u3002\n";
+var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u7531\u72EC\u7ACB `draw2code-open` \u5FEB\u901F\u5165\u53E3\u5904\u7406\uFF0C\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_open`\uFF1A\u4E0D\u8BFB\u53D6\u672C\u5951\u7EA6\u7684\u5176\u4F59\u5DE5\u4F5C\u6D41\uFF0C\u4E0D\u8C03\u7528\u5176\u4ED6 Draw2Code \u5DE5\u5177\uFF0C\u4E0D\u8FDB\u5165\u4EE3\u8868\u9875\u590D\u6838\u6216\u8D28\u91CF\u95E8\u7981\uFF1B\u6709 active board \u5C31\u6062\u590D\uFF0C\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName`\u3001\u540C\u4E00\u4EFD `brief` \u548C\u7ED3\u6784\u5316 `drawingPlan` \u8C03\u7528 `draw2code_update`\u3002\u5F53 `drawingPlan.nextActionCode=write_representative` \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A `allowedPageIds` \u751F\u6210 ops\uFF0C\u4E0D\u80FD\u9884\u5148\u6784\u9020\u5168\u90E8\u9875\u9762\u3002\u4EE3\u8868\u9875\u5199\u5165\u540E\u7B49\u5F85 Canvas \u6D88\u8D39\u8FD4\u56DE\u7684 reveal\uFF0C\u518D\u4EE5 `action=review`\u3001`reviewToken`\u3001`phase=representative`\u3001`passed=true`\u3001`inspectedPageIds` \u548C `observations` \u5355\u72EC\u8BB0\u5F55\u53EF\u89C1\u590D\u6838\uFF1Breview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\u3002\u5DE5\u5177\u8FD4\u56DE `nextActionCode=write_remaining_pages` \u540E\u624D\u751F\u6210 `remainingPageIds`\u3002\u5982\u679C Agent \u8BEF\u5728\u590D\u6838\u524D\u63D0\u4EA4\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u8FD4\u56DE `nextActionCode=review_representative` \u548C `pendingUpdateId`\uFF0C\u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u5B8C\u6210\u4EE3\u8868\u9875\u590D\u6838\u540E\u7528 `action=commit_pending` \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u4E0D\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20 ops\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528 `action=review`\u3001`phase=final` \u8986\u76D6\u6240\u6709 page id\u3002\u65E7 `visualReview` \u53EA\u4FDD\u7559\u517C\u5BB9\uFF1B\u65B0\u6D41\u7A0B\u4E0D\u624B\u5DE5\u62FC `rev` \u4E0E `revealRequestId`\u3002\u5DF2\u6709\u753B\u677F\u5148\u7528 `draw2code_read detail=index` \u53D6\u5F97\u9875\u9762 id\u3001`capacity`\u3001`continuation` \u548C\u4E0D\u900F\u660E ID\uFF1B\u9700\u8981\u5143\u7D20\u5185\u5BB9\u65F6\u53EA\u6309\u76EE\u6807 `pageIds`\u3001`elementIds`\u3001\u533A\u57DF\u6216 `changesSince` \u7EE7\u7EED\u8BFB\u53D6\uFF0C\u4E0D\u641C\u7D22\u4F1A\u8BDD\u5386\u53F2\uFF0C\u4E5F\u4E0D\u9ED8\u8BA4\u8BFB\u53D6\u6574\u677F\u3002\n- \u5BB9\u91CF\u5206\u4E24\u5C42\u5904\u7406\uFF1A\u5355\u6B21 ops \u8D85\u8FC7 500 \u9879\u6216 512 KiB \u65F6\u8FD4\u56DE `nextActionCode=reduce_batch_size`\uFF0C\u6309\u9875\u9762\u6216\u72EC\u7ACB\u6539\u52A8\u62C6\u6279\uFF1B\u753B\u677F\u6CA1\u6709\u65E5\u5E38\u4E1A\u52A1\u914D\u989D\uFF0C\u9ED8\u8BA4 32 MiB \u53EA\u6807\u8BB0 large\uFF0C256 MiB / 50,000 \u5143\u7D20\u662F\u53EF\u914D\u7F6E\u7684\u5F02\u5E38\u4FDD\u9669\u4E1D\u3002\u771F\u6B63\u89E6\u53D1\u4FDD\u9669\u4E1D\u65F6\u8FD4\u56DE `nextActionCode=archive_or_split_board`\uFF0C\u7F29\u5C0F\u540C\u4E00\u6539\u52A8\u6279\u6B21\u6CA1\u6709\u4F5C\u7528\u3002`capacity` \u5206\u522B\u62A5\u544A canonical\u3001persisted\u3001asset \u4E0E element \u6307\u6807\uFF0C`history` \u72EC\u7ACB\u62A5\u544A gzip checkpoint / delta \u7684\u5386\u53F2\u5360\u7528\u4E0E\u9884\u7B97\uFF1B`update.timings` \u7684\u8303\u56F4\u4EC5\u4E3A\u5DE5\u5177\u6267\u884C\uFF0C\u4E0D\u5305\u542B\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- MCP/Codex \u7684 `draw2code_open` \u9ED8\u8BA4\u4F7F\u7528 `presentation=handoff`\uFF0C\u4E0D\u6CE8\u518C\u9759\u6001 `openai/outputTemplate`\uFF0C\u4E5F\u4E0D\u628A\u52A8\u6001 localhost \u753B\u677F\u5957\u8FDB MCP App iframe\u3002\u5DE5\u5177\u53EA\u51C6\u5907\u77ED\u671F URL \u5E76\u8FD4\u56DE `displayState=handoff-ready`\uFF1B`auto` \u4E0E `inline` \u4EC5\u4F5C\u4E3A\u517C\u5BB9\u522B\u540D\uFF0C\u540C\u6837\u56DE\u9000\u5230 handoff\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u8981\u6C42\u5916\u90E8\u6D4F\u89C8\u5668\u65F6\u624D\u4F7F\u7528 `presentation=browser`\u3002\n- \u5BBF\u4E3B\u8D1F\u8D23\u628A handoff URL \u5BFC\u822A\u5230\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6216\u6D4F\u89C8\u5668\u5E76\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u5355\u7EAF\u5BFC\u822A\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u80FD\u529B\uFF0C\u4E0D\u4E3A\u6B64\u521D\u59CB\u5316\u901A\u7528\u6D4F\u89C8\u5668\u81EA\u52A8\u5316\uFF1B\u53EA\u6709\u9700\u8981 DOM\u3001\u63A7\u5236\u53F0\u6216\u4EA4\u4E92\u8BC1\u636E\u65F6\u624D\u63A5\u7BA1\u6D4F\u89C8\u5668\u3002\u53EA\u6709\u753B\u5E03\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\u82E5\u672A\u6765\u9700\u8981\u5BF9\u8BDD\u5185\u5D4C\u753B\u677F\uFF0C\u5FC5\u987B\u5355\u72EC\u5B9E\u73B0\u76F4\u63A5\u8FD0\u884C Canvas \u7684 MCP App\uFF0C\u4E0D\u80FD\u6062\u590D\u52A8\u6001 localhost iframe \u58F3\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u590D\u7528\u73B0\u6709\u6807\u7B7E\u9875\u5E76\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F write \u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request\u3001\u8FD4\u56DE\u4E0D\u900F\u660E `reviewToken` \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002`action=review` \u53EA\u8BB0\u5F55\u8BE5\u53EF\u89C1\u7248\u672C\u7684 review receipt\uFF0C\u8FD4\u56DE `reviewVerified=true`\uFF0C\u4E0D\u4F1A\u5199\u753B\u677F\u6216\u53D1\u5E03\u65B0 reveal\uFF1B\u91CD\u590D\u63D0\u4EA4\u540C\u4E00 token \u662F\u5E42\u7B49\u7684\u3002\u53EA\u6709 final review \u8FD4\u56DE `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n- \u72EC\u7ACB\u753B\u7801\u53EF\u4EE5\u5217\u51FA\u5F53\u524D workspace \u548C\u672C\u673A\u5DF2\u7531\u5BBF\u4E3B\u660E\u786E\u6CE8\u518C\u3001\u6301\u4E45\u5316\u4E14\u786E\u5B9E\u542B\u6709\u753B\u677F\u7684\u5176\u4ED6 workspace\uFF1B\u63D2\u4EF6\u7F13\u5B58\u548C\u7A7A root \u4E0D\u8FDB\u5165\u5207\u6362\u83DC\u5355\u3002\u5207\u6362\u524D\u5FC5\u987B\u5148\u843D\u76D8\u5F53\u524D\u5F85\u4FDD\u5B58\u7F16\u8F91\uFF0C\u518D\u7528\u5F53\u524D\u77ED\u671F\u4F1A\u8BDD\u6362\u53D6\u76EE\u6807 root \u7684\u65B0 workspace-scoped token\u3002\u65E7 token \u4E0D\u80FD\u76F4\u63A5\u8BBF\u95EE\u76EE\u6807 root\uFF0CAgent \u5DE5\u5177\u9ED8\u8BA4\u8303\u56F4\u4E5F\u4E0D\u80FD\u56E0\u4E3A UI \u5207\u6362\u800C\u6269\u5927\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F\u3001\u6D3B\u52A8\u7EED\u671F\u7684 workspace-scoped token\uFF0C\u53EF\u5728\u8BE5 root \u5185\u7BA1\u7406\u591A\u4E2A\u753B\u677F\u4F46\u4E0D\u80FD\u8DE8 root \u8BBF\u95EE\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n- \u4E0D\u9012\u5F52\u626B\u63CF\u6574\u53F0\u7535\u8111\u5BFB\u627E workspace\uFF0C\u4E5F\u4E0D\u81EA\u52A8\u590D\u5236\u3001\u5408\u5E76\u6216\u8FC1\u79FB\u4E0D\u540C root \u7684\u753B\u677F\uFF1B\u65B0\u6253\u5F00\u7684\u753B\u7801\u53EA\u83B7\u5F97\u6253\u5F00\u5F53\u65F6\u5DF2\u6CE8\u518C workspace \u7684\u5FEB\u7167\u3002\n";
 
 // src/guidance.ts
 var SECTION_ORDER = 220;
@@ -6007,7 +6424,7 @@ var DRAW2CODE_GUIDANCE = [
   "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u95EE\u4E00\u6B21\u201C\u6709\u6CA1\u6709\u53C2\u8003\u98CE\u683C\u7684\u56FE\u7247\uFF1F\u6709\u7684\u8BDD\u76F4\u63A5\u53D1\u56FE\uFF0C\u6CA1\u6709\u4E5F\u53EF\u4EE5\u7531\u6211\u667A\u80FD\u63A8\u8350\u201D\uFF1B\u8FD9\u53E5\u8BDD\u4E0D\u4F7F\u7528 ask_user_question\u3002\u7528\u6237\u5DF2\u7ECF\u968F\u8BF7\u6C42\u9644\u56FE\u65F6\u4E0D\u8981\u91CD\u590D\u95EE\uFF1B\u67E5\u770B\u56FE\u7247\u540E\u628A\u89C6\u89C9\u6458\u8981\u6216\u8DEF\u5F84\u4F5C\u4E3A referenceStyle \u4F20\u5165\uFF0C\u6CA1\u6709\u5219\u4F20 none\u3002\u7136\u540E\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002\u5DE5\u5177\u7F3A\u5C11 referenceStyle \u65F6\u4F1A\u8FD4\u56DE reference-style-prompt \u4E14\u4E0D\u521B\u5EFA\u4F1A\u8BDD\u3002pages \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684\u9875\u9762\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1Bframes \u4EC5\u662F\u65E7\u8C03\u7528\u517C\u5BB9\u522B\u540D\uFF0C\u4E24\u8005\u540C\u65F6\u4F20\u5165\u65F6\u5FC5\u987B\u4E00\u81F4\u3002\u5DE5\u5177\u4F1A\u8BC6\u522B\u65B0 prototype-page rectangle \u548C\u65E7\u547D\u540D Frame\uFF0C\u8FD4\u56DE\u753B\u677F\u5168\u90E8\u9875\u9762\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u6709\u53C2\u8003\u56FE\u65F6\u89C6\u89C9\u65B9\u5411\u9898\u4F18\u5148\u63A8\u8350\u6CBF\u7528\u53C2\u8003\u56FE\uFF0C\u6CA1\u6709\u65F6\u6839\u636E\u4EA7\u54C1\u8BED\u4E49\u667A\u80FD\u63A8\u8350\u3002\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\uFF1B\u5DE5\u5177\u4F1A\u628A\u8FD9\u4E00\u9009\u62E9\u5C55\u5F00\u4E3A\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u4E0D\u8981\u518D\u5411\u7528\u6237\u9010\u9879\u786E\u8BA4\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements\u3001pageRelations \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u753B\u677F\u662F\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\u7684\u4E8B\u5B9E\u6765\u6E90\uFF0C\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u6700\u7EC8\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u65B0\u6392\u7248\uFF0C\u7981\u6B62\u7167\u642C Excalidraw \u7EDD\u5BF9\u5750\u6807\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u76EE\u6807\u89C6\u53E3\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u6A2A\u5411\u6EA2\u51FA\u3001\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u548C\u5E95\u90E8\u5BFC\u822A\uFF0C\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u5B9E\u73B0\u95EE\u9898\u81EA\u52A8\u4FEE\u590D\u5E76\u91CD\u9A8C\u3002\u5168\u90E8\u901A\u8FC7\u540E\u63D0\u4EA4\u5305\u542B previewUrl\u3001viewports\u3001\u9010\u9875 screenshots\u3001consoleErrors\u3001domChecks\u3001layoutChecks \u548C interactionChecks \u7684 verificationEvidence\uFF0C\u518D\u8C03\u7528 action=complete\uFF1B\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4E0D\u80FD\u66FF\u4EE3\u8BC1\u636E\u3002\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
   "generate \u8BC1\u636E\u4E0E\u9875\u9762\u4FDD\u62A4\u8865\u5145\uFF1A\u6BCF\u4E2A\u9875\u9762\u5FC5\u987B\u7528 <!-- d2c-page:<\u9875\u9762\u539F\u540D>:start/end --> \u6CE8\u91CA\u5305\u4F4F\uFF0C\u91CD\u65B0\u751F\u6210\u65F6\u5DE5\u5177\u4F1A\u76F4\u63A5\u6BD4\u8F83\u672A\u9009\u9875\u9762\u5757\u7684\u54C8\u5E0C\u3002verificationEvidence \u5FC5\u987B\u5E26\u672C\u6B21\u9A8C\u6536\u552F\u4E00 captureId \u548C\u5F53\u524D\u751F\u6210\u5165\u53E3 outputSha256\uFF1BpreviewUrl \u8FD4\u56DE\u5185\u5BB9\u7684\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\u3002screenshots \u548C domSnapshots \u90FD\u5FC5\u987B\u4FDD\u5B58\u4E3A workspace \u5185\u771F\u5B9E\u6587\u4EF6\uFF0C\u643A\u5E26\u540C\u4E00\u4E2A captureId \u4E0E\u5404\u81EA sha256\uFF1B\u622A\u56FE\u5FC5\u987B\u662F\u4E0E viewport \u5C3A\u5BF8\u4E00\u81F4\u7684\u53EF\u89E3\u538B PNG\uFF0CDOM \u5FEB\u7167\u5FC5\u987B\u5305\u542B\u539F\u578B\u4E2D\u7684\u5173\u952E\u6587\u6848\u548C mock \u6570\u636E\u3002consoleErrors \u4E0E consoleWarnings \u90FD\u5FC5\u987B\u662F\u7A7A\u6570\u7EC4\uFF1B\u591A\u9875\u9762\u751F\u6210\u8FD8\u5FC5\u987B\u63D0\u4EA4 page-switching \u68C0\u67E5\u3002\u65E7\u7684 previewOpened\u3001selectedPagesVisible\u3001coreFlowPassed\u3001mockDataVisible \u548C unselectedPagesPreserved \u53EA\u4FDD\u7559\u53C2\u6570\u517C\u5BB9\uFF0C\u4E0D\u518D\u80FD\u5355\u72EC\u5B8C\u6210\u9A8C\u6536\u3002",
   "\u753B\u7F16\u8F91\u534F\u4F5C\u89C4\u5219\uFF1A\u5DF2\u6709\u9879\u76EE\u5148\u8C03\u7528\u4E00\u6B21 draw2code_read\uFF0C\u5E76\u76F4\u63A5\u8BFB\u53D6 continuation \u4E0E capacity\uFF0C\u7981\u6B62\u641C\u7D22\u4F1A\u8BDD\u5386\u53F2\u6765\u627E reviewToken \u6216 pendingUpdateId\u3002\u53EA\u6709\u5F53\u524D\u4EFB\u52A1\u786E\u5B9E\u662F\u5728\u6062\u590D\u540C\u4E00\u6279\u6682\u5B58\u5199\u5165\u65F6\uFF0C\u624D\u6267\u884C continuation.nextAction\uFF1B\u65B0\u7684\u72EC\u7ACB\u5C0F\u6539\u52A8\u76F4\u63A5\u6309\u6700\u65B0\u753B\u677F\u751F\u6210\u6700\u5C0F ops\uFF0C\u5DF2\u6709 3 \u9875\u4EE5\u4E0A\u7684\u6210\u719F\u753B\u677F\u4E0D\u4F1A\u88AB\u65E7\u7684\u9996\u6B21\u4EE3\u8868\u9875\u95E8\u7981\u62E6\u622A\u3002\u6BCF\u6B21 draw2code_update action=write \u90FD\u5E94\u5148\u8F93\u51FA\u4E00\u6BB5\u201C\u66F4\u65B0\u6458\u8981\u201D\uFF08\u4E0D\u662F\u6A21\u677F\u5316\u63D0\u95EE\uFF09\uFF1A1) \u4E0A\u4E00\u8F6E\u7528\u6237\u624B\u5DE5\u6539\u52A8\uFF1B2) \u8FD9\u4E00\u8F6E\u8BA1\u5212\u6539\u52A8\uFF1B3) \u51B2\u7A81\u68C0\u67E5\uFF08\u662F\u5426\u89E6\u53CA\u624B\u5DE5\u6539\u52A8\u6216\u66FF\u6362/\u6E05\u7A7A\uFF09\u3002\u53EA\u6709\u201C\u51B2\u7A81\u201D\u65F6\u624D\u8981\u6C42\u786E\u8BA4\uFF0C\u8FD4\u56DE pending \u540E\u8BF7\u53EA\u8BE2\u95EE\u76F8\u5173\u53D8\u66F4\u662F\u5426\u8986\u76D6\uFF1B\u6CA1\u51B2\u7A81\u5219\u76F4\u63A5\u6267\u884C\u5E76\u6C47\u62A5\u7ED3\u679C\uFF08\u4E0D\u6253\u65AD\u7528\u6237\uFF09\u3002\u5199\u5165\u6210\u529F\u4F1A\u9009\u4E2D\u76EE\u6807\u753B\u677F\u3001\u53D1\u5E03 reveal request \u5E76\u8FD4\u56DE\u4E0D\u900F\u660E reviewToken\uFF1BCanvas \u5B9E\u9645\u53EF\u89C1\u540E\u7528 action=review \u5355\u72EC\u590D\u6838\uFF0Creview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\uFF0C\u5E76\u6309 nextActionCode \u7EE7\u7EED\u3002\u82E5 Agent \u8BEF\u5728\u4EE3\u8868\u9875\u590D\u6838\u524D\u63D0\u4EA4\u4E86\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u4F1A\u8FD4\u56DE pendingUpdateId \u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u590D\u6838\u540E\u4F7F\u7528 action=commit_pending \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u7981\u6B62\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20\u5927 JSON\u3002\u65E7 visualReview \u4EC5\u4E3A\u517C\u5BB9\uFF0C\u65B0\u7684\u8C03\u7528\u4E0D\u8981\u624B\u5DE5\u62FC boardRevision/revealRequestId\u3002verified=true / writeVerified=true \u53EA\u8BC1\u660E\u5199\u76D8\u548C\u56DE\u8BFB\u4E00\u81F4\uFF0C\u4E0D\u7B49\u4E8E\u539F\u578B\u5B8C\u6210\uFF1B\u53EA\u6709 final review \u8FD4\u56DE completionReady=true \u624D\u80FD\u8BF4\u6574\u5957\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002prototypeQuality.warnings \u8981\u4F5C\u4E3A\u4E0B\u4E00\u8F6E\u6253\u78E8\u4F9D\u636E\uFF0C\u4E0D\u80FD\u88AB verified \u63A9\u76D6\u3002\u82E5\u68C0\u6D4B\u5230\u624B\u5DE5\u6539\u52A8\u4E0E\u672C\u8F6E upsert/delete \u540C id\u3001\u6216\u6267\u884C clear/replace \u4E14\u9762\u677F\u975E\u7A7A\uFF0C\u5C31\u5E94\u8FDB\u5165\u786E\u8BA4\u6D41\u7A0B\uFF1B\u786E\u8BA4\u540E\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002",
-  "\u9650\u5236\uFF1A\u5355\u753B\u677F \u22642000 \u5143\u7D20\u3001\u2264512KB\uFF1Bdraw2code_read / draw2code_open \u4F1A\u8FD4\u56DE\u7CBE\u786E usedBytes\u3001remainingBytes \u548C continuation\u3002\u751F\u6210\u5927\u6279 ops \u524D\u5148\u770B remainingBytes\uFF1B\u82E5 update \u8FD4\u56DE nextActionCode=reduce_update_scope\uFF0C\u6309 nextActionParams \u62C6\u6210\u66F4\u5C0F\u7684\u72EC\u7ACB\u6279\u6B21\uFF0C\u4E0D\u8981\u91CD\u590D\u751F\u6210\u539F\u6279 JSON\u3002update.timings \u53EA\u7EDF\u8BA1\u5DE5\u5177\u5185\u90E8\u8BFB\u76D8\u3001\u9884\u68C0\u3001\u5199\u76D8\u3001\u56DE\u8BFB\u9A8C\u8BC1\u548C\u53D1\u5E03\u9636\u6BB5\uFF0C\u4E0D\u5305\u542B\u5DE5\u5177\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u65F6\u95F4\u3002\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u5148 draw2code_read \u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5E26\u81EA\u52A8\u7248\u672C\u5B58\u6863\uFF1A\u4F60\u7684\u6BCF\u6B21 draw2code_update \u90FD\u4F1A\u5148\u5FEB\u7167\u65E7\u72B6\u6001\uFF08\u7528\u6237\u53EF\u5728\u300C\u5386\u53F2\u300D\u83DC\u5355\u56DE\u6EDA\u4EFB\u610F\u7248\u672C\uFF09\uFF0C\u56E0\u6B64\u5927\u6539\u4E0D\u5FC5\u72B9\u8C6B\u3002\u53EA\u6709\u660E\u786E\u7684 Draw2Code / \u753B\u7801 / \u753B\u539F\u578B\u5524\u9192\u672C\u63D2\u4EF6\uFF1B\u5524\u9192\u540E\u7684\u540C\u4E00\u4EFB\u52A1\u91CC\uFF0C\u753B\u677F\u3001\u539F\u578B\u3001\u753B\u4E00\u4E0B\u7B49\u540E\u7EED\u8BF4\u6CD5\u7EE7\u7EED\u6CBF\u7528\u672C\u5DE5\u4F5C\u6D41\u3002",
+  "\u5BB9\u91CF\u4E0E\u8BFB\u53D6\u9650\u5236\uFF1A\u753B\u677F\u6CA1\u6709\u65E5\u5E38\u4E1A\u52A1\u914D\u989D\uFF1B\u9ED8\u8BA4 32 MiB \u53EA\u6807\u8BB0 large\uFF0C256 MiB \u89C4\u8303\u5185\u5BB9\u4E0E 50,000 \u5143\u7D20\u4EC5\u4F5C\u4E3A\u53EF\u914D\u7F6E\u5F02\u5E38\u4FDD\u9669\u4E1D\uFF0C\u78C1\u76D8\u7F29\u8FDB\u3001\u5185\u8054\u8D44\u6E90\u3001\u5143\u7D20\u6570\u548C gzip \u5386\u53F2\u5206\u522B\u8BA1\u91CF\u3002draw2code_read \u9ED8\u8BA4 detail=index\uFF0C\u53EA\u8FD4\u56DE\u6709\u754C\u9875\u9762\u7D22\u5F15\u3001\u5173\u7CFB\u3001\u5BB9\u91CF\u548C continuation\uFF1B\u9700\u8981\u5185\u5BB9\u65F6\u6309 pageIds\u3001elementIds\u3001region \u6216 changesSince \u8BFB\u53D6\u6700\u5C0F\u8303\u56F4\uFF0C\u4E0D\u8981\u4E60\u60EF\u6027 detail=full\u3002\u5355\u6B21 ops \u9ED8\u8BA4\u6700\u591A 500 \u9879\u6216 512 KiB\uFF1BnextActionCode=reduce_batch_size \u8868\u793A\u53EA\u9700\u6309\u9875\u9762\u6216\u72EC\u7ACB\u6539\u52A8\u62C6\u6279\uFF0Carchive_or_split_board \u624D\u8868\u793A\u89E6\u53D1\u5F02\u5E38\u4FDD\u9669\u4E1D\u3001\u5E94\u5F52\u6863\u6216\u62C6\u677F\u3002update.timings \u53EA\u7EDF\u8BA1\u5DE5\u5177\u5185\u90E8\u9636\u6BB5\uFF0C\u4E0D\u5305\u542B\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u65F6\u95F4\u3002\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u8BFB\u53D6\u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5386\u53F2\u4F7F\u7528\u539F\u5B50 gzip checkpoint \u4E0E\u53EF\u6062\u590D delta\uFF0C\u5E76\u6709\u72EC\u7ACB\u5B58\u50A8\u9884\u7B97\u3002\u53EA\u6709\u660E\u786E\u7684 Draw2Code / \u753B\u7801 / \u753B\u539F\u578B\u5524\u9192\u672C\u63D2\u4EF6\uFF1B\u5524\u9192\u540E\u7684\u540C\u4E00\u4EFB\u52A1\u91CC\u7EE7\u7EED\u6CBF\u7528\u672C\u5DE5\u4F5C\u6D41\u3002",
   workflow_contract_default
 ].join("\n\n");
 
@@ -6101,7 +6518,8 @@ var Draw2CodeRuntimeImpl = class {
     if (command.type === "list") {
       data = await draw2codeListTool(scenes).execute({ root: command.root }, {});
     } else if (command.type === "read") {
-      data = await draw2codeReadTool(scenes).execute({ root: command.root, ...command.board === void 0 ? {} : { name: command.board } }, {});
+      const { type: _type, board, ...readArgs } = command;
+      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...board === void 0 ? {} : { name: board } }, {});
     } else if (command.type === "create") {
       data = await draw2codeCreateTool(projects, scenes).execute({ ...command.input, root: command.root }, {});
     } else if (command.type === "update") {
@@ -6842,7 +7260,18 @@ function apply(ctx) {
   const localTools = [draw2codeListTool(store), draw2codeReadTool(store), draw2codeCreateTool(projects, store), draw2codeUpdateTool(store), draw2codeGenerateTool(store, projects)];
   const tools = [
     daemonTool(ctx, client, localTools[0], (args) => ({ type: "list", root: String(args.root ?? "") })),
-    daemonTool(ctx, client, localTools[1], (args) => ({ type: "read", root: String(args.root ?? ""), ...typeof args.name === "string" ? { board: args.name } : {} })),
+    daemonTool(ctx, client, localTools[1], (args) => ({
+      type: "read",
+      root: String(args.root ?? ""),
+      ...typeof args.name === "string" ? { board: args.name } : {},
+      ...args.detail === "full" ? { detail: "full" } : {},
+      ...Array.isArray(args.pageIds) ? { pageIds: args.pageIds.filter((item) => typeof item === "string") } : {},
+      ...Array.isArray(args.elementIds) ? { elementIds: args.elementIds.filter((item) => typeof item === "string") } : {},
+      ...typeof args.region === "object" && args.region !== null ? { region: args.region } : {},
+      ...typeof args.changesSince === "number" ? { changesSince: args.changesSince } : {},
+      ...typeof args.cursor === "string" ? { cursor: args.cursor } : {},
+      ...typeof args.limit === "number" ? { limit: args.limit } : {}
+    })),
     daemonTool(ctx, client, localTools[2], (args) => {
       const { root, ...input } = args;
       return { type: "create", root: String(root ?? ""), input };
@@ -6909,6 +7338,7 @@ export {
   inspectPrototypeQuality,
   isPathInside,
   makeRoutes,
+  measureSceneCapacity,
   name,
   normalizeElement,
   normalizeOpsArg,

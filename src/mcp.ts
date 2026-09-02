@@ -80,9 +80,19 @@ server.registerTool('draw2code_list', {
 
 server.registerTool('draw2code_read', {
   title: 'Read Draw2Code board',
-  description: 'Read a board. Omit board to use the user-visible active board.',
-  inputSchema: { root, board: z.string().optional() },
-}, async ({ root, board }) => execute({ type: 'read', root, ...(board === undefined ? {} : { board }) }))
+  description: 'Read bounded board metadata by default, or select elements by page, ids, region, or recent revision.',
+  inputSchema: {
+    root,
+    board: z.string().optional(),
+    detail: z.enum(['index', 'full']).optional(),
+    pageIds: z.array(z.string()).optional(),
+    elementIds: z.array(z.string()).optional(),
+    region: z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() }).optional(),
+    changesSince: z.number().optional(),
+    cursor: z.string().optional(),
+    limit: z.number().int().positive().max(250).optional(),
+  },
+}, async ({ root, board, ...scope }) => execute({ type: 'read', root, ...scope, ...(board === undefined ? {} : { board }) }))
 
 server.registerTool('draw2code_create', {
   title: 'Create Draw2Code project',

@@ -3991,14 +3991,19 @@ function makeRoutes(store) {
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 var SCENE_DIR = "draw2code";
 var ACTIVE_BOARD_FILE = ".active-board.json";
 var GENERATIONS_DIR = ".generations";
 var GENERATE_SETTINGS_DIR = ".generate-settings";
 var GENERATION_ID_RE = /^generation-[0-9a-f-]{36}$/;
 var PAGES_DIR = "draw2code-pages";
-var MAX_SCENE_BYTES = 512 * 1024;
-var MAX_ELEMENTS = 2e3;
+var DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024;
+var DEFAULT_SOFT_SCENE_BYTES = 32 * 1024 * 1024;
+var DEFAULT_MAX_OPS_BYTES = 512 * 1024;
+var DEFAULT_MAX_OPS = 500;
+var DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024;
+var DEFAULT_MAX_ELEMENTS = 5e4;
 var MAX_ELEMENT_BYTES = 16 * 1024;
 var MAX_TEXT_CHARS = 4e3;
 var NAME_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5 -]{0,63}$/;
@@ -4084,10 +4089,60 @@ function semanticTextGeometry(element, container, alignment) {
     height
   };
 }
-var VERSION_FILE_RE = /^(\d{9,})-[0-9a-z]{1,8}\.json$/;
+var VERSION_FILE_RE = /^(\d{9,})-[0-9a-z]{1,8}\.json(?:\.gz)?$/;
 function versionStamp(entry) {
   const match = VERSION_FILE_RE.exec(entry);
   return match === null ? null : Number(match[1]);
+}
+function versionId(entry) {
+  return entry.replace(/\.json(?:\.gz)?$/, "");
+}
+function decodeVersion(entry, bytes, maxOutputLength) {
+  return entry.endsWith(".gz") ? gunzipSync(bytes, { maxOutputLength }).toString("utf8") : bytes.toString("utf8");
+}
+function isDeltaVersionPayload(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value;
+  return payload.schema === "draw2code-version-v1" && payload.kind === "delta" && typeof payload.baseId === "string" && Number.isSafeInteger(payload.depth) && Array.isArray(payload.deletedIds) && Array.isArray(payload.upserts) && (payload.elementOrder === void 0 || Array.isArray(payload.elementOrder));
+}
+function buildVersionDelta(baseId, depth, before, after) {
+  const beforeById = new Map(before.elements.map((element) => [String(element.id ?? ""), element]));
+  const afterById = new Map(after.elements.map((element) => [String(element.id ?? ""), element]));
+  const deletedIds = [...beforeById.keys()].filter((id) => !afterById.has(id));
+  const upserts = after.elements.filter((element) => {
+    const id = String(element.id ?? "");
+    const previous = beforeById.get(id);
+    return previous === void 0 || JSON.stringify(previous) !== JSON.stringify(element);
+  });
+  const beforeOrder = before.elements.map((element) => String(element.id ?? ""));
+  const afterOrder = after.elements.map((element) => String(element.id ?? ""));
+  return {
+    schema: "draw2code-version-v1",
+    kind: "delta",
+    baseId,
+    depth,
+    elementCount: after.elements.length,
+    deletedIds,
+    upserts,
+    ...JSON.stringify(beforeOrder) === JSON.stringify(afterOrder) ? {} : { elementOrder: afterOrder },
+    appState: after.appState
+  };
+}
+function applyVersionDelta(base, delta) {
+  const byId = new Map(base.elements.map((element) => [String(element.id ?? ""), element]));
+  for (const id of delta.deletedIds) byId.delete(id);
+  for (const element of delta.upserts) byId.set(String(element.id ?? ""), element);
+  const elementOrder = delta.elementOrder ?? base.elements.map((element) => String(element.id ?? "")).filter((id) => !delta.deletedIds.includes(id));
+  return {
+    type: "excalidraw",
+    version: 2,
+    source: "dsh-draw2code",
+    elements: elementOrder.flatMap((id) => {
+      const element = byId.get(id);
+      return element === void 0 ? [] : [element];
+    }),
+    appState: delta.appState
+  };
 }
 function err(code, message) {
   return { ok: false, error: { code, message } };
@@ -4163,7 +4218,7 @@ function normalizeElement(input) {
     // values are discarded, but a valid Excalidraw link must survive a
     // client round-trip through normalizeScene().
     link: typeof el.link === "string" ? el.link : null,
-    updated: now2,
+    updated: num4(el.updated, now2),
     seed: num4(el.seed, randomSeed()),
     version: num4(el.version, 1),
     versionNonce: num4(el.versionNonce, randomSeed()),
@@ -4294,11 +4349,11 @@ function reconcileBoundTextBindings(elements, alignmentFocusIds) {
     };
   });
 }
-function normalizeScene(input) {
+function normalizeScene(input, maxElements = DEFAULT_MAX_ELEMENTS) {
   if (typeof input !== "object" || input === null) throw new Error("scene must be an object");
   const raw = input;
   if (!Array.isArray(raw.elements)) throw new Error("scene.elements must be an array");
-  if (raw.elements.length > MAX_ELEMENTS) throw new Error(`scene has more than ${MAX_ELEMENTS} elements`);
+  if (raw.elements.length > maxElements) throw new Error(`scene has more than ${maxElements} elements`);
   const appState = typeof raw.appState === "object" && raw.appState !== null ? raw.appState : {};
   return {
     type: "excalidraw",
@@ -4317,17 +4372,56 @@ function normalizeScene(input) {
     }
   };
 }
-function capacityForNormalizedScene(scene) {
-  const usedBytes = Buffer.byteLength(JSON.stringify(scene, null, 2), "utf8");
+function positiveInteger(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+function resolvedCapacityLimits(options = {}) {
+  const hardCapBytes = positiveInteger(
+    options.hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
+    DEFAULT_MAX_SCENE_BYTES
+  );
+  const softDefault = Math.min(DEFAULT_SOFT_SCENE_BYTES, Math.max(1, Math.floor(hardCapBytes * 0.8)));
+  const requestedSoft = positiveInteger(options.softCapBytes ?? process.env.DRAW2CODE_SOFT_SCENE_BYTES, softDefault);
   return {
-    maxBytes: MAX_SCENE_BYTES,
-    usedBytes,
-    remainingBytes: MAX_SCENE_BYTES - usedBytes,
-    utilizationPercent: Math.round(usedBytes / MAX_SCENE_BYTES * 1e3) / 10
+    hardCapBytes,
+    softCapBytes: Math.min(requestedSoft, hardCapBytes),
+    maxElements: positiveInteger(options.maxElements ?? process.env.DRAW2CODE_MAX_ELEMENTS, DEFAULT_MAX_ELEMENTS),
+    maxBatchBytes: positiveInteger(options.maxBatchBytes ?? process.env.DRAW2CODE_MAX_OPS_BYTES, DEFAULT_MAX_OPS_BYTES),
+    maxBatchOps: positiveInteger(options.maxBatchOps ?? process.env.DRAW2CODE_MAX_OPS, DEFAULT_MAX_OPS),
+    maxVersionStorageBytes: positiveInteger(
+      options.maxVersionStorageBytes ?? process.env.DRAW2CODE_MAX_VERSION_STORAGE_BYTES,
+      DEFAULT_MAX_VERSION_STORAGE_BYTES
+    )
   };
 }
-function measureSceneCapacity(input) {
-  return capacityForNormalizedScene(normalizeScene(input));
+function inlineAssetBytes(value, seen = /* @__PURE__ */ new Set()) {
+  if (typeof value === "string") return value.startsWith("data:") ? Buffer.byteLength(value, "utf8") : 0;
+  if (typeof value !== "object" || value === null || seen.has(value)) return 0;
+  seen.add(value);
+  if (Array.isArray(value)) return value.reduce((total, item) => total + inlineAssetBytes(item, seen), 0);
+  return Object.values(value).reduce((total, item) => total + inlineAssetBytes(item, seen), 0);
+}
+function capacityForNormalizedScene(scene, limits) {
+  const canonicalBytes = Buffer.byteLength(JSON.stringify(scene), "utf8");
+  const persistedBytes = Buffer.byteLength(`${JSON.stringify(scene, null, 2)}
+`, "utf8");
+  const assetBytes = inlineAssetBytes(scene.elements);
+  return {
+    maxBytes: limits.hardCapBytes,
+    hardCapBytes: limits.hardCapBytes,
+    softCapBytes: limits.softCapBytes,
+    usedBytes: canonicalBytes,
+    canonicalBytes,
+    persistedBytes,
+    persistedOverheadBytes: persistedBytes - canonicalBytes,
+    assetBytes,
+    elementCount: scene.elements.length,
+    maxElements: limits.maxElements,
+    remainingBytes: limits.hardCapBytes - canonicalBytes,
+    utilizationPercent: Math.round(canonicalBytes / limits.hardCapBytes * 1e3) / 10,
+    status: canonicalBytes > limits.hardCapBytes ? "hard-cap-exceeded" : canonicalBytes >= limits.softCapBytes ? "large" : "normal"
+  };
 }
 function emptyScene() {
   return {
@@ -4345,7 +4439,7 @@ function typeName(value) {
   if (typeof value === "string") return `string(${value.length} chars)`;
   return typeof value;
 }
-function parseOps(input) {
+function parseOps(input, maxEntries = DEFAULT_MAX_ELEMENTS) {
   let source = input;
   if (typeof source === "string") {
     try {
@@ -4357,7 +4451,7 @@ function parseOps(input) {
   if (!Array.isArray(source)) {
     throw new Error(`ops must be an array, got ${typeName(source)}. Large payloads sometimes arrive as a JSON string (auto-parsed); if you still see this, check the ops argument is an array of op objects`);
   }
-  if (source.length > MAX_ELEMENTS) throw new Error(`ops has ${source.length} entries (max ${MAX_ELEMENTS})`);
+  if (source.length > maxEntries) throw new Error(`ops has ${source.length} entries (max ${maxEntries})`);
   return source.map((raw, index) => {
     const where = `ops[${index}]`;
     if (typeof raw !== "object" || raw === null) throw new Error(`${where} must be an object, got ${typeName(raw)}`);
@@ -4392,8 +4486,16 @@ function parseOps(input) {
   });
 }
 var SceneStore = class {
-  constructor(ctx) {
+  constructor(ctx, options = {}) {
     this.ctx = ctx;
+    this.limits = resolvedCapacityLimits(options);
+  }
+  limits;
+  capacityLimits() {
+    return { ...this.limits };
+  }
+  measureCapacity(input) {
+    return capacityForNormalizedScene(normalizeScene(input, this.limits.maxElements), this.limits);
   }
   /** Gate a requested root: must resolve on disk and sit inside a registered workspace. */
   async gate(root) {
@@ -4556,6 +4658,68 @@ var SceneStore = class {
   versionsDir(canonicalRoot, name) {
     return join(this.dir(canonicalRoot), VERSIONS_DIR, name);
   }
+  async readVersionEntry(dir, id, seen = /* @__PURE__ */ new Set()) {
+    if (seen.has(id) || seen.size >= 16) throw new Error(`version delta chain is cyclic or too deep at ${id}`);
+    seen.add(id);
+    let entry = "";
+    let bytes;
+    for (const candidate of [`${id}.json.gz`, `${id}.json`]) {
+      try {
+        bytes = await readFile(join(dir, candidate));
+        entry = candidate;
+        break;
+      } catch {
+      }
+    }
+    if (bytes === void 0) throw new Error(`version ${id} does not exist`);
+    if (bytes.byteLength > this.limits.hardCapBytes * 4) throw new Error(`version ${id} exceeds the compressed read cap`);
+    const raw = decodeVersion(entry, bytes, this.limits.hardCapBytes * 4);
+    if (Buffer.byteLength(raw, "utf8") > this.limits.hardCapBytes * 4) throw new Error(`version ${id} exceeds the read cap`);
+    const parsed = JSON.parse(raw);
+    if (isDeltaVersionPayload(parsed)) {
+      const base = await this.readVersionEntry(dir, parsed.baseId, seen);
+      return {
+        scene: normalizeScene(applyVersionDelta(base.scene, parsed), this.limits.maxElements),
+        storedBytes: bytes.byteLength,
+        format: "gzip-delta",
+        depth: parsed.depth
+      };
+    }
+    return {
+      scene: normalizeScene(parsed, this.limits.maxElements),
+      storedBytes: bytes.byteLength,
+      format: entry.endsWith(".gz") ? "gzip-json" : "json",
+      depth: 0
+    };
+  }
+  async writeCompressedVersion(dir, entry, json) {
+    const target = join(dir, entry);
+    const temp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const compressed = gzipSync(Buffer.from(json, "utf8"), { level: 6 });
+    await writeFile2(temp, compressed);
+    await rename(temp, target);
+    return compressed.byteLength;
+  }
+  async materializeDependentVersion(dir, removedEntry, nextEntry) {
+    if (nextEntry === void 0) return;
+    const removedId = versionId(removedEntry);
+    const nextId = versionId(nextEntry);
+    let raw;
+    try {
+      raw = decodeVersion(nextEntry, await readFile(join(dir, nextEntry)), this.limits.hardCapBytes * 4);
+    } catch {
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!isDeltaVersionPayload(parsed) || parsed.baseId !== removedId) return;
+    const resolved = await this.readVersionEntry(dir, nextId);
+    await this.writeCompressedVersion(dir, `${nextId}.json.gz`, JSON.stringify(resolved.scene));
+  }
   /**
    * Snapshot the CURRENT disk scene of a board before it gets overwritten.
    * Skipped when the scene file is absent, when the incoming content is
@@ -4588,11 +4752,45 @@ var SceneStore = class {
     try {
       await mkdir(dir, { recursive: true });
       const suffix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-      await writeFile2(join(dir, `${Date.now()}-${suffix}.json`), `${raw}
-`, "utf8");
-      if (entries.length + 1 > MAX_VERSIONS) {
-        const doomed = entries.map((entry) => ({ entry, stamp: versionStamp(entry) ?? 0 })).sort((a, b) => a.stamp - b.stamp).slice(0, entries.length + 1 - MAX_VERSIONS);
-        await Promise.all(doomed.map(({ entry }) => rm(join(dir, entry), { force: true }).catch(() => void 0)));
+      const orderedEntries = [...entries].sort((a, b) => (versionStamp(a) ?? 0) - (versionStamp(b) ?? 0));
+      const latestStamp = versionStamp(orderedEntries.at(-1) ?? "") ?? 0;
+      const entry = `${Math.max(Date.now(), latestStamp + 1)}-${suffix}.json.gz`;
+      const latestEntry = orderedEntries.at(-1);
+      const currentScene = normalizeScene(JSON.parse(currentJson), this.limits.maxElements);
+      const fullCompressed = gzipSync(Buffer.from(currentJson, "utf8"), { level: 6 });
+      let snapshotJson = currentJson;
+      if (latestEntry !== void 0) {
+        try {
+          const latest = await this.readVersionEntry(dir, versionId(latestEntry));
+          if (latest.depth < 8) {
+            const delta = buildVersionDelta(versionId(latestEntry), latest.depth + 1, latest.scene, currentScene);
+            const deltaJson = JSON.stringify(delta);
+            const deltaCompressed = gzipSync(Buffer.from(deltaJson, "utf8"), { level: 6 });
+            if (deltaCompressed.byteLength < fullCompressed.byteLength * 0.9) snapshotJson = deltaJson;
+          }
+        } catch {
+        }
+      }
+      await this.writeCompressedVersion(dir, entry, snapshotJson);
+      const stored = await Promise.all([...entries, entry].map(async (candidate) => ({
+        entry: candidate,
+        stamp: versionStamp(candidate) ?? 0,
+        bytes: (await stat(join(dir, candidate))).size
+      })));
+      stored.sort((a, b) => a.stamp - b.stamp);
+      let totalBytes = stored.reduce((total, candidate) => total + candidate.bytes, 0);
+      while (stored.length > MAX_VERSIONS || totalBytes > this.limits.maxVersionStorageBytes) {
+        const doomed = stored.shift();
+        if (doomed === void 0) break;
+        const next = stored[0];
+        await this.materializeDependentVersion(dir, doomed.entry, next?.entry);
+        if (next !== void 0) {
+          const rewrittenBytes = (await stat(join(dir, next.entry))).size;
+          totalBytes += rewrittenBytes - next.bytes;
+          next.bytes = rewrittenBytes;
+        }
+        totalBytes -= doomed.bytes;
+        await rm(join(dir, doomed.entry), { force: true }).catch(() => void 0);
       }
     } catch (error2) {
       this.ctx.logger.warn("draw2code version snapshot failed: %o", error2);
@@ -4616,18 +4814,33 @@ var SceneStore = class {
       const stamp = versionStamp(entry);
       if (stamp === null) continue;
       try {
-        const raw = await readFile(join(dir, entry), "utf8");
-        const elements = JSON.parse(raw).elements;
+        const resolved = await this.readVersionEntry(dir, versionId(entry));
         versions.push({
-          id: entry.slice(0, -".json".length),
+          id: versionId(entry),
           ts: stamp,
-          elementCount: Array.isArray(elements) ? elements.length : 0
+          elementCount: resolved.scene.elements.length,
+          storedBytes: resolved.storedBytes,
+          format: resolved.format
         });
       } catch {
       }
     }
     versions.sort((a, b) => b.ts - a.ts);
     return { ok: true, value: versions };
+  }
+  /** Independent history-storage budget and current compressed usage. */
+  async versionStorage(root, name) {
+    const versions = await this.listVersions(root, name);
+    if (!versions.ok) return versions;
+    return {
+      ok: true,
+      value: {
+        versionCount: versions.value.length,
+        storedBytes: versions.value.reduce((total, version2) => total + version2.storedBytes, 0),
+        maxStoredBytes: this.limits.maxVersionStorageBytes,
+        maxVersions: MAX_VERSIONS
+      }
+    };
   }
   /** Read one archived version without changing the current board. */
   async readVersion(root, name, id) {
@@ -4636,32 +4849,24 @@ var SceneStore = class {
     const named = this.checkName(name);
     if (!named.ok) return named;
     if (!/^\d{9,}-[0-9a-z]{1,8}$/.test(id)) return err("bad-version", `version id "${id}" is invalid`);
-    let raw;
     try {
-      raw = await readFile(join(this.versionsDir(gated.value, named.value), `${id}.json`), "utf8");
-    } catch {
-      return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
+      const resolved = await this.readVersionEntry(this.versionsDir(gated.value, named.value), id);
+      return {
+        ok: true,
+        value: {
+          id,
+          ts: Number(id.split("-", 1)[0]),
+          elementCount: resolved.scene.elements.length,
+          storedBytes: resolved.storedBytes,
+          format: resolved.format,
+          scene: resolved.scene
+        }
+      };
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      if (message.includes("does not exist")) return err("not-found", `version ${id} of scene "${named.value}" does not exist`);
+      return err("corrupt", `version ${id} of scene "${named.value}" cannot be restored: ${message}`);
     }
-    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
-      return err("too-large", `version ${id} of scene "${named.value}" exceeds the read cap`);
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return err("corrupt", `version ${id} of scene "${named.value}" is not valid JSON`);
-    }
-    const elements = parsed.elements;
-    const scene = {
-      type: "excalidraw",
-      version: 2,
-      source: "dsh-draw2code",
-      elements: Array.isArray(elements) ? elements : [],
-      appState: {
-        viewBackgroundColor: typeof parsed.appState?.viewBackgroundColor === "string" ? parsed.appState.viewBackgroundColor : "#ffffff"
-      }
-    };
-    return { ok: true, value: { id, ts: Number(id.split("-", 1)[0]), elementCount: scene.elements.length, scene } };
   }
   /** Roll a board back to one archived version (snapshotting the current
    * state first, so the rollback itself is reversible). */
@@ -4802,7 +5007,7 @@ var SceneStore = class {
     } catch {
       return err("not-found", `scene "${named.value}" does not exist`);
     }
-    if (Buffer.byteLength(raw) > MAX_SCENE_BYTES * 4) {
+    if (Buffer.byteLength(raw) > this.limits.hardCapBytes * 4) {
       return err("too-large", `scene "${named.value}" exceeds the read cap`);
     }
     let parsed;
@@ -4831,14 +5036,15 @@ var SceneStore = class {
     if (!named.ok) return named;
     let scene;
     try {
-      scene = normalizeScene(sceneInput);
+      scene = normalizeScene(sceneInput, this.limits.maxElements);
     } catch (error2) {
       return err("bad-scene", error2 instanceof Error ? error2.message : String(error2));
     }
-    const json = JSON.stringify(scene, null, 2);
-    if (Buffer.byteLength(json, "utf8") > MAX_SCENE_BYTES) {
-      return err("too-large", `scene exceeds ${MAX_SCENE_BYTES} bytes`);
+    const capacity = this.measureCapacity(scene);
+    if (capacity.canonicalBytes > capacity.hardCapBytes) {
+      return err("too-large", `scene canonical content is ${capacity.canonicalBytes} bytes and exceeds the ${capacity.hardCapBytes}-byte hard cap`);
     }
+    const json = JSON.stringify(scene, null, 2);
     const path = await this.scenePath(gated.value, named.value);
     return this.withWriteLock(path, async () => {
       if (typeof baseRev === "number") {
@@ -4907,7 +5113,7 @@ var SceneStore = class {
   async applyOps(root, name, opsInput, baseRev) {
     let ops;
     try {
-      ops = parseOps(opsInput);
+      ops = parseOps(opsInput, this.limits.maxElements);
     } catch (error2) {
       return err("bad-ops", error2 instanceof Error ? error2.message : String(error2));
     }
@@ -4927,7 +5133,7 @@ var SceneStore = class {
     for (const op of ops) {
       if (op.op === "replace") {
         try {
-          scene = normalizeScene(op.scene);
+          scene = normalizeScene(op.scene, this.limits.maxElements);
         } catch (error2) {
           return err("bad-scene", error2 instanceof Error ? error2.message : String(error2));
         }
@@ -4967,8 +5173,8 @@ var SceneStore = class {
       }
       applied += 1;
     }
-    if (scene.elements.length > MAX_ELEMENTS) {
-      return err("too-many", `scene would exceed ${MAX_ELEMENTS} elements`);
+    if (scene.elements.length > this.limits.maxElements) {
+      return err("too-many", `scene would exceed ${this.limits.maxElements} elements`);
     }
     scene = {
       ...scene,
@@ -13674,6 +13880,9 @@ function text2(value) {
   return [{ type: "text", text: value }];
 }
 var MAX_ELEMENTS_JSON = 120 * 1024;
+var MAX_READ_DIAGNOSTICS = 20;
+var MAX_READ_PAGE_INDEX = 200;
+var MAX_READ_RELATIONS = 200;
 var SNAPSHOT_CACHE_MAX = 40;
 var DEFAULT_BOARD = "prototype";
 function str3(value) {
@@ -13686,6 +13895,7 @@ function customData3(value) {
   return typeof value?.customData === "object" && value.customData !== null ? value.customData : {};
 }
 var boardCache = /* @__PURE__ */ new Map();
+var boardHistoryCache = /* @__PURE__ */ new Map();
 var pendingReviewWrites = /* @__PURE__ */ new Map();
 var PENDING_REVIEW_WRITE_MAX = 20;
 var PENDING_REVIEW_WRITE_TTL_MS = 10 * 6e4;
@@ -13710,12 +13920,14 @@ function pendingReviewWriteFor(root, board, baseRev) {
   return [...pendingReviewWrites.values()].filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
 async function boardOperationalState(store, root, board, revision, scene) {
-  const [reveal, representativeReview] = await Promise.all([
+  const [reveal, representativeReview, history] = await Promise.all([
     store.getBoardReveal(root),
-    store.getBoardReview(root, board, "representative")
+    store.getBoardReview(root, board, "representative"),
+    store.versionStorage(root, board)
   ]);
   if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
   if (!representativeReview.ok) throw new Error(`${representativeReview.error.code}: ${representativeReview.error.message}`);
+  if (!history.ok) throw new Error(`${history.error.code}: ${history.error.message}`);
   const currentReveal = reveal.value.request !== null && reveal.value.request.board === board && Math.abs(reveal.value.request.revision - revision) <= 0.5 ? reveal.value.request : null;
   const currentRepresentativeReview = representativeReview.value.receipt !== null && Math.abs(representativeReview.value.receipt.revision - revision) <= 0.5 ? representativeReview.value.receipt : null;
   const pendingWrite = pendingReviewWriteFor(root, board, revision);
@@ -13754,7 +13966,8 @@ async function boardOperationalState(store, root, board, revision, scene) {
     continuation2 = { status: "idle", nextAction: null };
   }
   return {
-    capacity: measureSceneCapacity(scene),
+    capacity: store.measureCapacity(scene),
+    history: history.value,
     continuation: continuation2
   };
 }
@@ -14071,6 +14284,23 @@ function layoutWarnings(elements) {
     message: item.message
   }));
 }
+function boundedPrototypeQuality(report) {
+  const pages = report.pages.slice(0, MAX_READ_PAGE_INDEX).map((page) => ({
+    ...page,
+    warningCount: page.warnings.length,
+    warnings: page.warnings.slice(0, MAX_READ_DIAGNOSTICS),
+    warningsTruncated: page.warnings.length > MAX_READ_DIAGNOSTICS
+  }));
+  return {
+    ...report,
+    warningCount: report.warnings.length,
+    warnings: report.warnings.slice(0, MAX_READ_DIAGNOSTICS),
+    warningsTruncated: report.warnings.length > MAX_READ_DIAGNOSTICS,
+    pageCount: report.pages.length,
+    pages,
+    pagesTruncated: report.pages.length > MAX_READ_PAGE_INDEX
+  };
+}
 function prototypeQualitySummary(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const qualityScore = typeof value.qualityScore === "number" ? value.qualityScore : 0;
@@ -14123,7 +14353,9 @@ function computeChangeIds(before, after) {
     }
     const beforeElement = beforeMap.get(id);
     if (beforeElement === void 0) continue;
-    if (JSON.stringify(beforeElement) !== JSON.stringify(afterElement)) modified.add(id);
+    const { updated: _beforeUpdated, ...beforeComparable } = beforeElement;
+    const { updated: _afterUpdated, ...afterComparable } = afterElement;
+    if (JSON.stringify(beforeComparable) !== JSON.stringify(afterComparable)) modified.add(id);
   }
   for (const [id] of beforeMap.entries()) {
     if (!afterMap.has(id)) removed.add(id);
@@ -14303,11 +14535,60 @@ function buildUpdatePlan(currentElements, ops, safeMode, touchedManualIds, hasSn
 }
 function rememberSnapshot(key, snapshot) {
   boardCache.set(key, snapshot);
+  const history = boardHistoryCache.get(key) ?? [];
+  const withoutSameRevision = history.filter((item) => Math.abs(item.rev - snapshot.rev) > 0.5);
+  boardHistoryCache.set(key, [...withoutSameRevision, snapshot].slice(-6));
   while (boardCache.size > SNAPSHOT_CACHE_MAX) {
     const first = boardCache.keys().next();
     if (first.done) break;
     boardCache.delete(first.value);
+    boardHistoryCache.delete(first.value);
   }
+}
+function snapshotAtRevision(key, revision) {
+  return (boardHistoryCache.get(key) ?? []).find((snapshot) => Math.abs(snapshot.rev - revision) <= 0.5);
+}
+function parseStringArray(value, field) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      throw new Error(`read-scope-invalid: ${field} must be a string array`);
+    }
+  }
+  if (source === void 0) return [];
+  if (!Array.isArray(source) || source.some((item) => typeof item !== "string")) {
+    throw new Error(`read-scope-invalid: ${field} must be a string array`);
+  }
+  return [...new Set(source.map((item) => item.trim()).filter(Boolean))];
+}
+function parseReadRegion(value) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      throw new Error("read-scope-invalid: region must be {x,y,width,height}");
+    }
+  }
+  if (source === void 0) return null;
+  if (typeof source !== "object" || source === null) throw new Error("read-scope-invalid: region must be {x,y,width,height}");
+  const record = source;
+  const values = ["x", "y", "width", "height"].map((field) => record[field]);
+  if (values.some((item) => typeof item !== "number" || !Number.isFinite(item))) {
+    throw new Error("read-scope-invalid: region x/y/width/height must be finite numbers");
+  }
+  const [x, y, width, height] = values;
+  if (width <= 0 || height <= 0) throw new Error("read-scope-invalid: region width/height must be positive");
+  return { x, y, width, height };
+}
+function intersectsRegion(element, region) {
+  const left = num3(element.x);
+  const top = num3(element.y);
+  const right = left + Math.max(0, num3(element.width));
+  const bottom = top + Math.max(0, num3(element.height));
+  return right >= region.x && left <= region.x + region.width && bottom >= region.y && top <= region.y + region.height;
 }
 function describeElement(el) {
   const type = str3(el.type);
@@ -14369,10 +14650,17 @@ function draw2codeListTool(store) {
 function draw2codeReadTool(store) {
   return defineTool({
     name: "draw2code_read",
-    description: "Read one \u753B\u7801 prototype board: current elements, exact scene capacity, and continuation with opaque review/pending IDs plus executable next-action arguments. Call this once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. A new independent small edit may proceed even when an older review is available; only resume continuation when it belongs to the user's current requested batch. Also required before generating frontend pages. Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
+    description: "Read one \u753B\u7801 prototype board. The default detail=index is bounded: it returns page metadata, relations, layered capacity, quality, and continuation without serializing every element. Use detail=full only for a genuinely small board, or select content with pageIds, elementIds, region, or changesSince. Scoped results are byte-capped and paginated with nextCursor. Call once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. Also required before generating frontend pages. Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
-      name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." }
+      name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." },
+      detail: { type: "string", enum: ["index", "full"], description: "index (default) returns bounded board/page metadata. full explicitly requests all elements, still subject to byte pagination." },
+      pageIds: { type: "array", items: { type: "string" }, description: "Return elements belonging to these prototype page ids." },
+      elementIds: { type: "array", items: { type: "string" }, description: "Return these exact element ids." },
+      region: { type: "json", description: "Return elements intersecting canvas bounds {x,y,width,height}." },
+      changesSince: { type: "number", description: "Return elements added or modified since a revision retained by this running host, plus deletedElementIds." },
+      cursor: { type: "string", description: "Opaque continuation cursor from a previous scoped read." },
+      limit: { type: "number", description: "Maximum selected elements in this page (default 150, max 250)." }
     },
     output: {
       schema: {
@@ -14387,13 +14675,17 @@ function draw2codeReadTool(store) {
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
           prototypeQuality: { type: "json", required: true },
           capacity: { type: "json", required: true },
+          history: { type: "json", required: true },
           continuation: { type: "json", required: true },
           pageNames: { type: "array", items: { type: "string" }, required: true },
           pages: { type: "array", items: { type: "json" }, required: true },
           pageRelations: { type: "array", items: { type: "json" }, required: true },
           frameNames: { type: "array", items: { type: "string" }, required: true },
           file: { type: "string", required: true },
-          elements: { type: "json", required: true }
+          elements: { type: "json", required: true },
+          selection: { type: "json", required: true },
+          deletedElementIds: { type: "array", items: { type: "string" }, required: true },
+          nextCursor: { type: "string" }
         }
       },
       render: (_args, value) => text2(
@@ -14422,26 +14714,108 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         ...pageMembershipWarnings(scene.elements, pages)
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
       const prototypeQuality = inspectPrototypeQuality(scene.elements);
+      const returnedPages = pages.slice(0, MAX_READ_PAGE_INDEX);
+      const returnedRelations = relations.slice(0, MAX_READ_RELATIONS);
+      const returnedWarnings = qualityWarnings.slice(0, MAX_READ_DIAGNOSTICS);
       const operational = await boardOperationalState(store, args.root, target.name, rev, scene);
-      const summary = scene.elements.map(describeElement).join("\n");
-      const elementsJson = JSON.stringify(scene.elements);
-      const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
-      const payload = elementsBytes <= MAX_ELEMENTS_JSON ? scene.elements : [{ id: "__too_large__", type: "text", text: `elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); read the file directly instead` }];
+      const requestedPageIds = parseStringArray(args.pageIds, "pageIds");
+      const requestedElementIds = parseStringArray(args.elementIds, "elementIds");
+      const region = parseReadRegion(args.region);
+      const key = makeKey(args.root, target.name);
+      const hasSelectors = requestedPageIds.length > 0 || requestedElementIds.length > 0 || region !== null || typeof args.changesSince === "number";
+      const selectedIds = new Set(requestedElementIds);
+      const missingPageIds = requestedPageIds.filter((id) => !pages.some((page) => page.id === id));
+      for (const page of pages.filter((candidate) => requestedPageIds.includes(candidate.id))) {
+        selectedIds.add(page.id);
+        for (const id of pageElementIds(page, scene.elements, pages)) selectedIds.add(id);
+        for (const label of scene.elements.filter((element) => customData3(element).pageId === page.id)) selectedIds.add(str3(label.id));
+      }
+      if (region !== null) {
+        for (const element of scene.elements) if (intersectsRegion(element, region)) selectedIds.add(str3(element.id));
+      }
+      let deletedElementIds = [];
+      let changeTracking = { status: "not-requested" };
+      if (typeof args.changesSince === "number") {
+        const previous = Math.abs(args.changesSince - rev) <= 0.5 ? { rev, elements: scene.elements } : snapshotAtRevision(key, args.changesSince);
+        if (previous === void 0) {
+          changeTracking = {
+            status: "unavailable",
+            requestedRevision: args.changesSince,
+            availableRevisions: (boardHistoryCache.get(key) ?? []).map((snapshot) => snapshot.rev),
+            nextAction: "\u91CD\u65B0\u8BFB\u53D6\u76EE\u6807 pageIds \u6216 elementIds\uFF1BchangesSince \u53EA\u4FDD\u8BC1\u5F53\u524D\u5BBF\u4E3B\u8FD1\u671F\u4FEE\u8BA2"
+          };
+        } else {
+          const delta = computeChangeIds(previous.elements, scene.elements);
+          for (const id of delta.added) selectedIds.add(id);
+          for (const id of delta.modified) selectedIds.add(id);
+          deletedElementIds = [...delta.removed];
+          changeTracking = {
+            status: "available",
+            requestedRevision: args.changesSince,
+            added: [...delta.added],
+            modified: [...delta.modified],
+            removed: deletedElementIds
+          };
+        }
+      }
+      const selected = args.detail === "full" && !hasSelectors ? scene.elements : hasSelectors ? scene.elements.filter((element) => selectedIds.has(str3(element.id))) : [];
+      const cursor = args.cursor === void 0 ? 0 : Number.parseInt(args.cursor, 10);
+      if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("read-scope-invalid: cursor is invalid");
+      const requestedLimit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.floor(args.limit) : 150;
+      const limit = Math.max(1, Math.min(250, requestedLimit));
+      const payload = [];
+      let nextOffset = cursor;
+      while (nextOffset < selected.length && payload.length < limit) {
+        const candidate = [...payload, selected[nextOffset]];
+        if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > MAX_ELEMENTS_JSON) break;
+        payload.push(selected[nextOffset]);
+        nextOffset += 1;
+      }
+      const nextCursor = nextOffset < selected.length ? String(nextOffset) : void 0;
+      const summary = payload.length > 0 ? payload.map(describeElement).join("\n") : `index only: ${pages.length} pages, ${scene.elements.length} elements; use pageIds, elementIds, region, changesSince, or detail=full to fetch content`;
+      rememberSnapshot(key, { rev, elements: scene.elements });
       return {
         rev,
         board: target.name,
         ...target.activeBoard !== void 0 ? { activeBoard: target.activeBoard } : {},
         elementCount: scene.elements.length,
-        pageNames: pages.map((page) => page.name),
-        pages: publicPrototypePages(scene.elements, pages),
-        pageRelations: relations,
-        frameNames: pages.map((page) => page.name),
+        pageNames: returnedPages.map((page) => page.name),
+        pages: publicPrototypePages(scene.elements, pages).slice(0, MAX_READ_PAGE_INDEX),
+        pageRelations: returnedRelations,
+        frameNames: returnedPages.map((page) => page.name),
         summary,
-        layoutWarnings: qualityWarnings,
-        prototypeQuality,
+        layoutWarnings: returnedWarnings,
+        prototypeQuality: boundedPrototypeQuality(prototypeQuality),
         ...operational,
         file: `draw2code/${target.name}.excalidraw.json`,
-        elements: payload
+        elements: payload,
+        selection: {
+          detail: args.detail ?? "index",
+          selectedElementCount: selected.length,
+          returnedElementCount: payload.length,
+          returnedBytes: Buffer.byteLength(JSON.stringify(payload), "utf8"),
+          maxReturnedBytes: MAX_ELEMENTS_JSON,
+          pageIds: requestedPageIds,
+          missingPageIds,
+          elementIds: requestedElementIds,
+          region,
+          changeTracking,
+          diagnostics: {
+            totalWarnings: qualityWarnings.length,
+            returnedWarnings: returnedWarnings.length,
+            truncated: qualityWarnings.length > returnedWarnings.length
+          },
+          pageIndex: {
+            totalPages: pages.length,
+            returnedPages: returnedPages.length,
+            truncated: pages.length > returnedPages.length,
+            totalRelations: relations.length,
+            returnedRelations: returnedRelations.length,
+            relationsTruncated: relations.length > returnedRelations.length
+          }
+        },
+        deletedElementIds,
+        ...nextCursor === void 0 ? {} : { nextCursor }
       };
     }
   });
@@ -14482,6 +14856,7 @@ function draw2codeUpdateTool(store) {
           nextAction: { type: "string", required: true },
           nextActionCode: { type: "string" },
           nextActionParams: { type: "json" },
+          operationBudget: { type: "json" },
           capacity: { type: "json" },
           timings: { type: "json" },
           prototypeQuality: { type: "json", required: true },
@@ -14607,7 +14982,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           completionReady: completionReady2,
           nextAction: nextAction2,
           nextActionCode: nextActionCode2,
-          capacity: measureSceneCapacity(board2.value.scene),
+          capacity: store.measureCapacity(board2.value.scene),
           prototypeQuality: prototypeQuality2,
           revealRequestId: reviewToken,
           reviewToken,
@@ -14640,15 +15015,9 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const cache = boardCache.get(key);
       const currentElements = board.ok ? board.value.scene.elements : [];
       const preflightStartedAt = performance.now();
-      rejectNewPrototypeFrames(currentElements, parsedOps);
-      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
-      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
-      const ops = normalizePageShellUpserts(currentElements, semanticOps);
-      const prospectiveElements = previewElements(currentElements, ops);
-      const currentScene = board.ok ? board.value.scene : { elements: [] };
-      const currentCapacity = measureSceneCapacity(currentScene);
-      const projectedCapacity = measureSceneCapacity({ ...currentScene, elements: prospectiveElements });
-      if (projectedCapacity.usedBytes > projectedCapacity.maxBytes) {
+      const batchLimits = store.capacityLimits();
+      const batchBytes = Buffer.byteLength(JSON.stringify(parsedOps), "utf8");
+      if (parsedOps.length > batchLimits.maxBatchOps || batchBytes > batchLimits.maxBatchBytes) {
         stageTimings.preflightMs += performance.now() - preflightStartedAt;
         const prototypeQuality2 = inspectPrototypeQuality(currentElements);
         return {
@@ -14661,18 +15030,62 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           writeVerified: false,
           reviewVerified: false,
           completionReady: false,
-          nextAction: "\u672C\u6279\u6B21\u4F1A\u8D85\u8FC7\u753B\u677F\u5BB9\u91CF\uFF1B\u4FDD\u7559\u5F53\u524D\u753B\u677F\u4E0D\u5199\u5165\uFF0C\u5C06\u66F4\u65B0\u62C6\u6210\u66F4\u5C0F\u7684\u72EC\u7ACB\u6279\u6B21\u540E\u91CD\u8BD5",
-          nextActionCode: "reduce_update_scope",
+          nextAction: "\u672C\u6B21\u5DE5\u5177\u8C03\u7528\u7684 ops \u8D1F\u8F7D\u8FC7\u5927\uFF1B\u753B\u677F\u672C\u8EAB\u53EF\u80FD\u4ECD\u6709\u5BB9\u91CF\u3002\u6309\u9875\u9762\u6216\u72EC\u7ACB\u6539\u52A8\u62C6\u5206\u672C\u6279\u6B21\u540E\u91CD\u8BD5\u3002",
+          nextActionCode: "reduce_batch_size",
           nextActionParams: {
             tool: "draw2code_update",
-            arguments: { root: args.root, name: target.name, action: "write", ops: "<smaller independent batch>" }
+            arguments: { root: args.root, name: target.name, action: "write", ops: "<one page or one independent change batch>" }
+          },
+          operationBudget: {
+            opCount: parsedOps.length,
+            maxOps: batchLimits.maxBatchOps,
+            bytes: batchBytes,
+            maxBytes: batchLimits.maxBatchBytes
+          },
+          capacity: store.measureCapacity(board.ok ? board.value.scene : { elements: [] }),
+          timings: timings(),
+          prototypeQuality: prototypeQuality2,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false
+        };
+      }
+      rejectNewPrototypeFrames(currentElements, parsedOps);
+      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
+      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
+      const ops = normalizePageShellUpserts(currentElements, semanticOps);
+      const prospectiveElements = previewElements(currentElements, ops);
+      const currentScene = board.ok ? board.value.scene : { elements: [] };
+      const currentCapacity = store.measureCapacity(currentScene);
+      const projectedCapacity = store.measureCapacity({ ...currentScene, elements: prospectiveElements });
+      if (projectedCapacity.canonicalBytes > projectedCapacity.hardCapBytes) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
+        const prototypeQuality2 = inspectPrototypeQuality(currentElements);
+        return {
+          rev: board.ok ? board.value.rev : 0,
+          targetBoard: target.name,
+          ...target.activeBoard === void 0 ? {} : { activeBoard: target.activeBoard },
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: "\u5199\u5165\u540E\u7684\u5B8C\u6574\u753B\u677F\u4F1A\u8D85\u8FC7\u5BB9\u91CF\u786C\u4E0A\u9650\uFF1B\u7F29\u5C0F\u540C\u4E00\u6539\u52A8\u6279\u6B21\u4E0D\u80FD\u89E3\u51B3\u3002\u8BF7\u5148\u5F52\u6863\u6216\u62C6\u5206\u753B\u677F\uFF0C\u518D\u628A\u76EE\u6807\u9875\u9762\u5199\u5165\u65B0\u753B\u677F\u3002",
+          nextActionCode: "archive_or_split_board",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: "<new board>", action: "write", ops: "<pages moved from the full board>" }
           },
           capacity: {
-            maxBytes: projectedCapacity.maxBytes,
-            usedBytes: currentCapacity.usedBytes,
+            hardCapBytes: projectedCapacity.hardCapBytes,
+            softCapBytes: projectedCapacity.softCapBytes,
+            canonicalBytes: currentCapacity.canonicalBytes,
+            persistedBytes: currentCapacity.persistedBytes,
             remainingBytes: currentCapacity.remainingBytes,
-            projectedBytes: projectedCapacity.usedBytes,
-            excessBytes: projectedCapacity.usedBytes - projectedCapacity.maxBytes
+            projectedCanonicalBytes: projectedCapacity.canonicalBytes,
+            projectedPersistedBytes: projectedCapacity.persistedBytes,
+            excessBytes: projectedCapacity.canonicalBytes - projectedCapacity.hardCapBytes
           },
           timings: timings(),
           prototypeQuality: prototypeQuality2,
@@ -14838,7 +15251,7 @@ ${formatLayoutIssues(layoutReport.errors)}
         completionReady,
         nextAction,
         nextActionCode,
-        capacity: measureSceneCapacity(refreshed.value.scene),
+        capacity: store.measureCapacity(refreshed.value.scene),
         timings: timings(),
         prototypeQuality,
         revealRequestId: revealed.value.id,
@@ -15902,7 +16315,8 @@ var Draw2CodeRuntimeImpl = class {
     if (command.type === "list") {
       data = await draw2codeListTool(scenes).execute({ root: command.root }, {});
     } else if (command.type === "read") {
-      data = await draw2codeReadTool(scenes).execute({ root: command.root, ...command.board === void 0 ? {} : { name: command.board } }, {});
+      const { type: _type, board, ...readArgs } = command;
+      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...board === void 0 ? {} : { name: board } }, {});
     } else if (command.type === "create") {
       data = await draw2codeCreateTool(projects, scenes).execute({ ...command.input, root: command.root }, {});
     } else if (command.type === "update") {

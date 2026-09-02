@@ -20,7 +20,18 @@ export interface HostContext {
 
 export type Draw2CodeCommand =
   | { type: 'list'; root: string }
-  | { type: 'read'; root: string; board?: string }
+  | {
+      type: 'read'
+      root: string
+      board?: string
+      detail?: 'index' | 'full'
+      pageIds?: string[]
+      elementIds?: string[]
+      region?: { x: number; y: number; width: number; height: number }
+      changesSince?: number
+      cursor?: string
+      limit?: number
+    }
   | { type: 'create'; root: string; input: Record<string, unknown> }
   | {
       type: 'update'
@@ -144,7 +155,8 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
     if (command.type === 'list') {
       data = await draw2codeListTool(scenes).execute({ root: command.root }, {} as never) as Record<string, unknown>
     } else if (command.type === 'read') {
-      data = await draw2codeReadTool(scenes).execute({ root: command.root, ...(command.board === undefined ? {} : { name: command.board }) }, {} as never) as Record<string, unknown>
+      const { type: _type, board, ...readArgs } = command
+      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...(board === undefined ? {} : { name: board }) }, {} as never) as Record<string, unknown>
     } else if (command.type === 'create') {
       data = await draw2codeCreateTool(projects, scenes).execute({ ...command.input, root: command.root } as never, {} as never) as Record<string, unknown>
     } else if (command.type === 'update') {

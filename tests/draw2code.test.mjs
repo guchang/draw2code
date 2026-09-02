@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { build } from 'esbuild'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -14,6 +14,7 @@ import {
   draw2codeGenerateTool as rawDraw2codeGenerateTool,
   draw2codeReadTool,
   draw2codeUpdateTool,
+  inspectPrototypeLayout,
   inspectPrototypeQuality,
   normalizeOpsArg,
   normalizeVisualReviewArg,
@@ -94,7 +95,7 @@ test.before(async () => {
   autoOpen = await import(pathToFileURL(autoOpenFile).href)
 })
 
-async function makeStore() {
+async function makeStore(options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-draw2code-test-'))
   const canonicalRoot = await realpath(root)
   roots.push(root)
@@ -102,7 +103,7 @@ async function makeStore() {
     workspaceRegistry: { list: () => [{ path: canonicalRoot }] },
     logger: { warn() {} },
   }
-  return { root, canonicalRoot, store: new SceneStore(ctx), projects: new ProjectStore(ctx) }
+  return { root, canonicalRoot, store: new SceneStore(ctx, options), projects: new ProjectStore(ctx) }
 }
 
 function artifactHash(bytes) {
@@ -518,7 +519,7 @@ test('element byte limits include multibyte product copy', async () => {
 })
 
 test('scene byte limits include multibyte product copy', async () => {
-  const { root, store } = await makeStore()
+  const { root, store } = await makeStore({ hardCapBytes: 512 * 1024 })
   const result = await store.write(root, 'scene-byte-cap', {
     elements: Array.from({ length: 45 }, (_, index) => ({
       id: `mock-card-${index}`,
@@ -529,6 +530,157 @@ test('scene byte limits include multibyte product copy', async () => {
 
   assert.equal(result.ok, false)
   assert.equal(result.error.code, 'too-large')
+})
+
+test('scene capacity separates canonical content from persisted formatting bytes', async () => {
+  const { root, canonicalRoot, store } = await makeStore()
+  const written = await store.write(root, 'capacity-metrics', {
+    elements: Array.from({ length: 24 }, (_, index) => ({
+      id: `metric-${index}`,
+      type: 'rectangle',
+      x: index * 20,
+      y: index * 10,
+      width: 16,
+      height: 16,
+    })),
+  })
+  assert.equal(written.ok, true)
+
+  const raw = await readFile(join(canonicalRoot, 'draw2code/capacity-metrics.excalidraw.json'), 'utf8')
+  const parsed = JSON.parse(raw)
+  const canonicalBytes = Buffer.byteLength(JSON.stringify(parsed), 'utf8')
+  const persistedBytes = Buffer.byteLength(raw, 'utf8')
+  const result = await draw2codeReadTool(store).execute({ root, name: 'capacity-metrics' }, {})
+
+  assert.equal(result.capacity.canonicalBytes, canonicalBytes)
+  assert.equal(result.capacity.usedBytes, canonicalBytes)
+  assert.equal(result.capacity.persistedBytes, persistedBytes)
+  assert.equal(result.capacity.persistedBytes > result.capacity.canonicalBytes, true)
+  assert.equal(result.capacity.assetBytes, 0)
+  assert.equal(result.capacity.elementCount, 24)
+})
+
+test('ordinary scene is not rejected only because pretty JSON exceeds the legacy 512 KiB cap', async () => {
+  const { root, canonicalRoot, store } = await makeStore()
+  const result = await store.write(root, 'formatting-headroom', {
+    elements: Array.from({ length: 850 }, (_, index) => ({
+      id: `ordinary-${index}`,
+      type: 'rectangle',
+      x: (index % 25) * 24,
+      y: Math.floor(index / 25) * 24,
+      width: 16,
+      height: 16,
+    })),
+  })
+
+  assert.equal(result.ok, true)
+  const raw = await readFile(join(canonicalRoot, 'draw2code/formatting-headroom.excalidraw.json'), 'utf8')
+  assert.equal(Buffer.byteLength(raw, 'utf8') > 512 * 1024, true)
+  assert.equal(Buffer.byteLength(JSON.stringify(JSON.parse(raw)), 'utf8') < 512 * 1024, true)
+})
+
+test('history snapshots are atomically gzip-compressed, observable, and restorable', async () => {
+  const { root, canonicalRoot, store } = await makeStore()
+  const first = await store.write(root, 'compressed-history', {
+    elements: [{ id: 'title', type: 'text', text: '第一版' }],
+  })
+  assert.equal(first.ok, true)
+  const second = await store.write(root, 'compressed-history', {
+    elements: [{ id: 'title', type: 'text', text: '第二版' }],
+  }, first.value.rev, 'agent')
+  assert.equal(second.ok, true)
+
+  const entries = await readdir(join(canonicalRoot, 'draw2code/.versions/compressed-history'))
+  assert.equal(entries.length, 1)
+  assert.match(entries[0], /\.json\.gz$/)
+  const versions = await store.listVersions(root, 'compressed-history')
+  assert.equal(versions.ok, true)
+  assert.equal(versions.value[0].format, 'gzip-json')
+  assert.equal(versions.value[0].storedBytes > 0, true)
+  const storage = await store.versionStorage(root, 'compressed-history')
+  assert.equal(storage.ok, true)
+  assert.equal(storage.value.versionCount, 1)
+  assert.equal(storage.value.storedBytes, versions.value[0].storedBytes)
+
+  const archived = await store.readVersion(root, 'compressed-history', versions.value[0].id)
+  assert.equal(archived.ok, true)
+  assert.equal(archived.value.scene.elements[0].text, '第一版')
+  const restored = await store.restoreVersion(root, 'compressed-history', versions.value[0].id)
+  assert.equal(restored.ok, true)
+  const current = await store.read(root, 'compressed-history')
+  assert.equal(current.ok, true)
+  assert.equal(current.value.scene.elements[0].text, '第一版')
+})
+
+test('history stores small changes as restorable deltas instead of duplicate full scenes', async () => {
+  const { root, store } = await makeStore()
+  const elements = Array.from({ length: 240 }, (_, index) => ({
+    id: `history-card-${index}`,
+    type: 'text',
+    text: `任务 ${index} · 等待处理`,
+    x: (index % 12) * 340,
+    y: Math.floor(index / 12) * 40,
+    width: 320,
+    height: 28,
+  }))
+  const first = await store.write(root, 'delta-history', { elements })
+  assert.equal(first.ok, true)
+  const second = await store.applyOps(root, 'delta-history', [{
+    op: 'upsert',
+    element: { ...elements[12], text: '任务 12 · 处理中' },
+  }], first.value.rev)
+  assert.equal(second.ok, true)
+  const third = await store.applyOps(root, 'delta-history', [{
+    op: 'upsert',
+    element: { ...elements[13], text: '任务 13 · 已完成' },
+  }], second.value.rev)
+  assert.equal(third.ok, true)
+
+  const versions = await store.listVersions(root, 'delta-history')
+  assert.equal(versions.ok, true)
+  assert.equal(versions.value.length, 2)
+  assert.equal(versions.value.some((version) => version.format === 'gzip-delta'), true)
+  const secondVersion = versions.value[0]
+  const archived = await store.readVersion(root, 'delta-history', secondVersion.id)
+  assert.equal(archived.ok, true)
+  assert.equal(archived.value.scene.elements.find((element) => element.id === 'history-card-12').text, '任务 12 · 处理中')
+  assert.equal(archived.value.scene.elements.find((element) => element.id === 'history-card-13').text, '任务 13 · 等待处理')
+
+  const restored = await store.restoreVersion(root, 'delta-history', secondVersion.id)
+  assert.equal(restored.ok, true)
+  const current = await store.read(root, 'delta-history')
+  assert.equal(current.ok, true)
+  assert.equal(current.value.scene.elements.find((element) => element.id === 'history-card-13').text, '任务 13 · 等待处理')
+})
+
+test('history pruning materializes the retained delta chain before removing its base', async () => {
+  const { root, store } = await makeStore()
+  const elements = Array.from({ length: 40 }, (_, index) => ({
+    id: `prune-card-${index}`,
+    type: 'text',
+    text: `版本 0 · 任务 ${index}`,
+  }))
+  const first = await store.write(root, 'pruned-delta-history', { elements })
+  assert.equal(first.ok, true)
+  let revision = first.value.rev
+  for (let version = 1; version <= 36; version += 1) {
+    const result = await store.applyOps(root, 'pruned-delta-history', [{
+      op: 'upsert',
+      element: { ...elements[0], text: `版本 ${version} · 任务 0` },
+    }], revision)
+    assert.equal(result.ok, true)
+    revision = result.value.rev
+  }
+
+  const versions = await store.listVersions(root, 'pruned-delta-history')
+  assert.equal(versions.ok, true)
+  assert.equal(versions.value.length, 30)
+  assert.equal(versions.value.some((version) => version.format === 'gzip-delta'), true)
+  for (const version of [versions.value[0], versions.value.at(-1)]) {
+    const archived = await store.readVersion(root, 'pruned-delta-history', version.id)
+    assert.equal(archived.ok, true)
+    assert.equal(archived.value.scene.elements.length, 40)
+  }
 })
 
 test('draw2code_update still asks for confirmation on a manual edit conflict', async () => {
@@ -1446,6 +1598,32 @@ test('draw2code_update does not realign an untouched component edited by the use
   assert.deepEqual([manualLabel.textAlign, manualLabel.verticalAlign], ['left', 'top'])
 })
 
+test('draw2code_update limits layout validation to the page touched by a small update', async () => {
+  const { root, store } = await makeStore()
+  await store.write(root, 'page-local-layout', {
+    elements: [
+      { id: 'page-a', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 A', mockDataMin: 1 } },
+      { id: 'page-a-label', type: 'text', text: '页面 A', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-a' } },
+      { id: 'task-a', type: 'text', text: '提交产品周报', x: 24, y: 120, width: 220, height: 30, customData: { role: 'mock-data' } },
+      { id: 'page-b', type: 'rectangle', x: 480, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 B', mockDataMin: 1 } },
+      { id: 'page-b-label', type: 'text', text: '页面 B', x: 480, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-b' } },
+      { id: 'broken-text', type: 'text', text: '这是一段会溢出的多行文字\n第二行\n第三行', x: 504, y: 120, width: 220, height: 12, customData: { role: 'mock-data' } },
+    ],
+  })
+  const invalidBoard = await store.read(root, 'page-local-layout')
+  assert.equal(invalidBoard.ok, true)
+  assert.equal(inspectPrototypeLayout(invalidBoard.value.scene.elements).errors.some((error) => error.id === 'broken-text'), true)
+  await draw2codeReadTool(store).execute({ root, name: 'page-local-layout' }, {})
+
+  const result = await draw2codeUpdateTool(store).execute({
+    root,
+    name: 'page-local-layout',
+    ops: [{ op: 'upsert', element: { id: 'task-a', type: 'text', text: '提交产品周报（今天 17:00）', x: 24, y: 120, width: 300, height: 30, customData: { role: 'mock-data' } } }],
+  }, {})
+
+  assert.equal(result.writeVerified, true)
+})
+
 test('draw2code_update rejects a newly bound component without a semantic role', async () => {
   const { root, store } = await makeStore()
   const tool = draw2codeUpdateTool(store)
@@ -2067,7 +2245,10 @@ test('draw2code_read exposes exact capacity and pending continuation without his
 
   const read = await draw2codeReadTool(store).execute({ root, name: 'continuation-board' }, {})
 
-  assert.equal(read.capacity.maxBytes, 512 * 1024)
+  assert.equal(read.capacity.maxBytes, 256 * 1024 * 1024)
+  assert.equal(read.capacity.hardCapBytes, read.capacity.maxBytes)
+  assert.equal(read.capacity.canonicalBytes, read.capacity.usedBytes)
+  assert.equal(read.capacity.persistedBytes > read.capacity.canonicalBytes, true)
   assert.equal(read.capacity.remainingBytes, read.capacity.maxBytes - read.capacity.usedBytes)
   assert.equal(read.capacity.usedBytes > 0, true)
   assert.equal(read.continuation.status, 'review_representative')
@@ -2107,7 +2288,7 @@ test('draw2code_read exposes exact capacity and pending continuation without his
   })
 })
 
-test('draw2code_update preflights scene capacity before layout or write work', async () => {
+test('draw2code_update rejects an oversized operation batch before layout or write work', async () => {
   const { root, store } = await makeStore()
   const result = await draw2codeUpdateTool(store).execute({
     root,
@@ -2127,14 +2308,41 @@ test('draw2code_update preflights scene capacity before layout or write work', a
   }, {})
 
   assert.equal(result.writeVerified, false)
-  assert.equal(result.nextActionCode, 'reduce_update_scope')
-  assert.equal(result.capacity.projectedBytes > result.capacity.maxBytes, true)
-  assert.equal(result.capacity.excessBytes, result.capacity.projectedBytes - result.capacity.maxBytes)
+  assert.equal(result.nextActionCode, 'reduce_batch_size')
+  assert.equal(result.operationBudget.bytes > result.operationBudget.maxBytes, true)
+  assert.equal(result.capacity.status, 'normal')
   assert.equal(result.applied, 0)
   assert.equal(result.timings.timeToFirstEffectiveWriteMs, null)
 })
 
-test('draw2code_read caps multibyte element payloads by UTF-8 bytes', async () => {
+test('draw2code_update distinguishes final board exhaustion from an oversized batch', async () => {
+  const { root, store } = await makeStore({ hardCapBytes: 64 * 1024, maxBatchBytes: 512 * 1024 })
+  const result = await draw2codeUpdateTool(store).execute({
+    root,
+    name: 'full-board',
+    ops: Array.from({ length: 22 }, (_, index) => ({
+      op: 'upsert',
+      element: {
+        id: `large-${index}`,
+        type: 'text',
+        text: `任务 ${index} ${'内容'.repeat(700)}`,
+        x: index * 4,
+        y: index * 4,
+        width: 320,
+        height: 30,
+      },
+    })),
+  }, {})
+
+  assert.equal(result.writeVerified, false)
+  assert.equal(result.nextActionCode, 'archive_or_split_board')
+  assert.equal(result.capacity.projectedCanonicalBytes > result.capacity.hardCapBytes, true)
+  assert.equal(result.capacity.excessBytes, result.capacity.projectedCanonicalBytes - result.capacity.hardCapBytes)
+  assert.equal(result.applied, 0)
+  assert.equal(result.timings.timeToFirstEffectiveWriteMs, null)
+})
+
+test('draw2code_read is bounded by default and paginates explicit full reads by UTF-8 bytes', async () => {
   const { root, store } = await makeStore()
   const written = await store.write(root, 'read-payload-cap', {
     elements: Array.from({ length: 14 }, (_, index) => ({
@@ -2145,12 +2353,90 @@ test('draw2code_read caps multibyte element payloads by UTF-8 bytes', async () =
   })
   assert.equal(written.ok, true)
 
-  const result = await draw2codeReadTool(store).execute({ root, name: 'read-payload-cap' }, {})
+  const index = await draw2codeReadTool(store).execute({ root, name: 'read-payload-cap' }, {})
+  assert.equal(index.elementCount, 14)
+  assert.deepEqual(index.elements, [])
+  assert.equal(index.selection.detail, 'index')
+  assert.equal(index.selection.returnedElementCount, 0)
 
-  assert.equal(result.elementCount, 14)
-  assert.equal(result.elements.length, 1)
-  assert.equal(result.elements[0].id, '__too_large__')
-  assert.match(result.elements[0].text, /UTF-8 bytes/)
+  const first = await draw2codeReadTool(store).execute({ root, name: 'read-payload-cap', detail: 'full' }, {})
+  assert.equal(first.elements.length > 1, true)
+  assert.equal(first.elements.length < 14, true)
+  assert.equal(first.selection.returnedBytes <= first.selection.maxReturnedBytes, true)
+  assert.equal(typeof first.nextCursor, 'string')
+
+  const second = await draw2codeReadTool(store).execute({ root, name: 'read-payload-cap', detail: 'full', cursor: first.nextCursor }, {})
+  assert.equal(first.elements.length + second.elements.length, 14)
+  assert.equal(second.nextCursor, undefined)
+})
+
+test('draw2code_read bounds quality diagnostics on a large malformed board', async () => {
+  const { root, store } = await makeStore()
+  const written = await store.write(root, 'bounded-diagnostics', {
+    elements: Array.from({ length: 600 }, (_, index) => ({
+      id: `overflow-${index}`,
+      type: 'text',
+      text: `第 ${index} 条任务\n第二行说明\n第三行状态`,
+      x: (index % 20) * 340,
+      y: Math.floor(index / 20) * 24,
+      width: 320,
+      height: 1,
+    })),
+  })
+  assert.equal(written.ok, true)
+
+  const result = await draw2codeReadTool(store).execute({ root, name: 'bounded-diagnostics' }, {})
+  const responseBytes = Buffer.byteLength(JSON.stringify(result), 'utf8')
+
+  assert.equal(result.elementCount, 600)
+  assert.equal(result.layoutWarnings.length <= 20, true)
+  assert.equal(result.selection.diagnostics.totalWarnings >= 600, true)
+  assert.equal(result.selection.diagnostics.truncated, true)
+  assert.equal(responseBytes < 128 * 1024, true)
+})
+
+test('draw2code_read selects by page, ids, region, and recent revision without returning the whole board', async () => {
+  const { root, store } = await makeStore()
+  const firstWrite = await store.write(root, 'scoped-read', {
+    elements: [
+      { id: 'page-a', type: 'rectangle', x: 0, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 A', mockDataMin: 1 } },
+      { id: 'page-a-label', type: 'text', text: '页面 A', x: 0, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'page-a' } },
+      { id: 'task-a', type: 'text', text: '提交产品周报', x: 24, y: 120, width: 220, height: 30, customData: { role: 'mock-data' } },
+      { id: 'page-b', type: 'rectangle', x: 480, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '页面 B', mockDataMin: 1 } },
+      { id: 'task-b', type: 'text', text: '预约牙医', x: 504, y: 120, width: 220, height: 30, customData: { role: 'mock-data' } },
+    ],
+  })
+  assert.equal(firstWrite.ok, true)
+  await draw2codeReadTool(store).execute({ root, name: 'scoped-read' }, {})
+
+  const pageRead = await draw2codeReadTool(store).execute({ root, name: 'scoped-read', pageIds: ['page-a'] }, {})
+  assert.deepEqual(new Set(pageRead.elements.map((element) => element.id)), new Set(['page-a', 'page-a-label', 'task-a']))
+  assert.equal(pageRead.elements.some((element) => element.id === 'task-b'), false)
+
+  const regionRead = await draw2codeReadTool(store).execute({ root, name: 'scoped-read', region: { x: 480, y: 100, width: 300, height: 100 } }, {})
+  assert.deepEqual(regionRead.elements.map((element) => element.id), ['page-b', 'task-b'])
+
+  const idRead = await draw2codeReadTool(store).execute({ root, name: 'scoped-read', elementIds: ['task-b'] }, {})
+  assert.deepEqual(idRead.elements.map((element) => element.id), ['task-b'])
+
+  const beforeChange = await store.read(root, 'scoped-read')
+  assert.equal(beforeChange.ok, true)
+  const secondWrite = await store.write(root, 'scoped-read', {
+    elements: [
+      ...beforeChange.value.scene.elements
+        .filter((element) => element.id !== 'task-b')
+        .map((element) => element.id === 'task-a'
+          ? { ...element, text: '提交产品周报（已修改）', originalText: '提交产品周报（已修改）' }
+          : element),
+      { id: 'task-c', type: 'text', text: '准备周会材料', x: 504, y: 180, width: 220, height: 30, customData: { role: 'mock-data' } },
+    ],
+  }, firstWrite.value.rev)
+  assert.equal(secondWrite.ok, true)
+
+  const changes = await draw2codeReadTool(store).execute({ root, name: 'scoped-read', changesSince: firstWrite.value.rev }, {})
+  assert.deepEqual(new Set(changes.elements.map((element) => element.id)), new Set(['task-a', 'task-c']))
+  assert.deepEqual(changes.deletedElementIds, ['task-b'])
+  assert.equal(changes.selection.changeTracking.status, 'available')
 })
 
 test('draw2code_generate carries existing prototype quality warnings forward', async () => {

@@ -17,7 +17,12 @@ import { inflateSync } from 'node:zlib'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { formatLayoutIssues, inspectPrototypeLayout, inspectPrototypeQuality } from './layout.ts'
+import {
+  formatLayoutIssues,
+  inspectPrototypeLayout,
+  inspectPrototypeQuality,
+  type PrototypeQualityReport,
+} from './layout.ts'
 import { type ProjectStore } from './project-store.ts'
 import {
   pageElementIds,
@@ -30,7 +35,6 @@ import {
   type PrototypePage,
 } from './prototype-page.ts'
 import {
-  measureSceneCapacity,
   normalizeElement,
   reconcileBoundTextBindings,
   semanticTextAlignment,
@@ -44,6 +48,9 @@ function text(value: string): ContentBlock[] {
 
 /** Cap on the full-elements JSON payload handed back to the model. */
 const MAX_ELEMENTS_JSON = 120 * 1024
+const MAX_READ_DIAGNOSTICS = 20
+const MAX_READ_PAGE_INDEX = 200
+const MAX_READ_RELATIONS = 200
 const SNAPSHOT_CACHE_MAX = 40
 const DEFAULT_BOARD = 'prototype'
 
@@ -104,6 +111,7 @@ interface PendingReviewWrite {
 }
 
 const boardCache = new Map<string, Snapshot>()
+const boardHistoryCache = new Map<string, Snapshot[]>()
 const pendingReviewWrites = new Map<string, PendingReviewWrite>()
 const PENDING_REVIEW_WRITE_MAX = 20
 const PENDING_REVIEW_WRITE_TTL_MS = 10 * 60_000
@@ -139,13 +147,15 @@ export async function boardOperationalState(
   board: string,
   revision: number,
   scene: SceneFile,
-): Promise<{ capacity: JsonValue; continuation: JsonValue }> {
-  const [reveal, representativeReview] = await Promise.all([
+): Promise<{ capacity: JsonValue; history: JsonValue; continuation: JsonValue }> {
+  const [reveal, representativeReview, history] = await Promise.all([
     store.getBoardReveal(root),
     store.getBoardReview(root, board, 'representative'),
+    store.versionStorage(root, board),
   ])
   if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`)
   if (!representativeReview.ok) throw new Error(`${representativeReview.error.code}: ${representativeReview.error.message}`)
+  if (!history.ok) throw new Error(`${history.error.code}: ${history.error.message}`)
 
   const currentReveal = reveal.value.request !== null
     && reveal.value.request.board === board
@@ -194,7 +204,8 @@ export async function boardOperationalState(
   }
 
   return {
-    capacity: measureSceneCapacity(scene) as unknown as JsonValue,
+    capacity: store.measureCapacity(scene) as unknown as JsonValue,
+    history: history.value as unknown as JsonValue,
     continuation: continuation as JsonValue,
   }
 }
@@ -612,6 +623,24 @@ function layoutWarnings(elements: Array<Record<string, unknown>>): JsonValue[] {
   })) as JsonValue[]
 }
 
+function boundedPrototypeQuality(report: PrototypeQualityReport): JsonValue {
+  const pages = report.pages.slice(0, MAX_READ_PAGE_INDEX).map((page) => ({
+    ...page,
+    warningCount: page.warnings.length,
+    warnings: page.warnings.slice(0, MAX_READ_DIAGNOSTICS),
+    warningsTruncated: page.warnings.length > MAX_READ_DIAGNOSTICS,
+  }))
+  return {
+    ...report,
+    warningCount: report.warnings.length,
+    warnings: report.warnings.slice(0, MAX_READ_DIAGNOSTICS),
+    warningsTruncated: report.warnings.length > MAX_READ_DIAGNOSTICS,
+    pageCount: report.pages.length,
+    pages,
+    pagesTruncated: report.pages.length > MAX_READ_PAGE_INDEX,
+  } as unknown as JsonValue
+}
+
 function prototypeQualitySummary(value: JsonValue | undefined): string {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return ''
   const qualityScore = typeof value.qualityScore === 'number' ? value.qualityScore : 0
@@ -670,7 +699,9 @@ function computeChangeIds(before: Array<Record<string, unknown>>, after: Array<R
     }
     const beforeElement = beforeMap.get(id)
     if (beforeElement === undefined) continue
-    if (JSON.stringify(beforeElement) !== JSON.stringify(afterElement)) modified.add(id)
+    const { updated: _beforeUpdated, ...beforeComparable } = beforeElement
+    const { updated: _afterUpdated, ...afterComparable } = afterElement
+    if (JSON.stringify(beforeComparable) !== JSON.stringify(afterComparable)) modified.add(id)
   }
   for (const [id] of beforeMap.entries()) {
     if (!afterMap.has(id)) removed.add(id)
@@ -887,11 +918,57 @@ function buildUpdatePlan(
 
 function rememberSnapshot(key: string, snapshot: Snapshot) {
   boardCache.set(key, snapshot)
+  const history = boardHistoryCache.get(key) ?? []
+  const withoutSameRevision = history.filter((item) => Math.abs(item.rev - snapshot.rev) > 0.5)
+  boardHistoryCache.set(key, [...withoutSameRevision, snapshot].slice(-6))
   while (boardCache.size > SNAPSHOT_CACHE_MAX) {
     const first = boardCache.keys().next()
     if (first.done) break
     boardCache.delete(first.value)
+    boardHistoryCache.delete(first.value)
   }
+}
+
+function snapshotAtRevision(key: string, revision: number): Snapshot | undefined {
+  return (boardHistoryCache.get(key) ?? []).find((snapshot) => Math.abs(snapshot.rev - revision) <= 0.5)
+}
+
+function parseStringArray(value: unknown, field: string): string[] {
+  let source = value
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source) } catch { throw new Error(`read-scope-invalid: ${field} must be a string array`) }
+  }
+  if (source === undefined) return []
+  if (!Array.isArray(source) || source.some((item) => typeof item !== 'string')) {
+    throw new Error(`read-scope-invalid: ${field} must be a string array`)
+  }
+  return [...new Set(source.map((item) => item.trim()).filter(Boolean))]
+}
+
+function parseReadRegion(value: unknown): { x: number; y: number; width: number; height: number } | null {
+  let source = value
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source) } catch { throw new Error('read-scope-invalid: region must be {x,y,width,height}') }
+  }
+  if (source === undefined) return null
+  if (typeof source !== 'object' || source === null) throw new Error('read-scope-invalid: region must be {x,y,width,height}')
+  const record = source as Record<string, unknown>
+  const values = ['x', 'y', 'width', 'height'].map((field) => record[field])
+  if (values.some((item) => typeof item !== 'number' || !Number.isFinite(item))) {
+    throw new Error('read-scope-invalid: region x/y/width/height must be finite numbers')
+  }
+  const [x, y, width, height] = values as number[]
+  if (width <= 0 || height <= 0) throw new Error('read-scope-invalid: region width/height must be positive')
+  return { x, y, width, height }
+}
+
+function intersectsRegion(element: Record<string, unknown>, region: { x: number; y: number; width: number; height: number }): boolean {
+  const left = num(element.x)
+  const top = num(element.y)
+  const right = left + Math.max(0, num(element.width))
+  const bottom = top + Math.max(0, num(element.height))
+  return right >= region.x && left <= region.x + region.width
+    && bottom >= region.y && top <= region.y + region.height
 }
 
 /** Human-readable one-line summary of one element. */
@@ -960,10 +1037,17 @@ export function draw2codeListTool(store: SceneStore) {
 export function draw2codeReadTool(store: SceneStore) {
   return defineTool({
     name: 'draw2code_read',
-    description: 'Read one 画码 prototype board: current elements, exact scene capacity, and continuation with opaque review/pending IDs plus executable next-action arguments. Call this once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. A new independent small edit may proceed even when an older review is available; only resume continuation when it belongs to the user\'s current requested batch. Also required before generating frontend pages. Triggers: 查看画板 / 读原型 / board read.',
+    description: 'Read one 画码 prototype board. The default detail=index is bounded: it returns page metadata, relations, layered capacity, quality, and continuation without serializing every element. Use detail=full only for a genuinely small board, or select content with pageIds, elementIds, region, or changesSince. Scoped results are byte-capped and paginated with nextCursor. Call once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. Also required before generating frontend pages. Triggers: 查看画板 / 读原型 / board read.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       name: { type: 'string', description: 'Board name. Omit to use the board currently selected in the 画码 UI.' },
+      detail: { type: 'string', enum: ['index', 'full'], description: 'index (default) returns bounded board/page metadata. full explicitly requests all elements, still subject to byte pagination.' },
+      pageIds: { type: 'array', items: { type: 'string' }, description: 'Return elements belonging to these prototype page ids.' },
+      elementIds: { type: 'array', items: { type: 'string' }, description: 'Return these exact element ids.' },
+      region: { type: 'json', description: 'Return elements intersecting canvas bounds {x,y,width,height}.' },
+      changesSince: { type: 'number', description: 'Return elements added or modified since a revision retained by this running host, plus deletedElementIds.' },
+      cursor: { type: 'string', description: 'Opaque continuation cursor from a previous scoped read.' },
+      limit: { type: 'number', description: 'Maximum selected elements in this page (default 150, max 250).' },
     },
     output: {
       schema: {
@@ -978,6 +1062,7 @@ export function draw2codeReadTool(store: SceneStore) {
           layoutWarnings: { type: 'array', items: { type: 'json' }, required: true },
           prototypeQuality: { type: 'json', required: true },
           capacity: { type: 'json', required: true },
+          history: { type: 'json', required: true },
           continuation: { type: 'json', required: true },
           pageNames: { type: 'array', items: { type: 'string' }, required: true },
           pages: { type: 'array', items: { type: 'json' }, required: true },
@@ -985,6 +1070,9 @@ export function draw2codeReadTool(store: SceneStore) {
           frameNames: { type: 'array', items: { type: 'string' }, required: true },
           file: { type: 'string', required: true },
           elements: { type: 'json', required: true },
+          selection: { type: 'json', required: true },
+          deletedElementIds: { type: 'array', items: { type: 'string' }, required: true },
+          nextCursor: { type: 'string' },
         },
       },
       render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; pageNames?: string[]; pageRelations?: JsonValue[]; summary?: string; layoutWarnings?: JsonValue[]; prototypeQuality?: JsonValue; capacity?: JsonValue; continuation?: JsonValue; file?: string }) => text(
@@ -1000,7 +1088,17 @@ export function draw2codeReadTool(store: SceneStore) {
         ].filter(Boolean).join('\n'),
       ),
     },
-    async execute(args: { root: string; name?: string }) {
+    async execute(args: {
+      root: string
+      name?: string
+      detail?: 'index' | 'full'
+      pageIds?: unknown
+      elementIds?: unknown
+      region?: unknown
+      changesSince?: number
+      cursor?: string
+      limit?: number
+    }) {
       const target = await resolveBoard(store, args.root, args.name)
       const result = await store.read(args.root, target.name)
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
@@ -1012,28 +1110,119 @@ export function draw2codeReadTool(store: SceneStore) {
         ...pageMembershipWarnings(scene.elements, pages),
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index)
       const prototypeQuality = inspectPrototypeQuality(scene.elements)
+      const returnedPages = pages.slice(0, MAX_READ_PAGE_INDEX)
+      const returnedRelations = relations.slice(0, MAX_READ_RELATIONS)
+      const returnedWarnings = qualityWarnings.slice(0, MAX_READ_DIAGNOSTICS)
       const operational = await boardOperationalState(store, args.root, target.name, rev, scene)
-      const summary = scene.elements.map(describeElement).join('\n')
-      const elementsJson = JSON.stringify(scene.elements)
-      const elementsBytes = Buffer.byteLength(elementsJson, 'utf8')
-      const payload: unknown = elementsBytes <= MAX_ELEMENTS_JSON
+      const requestedPageIds = parseStringArray(args.pageIds, 'pageIds')
+      const requestedElementIds = parseStringArray(args.elementIds, 'elementIds')
+      const region = parseReadRegion(args.region)
+      const key = makeKey(args.root, target.name)
+      const hasSelectors = requestedPageIds.length > 0
+        || requestedElementIds.length > 0
+        || region !== null
+        || typeof args.changesSince === 'number'
+      const selectedIds = new Set<string>(requestedElementIds)
+      const missingPageIds = requestedPageIds.filter((id) => !pages.some((page) => page.id === id))
+      for (const page of pages.filter((candidate) => requestedPageIds.includes(candidate.id))) {
+        selectedIds.add(page.id)
+        for (const id of pageElementIds(page, scene.elements, pages)) selectedIds.add(id)
+        for (const label of scene.elements.filter((element) => customData(element).pageId === page.id)) selectedIds.add(str(label.id))
+      }
+      if (region !== null) {
+        for (const element of scene.elements) if (intersectsRegion(element, region)) selectedIds.add(str(element.id))
+      }
+      let deletedElementIds: string[] = []
+      let changeTracking: Record<string, JsonValue> = { status: 'not-requested' }
+      if (typeof args.changesSince === 'number') {
+        const previous = Math.abs(args.changesSince - rev) <= 0.5
+          ? { rev, elements: scene.elements }
+          : snapshotAtRevision(key, args.changesSince)
+        if (previous === undefined) {
+          changeTracking = {
+            status: 'unavailable',
+            requestedRevision: args.changesSince,
+            availableRevisions: (boardHistoryCache.get(key) ?? []).map((snapshot) => snapshot.rev),
+            nextAction: '重新读取目标 pageIds 或 elementIds；changesSince 只保证当前宿主近期修订',
+          }
+        } else {
+          const delta = computeChangeIds(previous.elements, scene.elements)
+          for (const id of delta.added) selectedIds.add(id)
+          for (const id of delta.modified) selectedIds.add(id)
+          deletedElementIds = [...delta.removed]
+          changeTracking = {
+            status: 'available',
+            requestedRevision: args.changesSince,
+            added: [...delta.added],
+            modified: [...delta.modified],
+            removed: deletedElementIds,
+          }
+        }
+      }
+      const selected = args.detail === 'full' && !hasSelectors
         ? scene.elements
-        : [{ id: '__too_large__', type: 'text', text: `elements JSON is ${elementsBytes} UTF-8 bytes (> ${MAX_ELEMENTS_JSON}); read the file directly instead` }]
+        : hasSelectors
+          ? scene.elements.filter((element) => selectedIds.has(str(element.id)))
+          : []
+      const cursor = args.cursor === undefined ? 0 : Number.parseInt(args.cursor, 10)
+      if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('read-scope-invalid: cursor is invalid')
+      const requestedLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : 150
+      const limit = Math.max(1, Math.min(250, requestedLimit))
+      const payload: Array<Record<string, unknown>> = []
+      let nextOffset = cursor
+      while (nextOffset < selected.length && payload.length < limit) {
+        const candidate = [...payload, selected[nextOffset]]
+        if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > MAX_ELEMENTS_JSON) break
+        payload.push(selected[nextOffset])
+        nextOffset += 1
+      }
+      const nextCursor = nextOffset < selected.length ? String(nextOffset) : undefined
+      const summary = payload.length > 0
+        ? payload.map(describeElement).join('\n')
+        : `index only: ${pages.length} pages, ${scene.elements.length} elements; use pageIds, elementIds, region, changesSince, or detail=full to fetch content`
+      rememberSnapshot(key, { rev, elements: scene.elements })
       return {
         rev,
         board: target.name,
         ...(target.activeBoard !== undefined ? { activeBoard: target.activeBoard } : {}),
         elementCount: scene.elements.length,
-        pageNames: pages.map((page) => page.name),
-        pages: publicPrototypePages(scene.elements, pages) as never,
-        pageRelations: relations as never,
-        frameNames: pages.map((page) => page.name),
+        pageNames: returnedPages.map((page) => page.name),
+        pages: publicPrototypePages(scene.elements, pages).slice(0, MAX_READ_PAGE_INDEX) as never,
+        pageRelations: returnedRelations as never,
+        frameNames: returnedPages.map((page) => page.name),
         summary,
-        layoutWarnings: qualityWarnings as unknown as JsonValue[],
-        prototypeQuality: prototypeQuality as unknown as JsonValue,
+        layoutWarnings: returnedWarnings as unknown as JsonValue[],
+        prototypeQuality: boundedPrototypeQuality(prototypeQuality),
         ...operational,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload as never,
+        selection: {
+          detail: args.detail ?? 'index',
+          selectedElementCount: selected.length,
+          returnedElementCount: payload.length,
+          returnedBytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+          maxReturnedBytes: MAX_ELEMENTS_JSON,
+          pageIds: requestedPageIds,
+          missingPageIds,
+          elementIds: requestedElementIds,
+          region: region as unknown as JsonValue,
+          changeTracking: changeTracking as JsonValue,
+          diagnostics: {
+            totalWarnings: qualityWarnings.length,
+            returnedWarnings: returnedWarnings.length,
+            truncated: qualityWarnings.length > returnedWarnings.length,
+          },
+          pageIndex: {
+            totalPages: pages.length,
+            returnedPages: returnedPages.length,
+            truncated: pages.length > returnedPages.length,
+            totalRelations: relations.length,
+            returnedRelations: returnedRelations.length,
+            relationsTruncated: relations.length > returnedRelations.length,
+          },
+        } as JsonValue,
+        deletedElementIds,
+        ...(nextCursor === undefined ? {} : { nextCursor }),
       }
     },
   })
@@ -1081,6 +1270,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
           nextAction: { type: 'string', required: true },
           nextActionCode: { type: 'string' },
           nextActionParams: { type: 'json' },
+          operationBudget: { type: 'json' },
           capacity: { type: 'json' },
           timings: { type: 'json' },
           prototypeQuality: { type: 'json', required: true },
@@ -1236,7 +1426,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
           completionReady,
           nextAction,
           nextActionCode,
-          capacity: measureSceneCapacity(board.value.scene) as unknown as JsonValue,
+          capacity: store.measureCapacity(board.value.scene) as unknown as JsonValue,
           prototypeQuality: prototypeQuality as unknown as JsonValue,
           revealRequestId: reviewToken,
           reviewToken,
@@ -1269,15 +1459,9 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const cache = boardCache.get(key)
       const currentElements = board.ok ? board.value.scene.elements : []
       const preflightStartedAt = performance.now()
-      rejectNewPrototypeFrames(currentElements, parsedOps)
-      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps)
-      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
-      const ops = normalizePageShellUpserts(currentElements, semanticOps)
-      const prospectiveElements = previewElements(currentElements, ops)
-      const currentScene = board.ok ? board.value.scene : { elements: [] }
-      const currentCapacity = measureSceneCapacity(currentScene)
-      const projectedCapacity = measureSceneCapacity({ ...currentScene, elements: prospectiveElements })
-      if (projectedCapacity.usedBytes > projectedCapacity.maxBytes) {
+      const batchLimits = store.capacityLimits()
+      const batchBytes = Buffer.byteLength(JSON.stringify(parsedOps), 'utf8')
+      if (parsedOps.length > batchLimits.maxBatchOps || batchBytes > batchLimits.maxBatchBytes) {
         stageTimings.preflightMs += performance.now() - preflightStartedAt
         const prototypeQuality = inspectPrototypeQuality(currentElements)
         return {
@@ -1290,18 +1474,62 @@ export function draw2codeUpdateTool(store: SceneStore) {
           writeVerified: false,
           reviewVerified: false,
           completionReady: false,
-          nextAction: '本批次会超过画板容量；保留当前画板不写入，将更新拆成更小的独立批次后重试',
-          nextActionCode: 'reduce_update_scope',
+          nextAction: '本次工具调用的 ops 负载过大；画板本身可能仍有容量。按页面或独立改动拆分本批次后重试。',
+          nextActionCode: 'reduce_batch_size',
           nextActionParams: {
             tool: 'draw2code_update',
-            arguments: { root: args.root, name: target.name, action: 'write', ops: '<smaller independent batch>' },
+            arguments: { root: args.root, name: target.name, action: 'write', ops: '<one page or one independent change batch>' },
+          } as JsonValue,
+          operationBudget: {
+            opCount: parsedOps.length,
+            maxOps: batchLimits.maxBatchOps,
+            bytes: batchBytes,
+            maxBytes: batchLimits.maxBatchBytes,
+          } as JsonValue,
+          capacity: store.measureCapacity(board.ok ? board.value.scene : { elements: [] }) as unknown as JsonValue,
+          timings: timings(),
+          prototypeQuality: prototypeQuality as unknown as JsonValue,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false,
+        }
+      }
+      rejectNewPrototypeFrames(currentElements, parsedOps)
+      const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps)
+      const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
+      const ops = normalizePageShellUpserts(currentElements, semanticOps)
+      const prospectiveElements = previewElements(currentElements, ops)
+      const currentScene = board.ok ? board.value.scene : { elements: [] }
+      const currentCapacity = store.measureCapacity(currentScene)
+      const projectedCapacity = store.measureCapacity({ ...currentScene, elements: prospectiveElements })
+      if (projectedCapacity.canonicalBytes > projectedCapacity.hardCapBytes) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt
+        const prototypeQuality = inspectPrototypeQuality(currentElements)
+        return {
+          rev: board.ok ? board.value.rev : 0,
+          targetBoard: target.name,
+          ...(target.activeBoard === undefined ? {} : { activeBoard: target.activeBoard }),
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: '写入后的完整画板会超过容量硬上限；缩小同一改动批次不能解决。请先归档或拆分画板，再把目标页面写入新画板。',
+          nextActionCode: 'archive_or_split_board',
+          nextActionParams: {
+            tool: 'draw2code_update',
+            arguments: { root: args.root, name: '<new board>', action: 'write', ops: '<pages moved from the full board>' },
           } as JsonValue,
           capacity: {
-            maxBytes: projectedCapacity.maxBytes,
-            usedBytes: currentCapacity.usedBytes,
+            hardCapBytes: projectedCapacity.hardCapBytes,
+            softCapBytes: projectedCapacity.softCapBytes,
+            canonicalBytes: currentCapacity.canonicalBytes,
+            persistedBytes: currentCapacity.persistedBytes,
             remainingBytes: currentCapacity.remainingBytes,
-            projectedBytes: projectedCapacity.usedBytes,
-            excessBytes: projectedCapacity.usedBytes - projectedCapacity.maxBytes,
+            projectedCanonicalBytes: projectedCapacity.canonicalBytes,
+            projectedPersistedBytes: projectedCapacity.persistedBytes,
+            excessBytes: projectedCapacity.canonicalBytes - projectedCapacity.hardCapBytes,
           } as JsonValue,
           timings: timings(),
           prototypeQuality: prototypeQuality as unknown as JsonValue,
@@ -1494,7 +1722,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
         completionReady,
         nextAction,
         nextActionCode,
-        capacity: measureSceneCapacity(refreshed.value.scene) as unknown as JsonValue,
+        capacity: store.measureCapacity(refreshed.value.scene) as unknown as JsonValue,
         timings: timings(),
         prototypeQuality: prototypeQuality as unknown as JsonValue,
         revealRequestId: revealed.value.id,
