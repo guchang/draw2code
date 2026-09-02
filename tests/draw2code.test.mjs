@@ -2006,6 +2006,134 @@ test('draw2code_update cannot bypass representative review by drawing two pages 
   )
 })
 
+test('draw2code_update does not block an independent page added to an established multi-page board', async () => {
+  const { root, store } = await makeStore()
+  const existingPages = Array.from({ length: 3 }, (_, index) => {
+    const x = index * 450
+    const id = `existing-page-${index + 1}`
+    return [
+      { id, type: 'rectangle', x, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: `已有页面 ${index + 1}`, mockDataMin: 1 } },
+      { id: `${id}-label`, type: 'text', text: `已有页面 ${index + 1}`, x, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: id } },
+      { id: `${id}-mock`, type: 'text', text: `已有任务 ${index + 1}`, x: x + 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } },
+    ]
+  }).flat()
+  const filler = Array.from({ length: 480 }, (_, index) => ({
+    id: `existing-element-${index}`,
+    type: 'rectangle',
+    x: 2000 + (index % 24) * 20,
+    y: 1200 + Math.floor(index / 24) * 20,
+    width: 16,
+    height: 16,
+  }))
+  const written = await store.write(root, 'established-board', { elements: [...existingPages, ...filler] })
+  assert.equal(written.ok, true)
+  assert.equal((await store.publishBoardReveal(root, 'established-board', written.value.rev)).ok, true)
+
+  const result = await draw2codeUpdateTool(store).execute({
+    root,
+    name: 'established-board',
+    ops: [
+      { op: 'upsert', element: { id: 'independent-page', type: 'rectangle', x: 1350, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: '独立新增页', mockDataMin: 1 } } },
+      { op: 'upsert', element: { id: 'independent-page-label', type: 'text', text: '独立新增页', x: 1350, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: 'independent-page' } } },
+      { op: 'upsert', element: { id: 'independent-page-mock', type: 'text', text: '提交产品周报', x: 1374, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+    ],
+  }, {})
+
+  assert.equal(result.writeVerified, true)
+  assert.equal(result.applied, 3)
+  assert.equal(result.pendingUpdateId, undefined)
+  assert.equal(result.prototypeQuality.pages.length, 4)
+  assert.equal(result.elementCount, 492)
+  assert.equal(result.timings.scope, 'tool-execution')
+  assert.equal(typeof result.timings.totalMs, 'number')
+  assert.equal(typeof result.timings.timeToFirstEffectiveWriteMs, 'number')
+})
+
+test('draw2code_read exposes exact capacity and pending continuation without history lookup', async () => {
+  const { root, store } = await makeStore()
+  const tool = draw2codeUpdateTool(store)
+  const pageOps = (id, name, x) => [
+    { op: 'upsert', element: { id, type: 'rectangle', x, y: 40, width: 390, height: 844, customData: { role: 'prototype-page', pageName: name, mockDataMin: 1 } } },
+    { op: 'upsert', element: { id: `${id}-label`, type: 'text', text: name, x, y: 4, width: 160, height: 28, customData: { role: 'prototype-page-label', pageId: id } } },
+    { op: 'upsert', element: { id: `${id}-mock`, type: 'text', text: `${name}真实任务`, x: x + 24, y: 120, width: 320, height: 30, customData: { role: 'mock-data' } } },
+  ]
+  const representative = await tool.execute({ root, name: 'continuation-board', ops: pageOps('page-a', '今天', 0) }, {})
+  const pending = await tool.execute({
+    root,
+    name: 'continuation-board',
+    ops: [...pageOps('page-b', '全部任务', 450), ...pageOps('page-c', '编辑任务', 900)],
+  }, {})
+  assert.equal(pending.nextActionCode, 'review_representative')
+
+  const read = await draw2codeReadTool(store).execute({ root, name: 'continuation-board' }, {})
+
+  assert.equal(read.capacity.maxBytes, 512 * 1024)
+  assert.equal(read.capacity.remainingBytes, read.capacity.maxBytes - read.capacity.usedBytes)
+  assert.equal(read.capacity.usedBytes > 0, true)
+  assert.equal(read.continuation.status, 'review_representative')
+  assert.equal(read.continuation.pendingUpdateId, pending.pendingUpdateId)
+  assert.deepEqual(read.continuation.nextAction, {
+    tool: 'draw2code_update',
+    arguments: {
+      root,
+      name: 'continuation-board',
+      action: 'review',
+      reviewToken: representative.reviewToken,
+      phase: 'representative',
+    },
+  })
+
+  assert.equal((await store.ackBoardReveal(root, representative.revealRequestId, 'continuation-board')).ok, true)
+  await tool.execute({
+    root,
+    name: 'continuation-board',
+    action: 'review',
+    reviewToken: representative.reviewToken,
+    phase: 'representative',
+    passed: true,
+    inspectedPageIds: ['page-a'],
+    observations: ['代表页首屏可见'],
+  }, {})
+  const reviewed = await draw2codeReadTool(store).execute({ root, name: 'continuation-board' }, {})
+  assert.equal(reviewed.continuation.status, 'commit_pending_write')
+  assert.deepEqual(reviewed.continuation.nextAction, {
+    tool: 'draw2code_update',
+    arguments: {
+      root,
+      name: 'continuation-board',
+      action: 'commit_pending',
+      pendingUpdateId: pending.pendingUpdateId,
+    },
+  })
+})
+
+test('draw2code_update preflights scene capacity before layout or write work', async () => {
+  const { root, store } = await makeStore()
+  const result = await draw2codeUpdateTool(store).execute({
+    root,
+    name: 'capacity-preflight',
+    ops: Array.from({ length: 220 }, (_, index) => ({
+      op: 'upsert',
+      element: {
+        id: `large-${index}`,
+        type: 'text',
+        text: `任务 ${index} ${'内容'.repeat(1000)}`,
+        x: index * 4,
+        y: index * 4,
+        width: 320,
+        height: 30,
+      },
+    })),
+  }, {})
+
+  assert.equal(result.writeVerified, false)
+  assert.equal(result.nextActionCode, 'reduce_update_scope')
+  assert.equal(result.capacity.projectedBytes > result.capacity.maxBytes, true)
+  assert.equal(result.capacity.excessBytes, result.capacity.projectedBytes - result.capacity.maxBytes)
+  assert.equal(result.applied, 0)
+  assert.equal(result.timings.timeToFirstEffectiveWriteMs, null)
+})
+
 test('draw2code_read caps multibyte element payloads by UTF-8 bytes', async () => {
   const { root, store } = await makeStore()
   const written = await store.write(root, 'read-payload-cap', {

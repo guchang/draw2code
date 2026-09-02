@@ -29,7 +29,14 @@ import {
   publicPrototypePages,
   type PrototypePage,
 } from './prototype-page.ts'
-import { normalizeElement, reconcileBoundTextBindings, semanticTextAlignment, type SceneStore } from './scene-store.ts'
+import {
+  measureSceneCapacity,
+  normalizeElement,
+  reconcileBoundTextBindings,
+  semanticTextAlignment,
+  type SceneFile,
+  type SceneStore,
+} from './scene-store.ts'
 
 function text(value: string): ContentBlock[] {
   return [{ type: 'text', text: value }]
@@ -124,6 +131,72 @@ function pendingReviewWriteFor(root: string, board: string, baseRev: number): Pe
   return [...pendingReviewWrites.values()]
     .filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5)
     .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+}
+
+export async function boardOperationalState(
+  store: SceneStore,
+  root: string,
+  board: string,
+  revision: number,
+  scene: SceneFile,
+): Promise<{ capacity: JsonValue; continuation: JsonValue }> {
+  const [reveal, representativeReview] = await Promise.all([
+    store.getBoardReveal(root),
+    store.getBoardReview(root, board, 'representative'),
+  ])
+  if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`)
+  if (!representativeReview.ok) throw new Error(`${representativeReview.error.code}: ${representativeReview.error.message}`)
+
+  const currentReveal = reveal.value.request !== null
+    && reveal.value.request.board === board
+    && Math.abs(reveal.value.request.revision - revision) <= 0.5
+      ? reveal.value.request
+      : null
+  const currentRepresentativeReview = representativeReview.value.receipt !== null
+    && Math.abs(representativeReview.value.receipt.revision - revision) <= 0.5
+      ? representativeReview.value.receipt
+      : null
+  const pendingWrite = pendingReviewWriteFor(root, board, revision)
+
+  let continuation: Record<string, JsonValue>
+  if (pendingWrite !== null && currentRepresentativeReview !== null) {
+    continuation = {
+      status: 'commit_pending_write',
+      pendingUpdateId: pendingWrite.id,
+      nextAction: {
+        tool: 'draw2code_update',
+        arguments: { root, name: board, action: 'commit_pending', pendingUpdateId: pendingWrite.id },
+      },
+    }
+  } else if (pendingWrite !== null && currentReveal !== null) {
+    continuation = {
+      status: 'review_representative',
+      reviewToken: currentReveal.id,
+      pendingUpdateId: pendingWrite.id,
+      canvasAcknowledged: typeof currentReveal.consumedAt === 'number',
+      nextAction: {
+        tool: 'draw2code_update',
+        arguments: { root, name: board, action: 'review', reviewToken: currentReveal.id, phase: 'representative' },
+      },
+    }
+  } else if (currentReveal !== null) {
+    continuation = {
+      status: 'review_available',
+      reviewToken: currentReveal.id,
+      canvasAcknowledged: typeof currentReveal.consumedAt === 'number',
+      nextAction: {
+        tool: 'draw2code_update',
+        arguments: { root, name: board, action: 'review', reviewToken: currentReveal.id },
+      },
+    }
+  } else {
+    continuation = { status: 'idle', nextAction: null }
+  }
+
+  return {
+    capacity: measureSceneCapacity(scene) as unknown as JsonValue,
+    continuation: continuation as JsonValue,
+  }
 }
 
 async function resolveBoard(store: SceneStore, root: string, requested?: string): Promise<{ name: string; activeBoard?: string }> {
@@ -512,7 +585,7 @@ function validatePhasedDrawing(
   if (currentPages.length === 0 && newPages.length >= 3) {
     throw new Error('visual-review-required: first draw one representative page, inspect it in the visible 画码 canvas, then add the remaining pages; do not author three or more unseen pages in the first batch')
   }
-  if (currentPages.length > 0 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
+  if (currentPages.length > 0 && currentPages.length < 3 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
     const representativeReviewed = visualReview?.phase === 'representative'
       && visualReview.passed
       && visualReview.observations.length > 0
@@ -887,8 +960,7 @@ export function draw2codeListTool(store: SceneStore) {
 export function draw2codeReadTool(store: SceneStore) {
   return defineTool({
     name: 'draw2code_read',
-    description: 'Read one 画码 prototype board: a compact per-element summary plus the full elements JSON (needed before '
-      + 'updating or before generating frontend pages from the board). Triggers: 查看画板 / 读原型 / board read.',
+    description: 'Read one 画码 prototype board: current elements, exact scene capacity, and continuation with opaque review/pending IDs plus executable next-action arguments. Call this once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. A new independent small edit may proceed even when an older review is available; only resume continuation when it belongs to the user\'s current requested batch. Also required before generating frontend pages. Triggers: 查看画板 / 读原型 / board read.',
     parameters: {
       root: { type: 'string', required: true, description: 'Workspace root (the session working directory).' },
       name: { type: 'string', description: 'Board name. Omit to use the board currently selected in the 画码 UI.' },
@@ -905,6 +977,8 @@ export function draw2codeReadTool(store: SceneStore) {
           summary: { type: 'string', required: true },
           layoutWarnings: { type: 'array', items: { type: 'json' }, required: true },
           prototypeQuality: { type: 'json', required: true },
+          capacity: { type: 'json', required: true },
+          continuation: { type: 'json', required: true },
           pageNames: { type: 'array', items: { type: 'string' }, required: true },
           pages: { type: 'array', items: { type: 'json' }, required: true },
           pageRelations: { type: 'array', items: { type: 'json' }, required: true },
@@ -913,10 +987,11 @@ export function draw2codeReadTool(store: SceneStore) {
           elements: { type: 'json', required: true },
         },
       },
-      render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; pageNames?: string[]; pageRelations?: JsonValue[]; summary?: string; layoutWarnings?: JsonValue[]; prototypeQuality?: JsonValue; file?: string }) => text(
+      render: (_args, value: { board?: string; activeBoard?: string; elementCount?: number; pageNames?: string[]; pageRelations?: JsonValue[]; summary?: string; layoutWarnings?: JsonValue[]; prototypeQuality?: JsonValue; capacity?: JsonValue; continuation?: JsonValue; file?: string }) => text(
         [
           `board: ${value.board ?? ''} · ${value.elementCount ?? 0} elements`,
           `pages: ${(value.pageNames ?? []).join('、') || '（未识别）'} · relations: ${value.pageRelations?.length ?? 0}`,
+          `capacity: ${num(recordValue(value.capacity)?.usedBytes)}/${num(recordValue(value.capacity)?.maxBytes)} bytes · continuation: ${str(recordValue(value.continuation)?.status) || 'idle'}`,
           value.activeBoard !== undefined && value.activeBoard !== value.board ? `当前画板: ${value.activeBoard}（与读取目标不同）` : '',
           (value.layoutWarnings ?? []).length > 0 ? `原型质量提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : '',
           prototypeQualitySummary(value.prototypeQuality),
@@ -937,6 +1012,7 @@ export function draw2codeReadTool(store: SceneStore) {
         ...pageMembershipWarnings(scene.elements, pages),
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index)
       const prototypeQuality = inspectPrototypeQuality(scene.elements)
+      const operational = await boardOperationalState(store, args.root, target.name, rev, scene)
       const summary = scene.elements.map(describeElement).join('\n')
       const elementsJson = JSON.stringify(scene.elements)
       const elementsBytes = Buffer.byteLength(elementsJson, 'utf8')
@@ -955,6 +1031,7 @@ export function draw2codeReadTool(store: SceneStore) {
         summary,
         layoutWarnings: qualityWarnings as unknown as JsonValue[],
         prototypeQuality: prototypeQuality as unknown as JsonValue,
+        ...operational,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload as never,
       }
@@ -1003,6 +1080,9 @@ export function draw2codeUpdateTool(store: SceneStore) {
           completionReady: { type: 'boolean', required: true },
           nextAction: { type: 'string', required: true },
           nextActionCode: { type: 'string' },
+          nextActionParams: { type: 'json' },
+          capacity: { type: 'json' },
+          timings: { type: 'json' },
           prototypeQuality: { type: 'json', required: true },
           revealRequestId: { type: 'string' },
           reviewToken: { type: 'string' },
@@ -1024,10 +1104,10 @@ export function draw2codeUpdateTool(store: SceneStore) {
           },
         },
       },
-      render: (_args, value: { rev?: number; targetBoard?: string; activeBoard?: string; pending?: boolean; elementCount?: number; applied?: number; verified?: boolean; writeVerified?: boolean; reviewVerified?: boolean; completionReady?: boolean; nextAction?: string; nextActionCode?: string; prototypeQuality?: JsonValue; revealRequestId?: string; reviewToken?: string; pendingUpdateId?: string; layoutWarnings?: JsonValue[]; conflicts?: unknown[]; planSummary?: string }) => text(
+      render: (_args, value: { rev?: number; targetBoard?: string; activeBoard?: string; pending?: boolean; elementCount?: number; applied?: number; verified?: boolean; writeVerified?: boolean; reviewVerified?: boolean; completionReady?: boolean; nextAction?: string; nextActionCode?: string; prototypeQuality?: JsonValue; revealRequestId?: string; reviewToken?: string; pendingUpdateId?: string; layoutWarnings?: JsonValue[]; conflicts?: unknown[]; planSummary?: string; timings?: JsonValue }) => text(
         value.pending === true
           ? `【待确认】检测到潜在冲突（${value.conflicts?.length ?? 0} 条）：\n${value.planSummary ?? ''}\n请先确认后再重试：在你确认了之后，请重新调用 draw2code_update 并设置 force=true。`
-          : `board ${value.targetBoard ?? ''}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === 'object' && (value.prototypeQuality as Record<string, JsonValue>).visualReviewRequired === true}; boardRevision=${value.rev ?? 'missing'}; revealRequestId=${value.revealRequestId ?? 'missing'}; reviewToken=${value.reviewToken ?? 'missing'}; pendingUpdateId=${value.pendingUpdateId ?? 'none'}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ''}. ${value.nextAction ?? ''}${value.writeVerified === true ? ' The 画码 sidebar opens automatically on this board.' : ''}${(value.layoutWarnings ?? []).length > 0 ? `\n结构与布局提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : ''}`,
+          : `board ${value.targetBoard ?? ''}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === 'object' && (value.prototypeQuality as Record<string, JsonValue>).visualReviewRequired === true}; boardRevision=${value.rev ?? 'missing'}; revealRequestId=${value.revealRequestId ?? 'missing'}; reviewToken=${value.reviewToken ?? 'missing'}; pendingUpdateId=${value.pendingUpdateId ?? 'none'}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ''}. ${value.nextAction ?? ''}${recordValue(value.timings)?.totalMs === undefined ? '' : ` toolTime=${num(recordValue(value.timings)?.totalMs)}ms.`}${value.writeVerified === true ? ' The 画码 sidebar opens automatically on this board.' : ''}${(value.layoutWarnings ?? []).length > 0 ? `\n结构与布局提醒：\n${formatLayoutIssues(value.layoutWarnings ?? [])}` : ''}`,
       ),
     },
     async execute(args: {
@@ -1045,6 +1125,21 @@ export function draw2codeUpdateTool(store: SceneStore) {
       pendingUpdateId?: string
       visualReview?: unknown
     }) {
+      const startedAt = performance.now()
+      const stageTimings = { readMs: 0, preflightMs: 0, writeMs: 0, verificationMs: 0, publishMs: 0 }
+      let firstEffectiveWriteAt: number | null = null
+      const rounded = (value: number): number => Math.round(value * 10) / 10
+      const timings = (): JsonValue => ({
+        scope: 'tool-execution',
+        excludes: 'agent-reasoning-before-tool-call',
+        readMs: rounded(stageTimings.readMs),
+        preflightMs: rounded(stageTimings.preflightMs),
+        writeMs: rounded(stageTimings.writeMs),
+        verificationMs: rounded(stageTimings.verificationMs),
+        publishMs: rounded(stageTimings.publishMs),
+        totalMs: rounded(performance.now() - startedAt),
+        timeToFirstEffectiveWriteMs: firstEffectiveWriteAt === null ? null : rounded(firstEffectiveWriteAt - startedAt),
+      })
       const safeMode = args.safeMode !== false
       const force = args.force === true
       const visualReview = parseVisualReview(args.visualReview)
@@ -1071,7 +1166,9 @@ export function draw2codeUpdateTool(store: SceneStore) {
       if (action === 'review') {
         if (parsedOps.length > 0) throw new Error('visual-review-requires-empty-ops: action=review cannot mutate the board')
         const target = await resolveBoard(store, args.root, targetName)
+        const readStartedAt = performance.now()
         const board = await store.read(args.root, target.name)
+        stageTimings.readMs += performance.now() - readStartedAt
         if (!board.ok) throw new Error(`${board.error.code}: ${board.error.message}`)
         const evidence = visualReview === null
           ? parseReviewAction(args)
@@ -1139,6 +1236,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
           completionReady,
           nextAction,
           nextActionCode,
+          capacity: measureSceneCapacity(board.value.scene) as unknown as JsonValue,
           prototypeQuality: prototypeQuality as unknown as JsonValue,
           revealRequestId: reviewToken,
           reviewToken,
@@ -1152,6 +1250,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
           layoutWarnings: layoutWarnings(board.value.scene.elements),
           requiresConfirmation: false,
           pending: false,
+          timings: timings(),
         }
       }
       if (requestedAction === 'write' && args.ops === undefined) throw new Error('invalid arguments: action=write requires ops')
@@ -1159,7 +1258,9 @@ export function draw2codeUpdateTool(store: SceneStore) {
         throw new Error('visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]')
       }
       const target = await resolveBoard(store, args.root, targetName)
+      const readStartedAt = performance.now()
       const board = await store.read(args.root, target.name)
+      stageTimings.readMs += performance.now() - readStartedAt
       if (pendingCommit !== null && (!board.ok || Math.abs(board.value.rev - pendingCommit.baseRev) > 0.5)) {
         throw new Error('pending-update-stale: board changed after the pending batch was preserved; read the latest board and create a new minimal update')
       }
@@ -1167,11 +1268,48 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const key = makeKey(args.root, target.name)
       const cache = boardCache.get(key)
       const currentElements = board.ok ? board.value.scene.elements : []
+      const preflightStartedAt = performance.now()
       rejectNewPrototypeFrames(currentElements, parsedOps)
       const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps)
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps)
       const ops = normalizePageShellUpserts(currentElements, semanticOps)
       const prospectiveElements = previewElements(currentElements, ops)
+      const currentScene = board.ok ? board.value.scene : { elements: [] }
+      const currentCapacity = measureSceneCapacity(currentScene)
+      const projectedCapacity = measureSceneCapacity({ ...currentScene, elements: prospectiveElements })
+      if (projectedCapacity.usedBytes > projectedCapacity.maxBytes) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt
+        const prototypeQuality = inspectPrototypeQuality(currentElements)
+        return {
+          rev: board.ok ? board.value.rev : 0,
+          targetBoard: target.name,
+          ...(target.activeBoard === undefined ? {} : { activeBoard: target.activeBoard }),
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: '本批次会超过画板容量；保留当前画板不写入，将更新拆成更小的独立批次后重试',
+          nextActionCode: 'reduce_update_scope',
+          nextActionParams: {
+            tool: 'draw2code_update',
+            arguments: { root: args.root, name: target.name, action: 'write', ops: '<smaller independent batch>' },
+          } as JsonValue,
+          capacity: {
+            maxBytes: projectedCapacity.maxBytes,
+            usedBytes: currentCapacity.usedBytes,
+            remainingBytes: currentCapacity.remainingBytes,
+            projectedBytes: projectedCapacity.usedBytes,
+            excessBytes: projectedCapacity.usedBytes - projectedCapacity.maxBytes,
+          } as JsonValue,
+          timings: timings(),
+          prototypeQuality: prototypeQuality as unknown as JsonValue,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false,
+        }
+      }
       const storedRepresentative = await store.getBoardReview(args.root, target.name, 'representative')
       if (!storedRepresentative.ok) throw new Error(`${storedRepresentative.error.code}: ${storedRepresentative.error.message}`)
       const storedRepresentativeReviewed = board.ok
@@ -1197,6 +1335,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
           pendingReviewWrites.delete(pendingWrite.id)
           throw error
         }
+        stageTimings.preflightMs += performance.now() - preflightStartedAt
         const prototypeQuality = inspectPrototypeQuality(currentElements)
         prototypeQuality.visualReviewRequired = true
         return {
@@ -1211,6 +1350,12 @@ export function draw2codeUpdateTool(store: SceneStore) {
           completionReady: false,
           nextAction: '剩余页面 ops 已安全暂存；先查看当前代表页并用 action=review、reviewToken 和 phase=representative 完成复核，之后只提交 pendingUpdateId，不要重发大 JSON',
           nextActionCode: 'review_representative',
+          nextActionParams: {
+            tool: 'draw2code_update',
+            arguments: { root: args.root, name: target.name, action: 'review', reviewToken: request.id, phase: 'representative' },
+          } as JsonValue,
+          capacity: currentCapacity as unknown as JsonValue,
+          timings: timings(),
           prototypeQuality: prototypeQuality as unknown as JsonValue,
           revealRequestId: request.id,
           reviewToken: request.id,
@@ -1251,6 +1396,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
         throw new Error(`${board.error.code}: ${board.error.message}`)
       }
       if (safeMode && !force && conflicts.length > 0) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt
         const elementCount = currentElements.length
         const conflictValues = conflicts as unknown as JsonValue[]
         const prototypeQuality = inspectPrototypeQuality(currentElements)
@@ -1264,6 +1410,13 @@ export function draw2codeUpdateTool(store: SceneStore) {
           writeVerified: false,
           completionReady: false,
           nextAction: '先确认冲突；本轮尚未写入，也不能进入视觉完成验收',
+          nextActionCode: 'confirm_overwrite',
+          nextActionParams: {
+            tool: 'draw2code_update',
+            arguments: { root: args.root, name: target.name, action: 'write', force: true },
+          } as JsonValue,
+          capacity: currentCapacity as unknown as JsonValue,
+          timings: timings(),
           prototypeQuality: prototypeQuality as unknown as JsonValue,
           layoutWarnings: layoutWarnings(currentElements),
           requiresConfirmation: true,
@@ -1278,8 +1431,13 @@ export function draw2codeUpdateTool(store: SceneStore) {
         }
       }
 
+      stageTimings.preflightMs += performance.now() - preflightStartedAt
+      const writeStartedAt = performance.now()
       const result = await store.applyOps(args.root, target.name, ops, board.ok ? board.value.rev : undefined)
+      stageTimings.writeMs += performance.now() - writeStartedAt
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+      firstEffectiveWriteAt = performance.now()
+      const verificationStartedAt = performance.now()
       const refreshed = await store.read(args.root, target.name)
       if (!refreshed.ok) throw new Error(`${refreshed.error.code}: ${refreshed.error.message}`)
       if (refreshed.value.scene.elements.length !== result.value.elementCount) {
@@ -1287,12 +1445,15 @@ export function draw2codeUpdateTool(store: SceneStore) {
       }
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements)
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`)
+      stageTimings.verificationMs += performance.now() - verificationStartedAt
       if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id)
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements })
+      const publishStartedAt = performance.now()
       const selected = await store.setActiveBoard(args.root, target.name)
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`)
       const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev)
       if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`)
+      stageTimings.publishMs += performance.now() - publishStartedAt
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements)
       const pages = prototypePages(refreshed.value.scene.elements)
       const prototypeQuality = inspectPrototypeQuality(refreshed.value.scene.elements)
@@ -1333,6 +1494,8 @@ export function draw2codeUpdateTool(store: SceneStore) {
         completionReady,
         nextAction,
         nextActionCode,
+        capacity: measureSceneCapacity(refreshed.value.scene) as unknown as JsonValue,
+        timings: timings(),
         prototypeQuality: prototypeQuality as unknown as JsonValue,
         revealRequestId: revealed.value.id,
         reviewToken: revealed.value.id,

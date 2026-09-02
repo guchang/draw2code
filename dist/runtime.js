@@ -339,6 +339,18 @@ function normalizeScene(input) {
     }
   };
 }
+function capacityForNormalizedScene(scene) {
+  const usedBytes = Buffer.byteLength(JSON.stringify(scene, null, 2), "utf8");
+  return {
+    maxBytes: MAX_SCENE_BYTES,
+    usedBytes,
+    remainingBytes: MAX_SCENE_BYTES - usedBytes,
+    utilizationPercent: Math.round(usedBytes / MAX_SCENE_BYTES * 1e3) / 10
+  };
+}
+function measureSceneCapacity(input) {
+  return capacityForNormalizedScene(normalizeScene(input));
+}
 function emptyScene() {
   return {
     type: "excalidraw",
@@ -3869,6 +3881,55 @@ function pendingReviewWriteFor(root, board, baseRev) {
   prunePendingReviewWrites();
   return [...pendingReviewWrites.values()].filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
+async function boardOperationalState(store, root, board, revision, scene) {
+  const [reveal, representativeReview] = await Promise.all([
+    store.getBoardReveal(root),
+    store.getBoardReview(root, board, "representative")
+  ]);
+  if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
+  if (!representativeReview.ok) throw new Error(`${representativeReview.error.code}: ${representativeReview.error.message}`);
+  const currentReveal = reveal.value.request !== null && reveal.value.request.board === board && Math.abs(reveal.value.request.revision - revision) <= 0.5 ? reveal.value.request : null;
+  const currentRepresentativeReview = representativeReview.value.receipt !== null && Math.abs(representativeReview.value.receipt.revision - revision) <= 0.5 ? representativeReview.value.receipt : null;
+  const pendingWrite = pendingReviewWriteFor(root, board, revision);
+  let continuation2;
+  if (pendingWrite !== null && currentRepresentativeReview !== null) {
+    continuation2 = {
+      status: "commit_pending_write",
+      pendingUpdateId: pendingWrite.id,
+      nextAction: {
+        tool: "draw2code_update",
+        arguments: { root, name: board, action: "commit_pending", pendingUpdateId: pendingWrite.id }
+      }
+    };
+  } else if (pendingWrite !== null && currentReveal !== null) {
+    continuation2 = {
+      status: "review_representative",
+      reviewToken: currentReveal.id,
+      pendingUpdateId: pendingWrite.id,
+      canvasAcknowledged: typeof currentReveal.consumedAt === "number",
+      nextAction: {
+        tool: "draw2code_update",
+        arguments: { root, name: board, action: "review", reviewToken: currentReveal.id, phase: "representative" }
+      }
+    };
+  } else if (currentReveal !== null) {
+    continuation2 = {
+      status: "review_available",
+      reviewToken: currentReveal.id,
+      canvasAcknowledged: typeof currentReveal.consumedAt === "number",
+      nextAction: {
+        tool: "draw2code_update",
+        arguments: { root, name: board, action: "review", reviewToken: currentReveal.id }
+      }
+    };
+  } else {
+    continuation2 = { status: "idle", nextAction: null };
+  }
+  return {
+    capacity: measureSceneCapacity(scene),
+    continuation: continuation2
+  };
+}
 async function resolveBoard(store, root, requested) {
   const active = await store.getActiveBoard(root);
   const activeBoard = active.ok && active.value.name !== null ? active.value.name : void 0;
@@ -4161,7 +4222,7 @@ function validatePhasedDrawing(currentElements, prospectiveElements, visualRevie
   if (currentPages.length === 0 && newPages.length >= 3) {
     throw new Error("visual-review-required: first draw one representative page, inspect it in the visible \u753B\u7801 canvas, then add the remaining pages; do not author three or more unseen pages in the first batch");
   }
-  if (currentPages.length > 0 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
+  if (currentPages.length > 0 && currentPages.length < 3 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
     const representativeReviewed = visualReview?.phase === "representative" && visualReview.passed && visualReview.observations.length > 0 && visualReview.inspectedPageIds.some((id) => currentPageIds.has(id));
     if (!representativeReviewed && !storedRepresentativeReviewed) {
       throw new Error("visual-review-required: before adding multiple remaining pages, visibly inspect the existing representative page and call draw2code_update with action=review, the latest reviewToken, phase=representative, passed=true, inspectedPageIds and observations");
@@ -4480,7 +4541,7 @@ function draw2codeListTool(store) {
 function draw2codeReadTool(store) {
   return defineTool2({
     name: "draw2code_read",
-    description: "Read one \u753B\u7801 prototype board: a compact per-element summary plus the full elements JSON (needed before updating or before generating frontend pages from the board). Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
+    description: "Read one \u753B\u7801 prototype board: current elements, exact scene capacity, and continuation with opaque review/pending IDs plus executable next-action arguments. Call this once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. A new independent small edit may proceed even when an older review is available; only resume continuation when it belongs to the user's current requested batch. Also required before generating frontend pages. Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." }
@@ -4497,6 +4558,8 @@ function draw2codeReadTool(store) {
           summary: { type: "string", required: true },
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
           prototypeQuality: { type: "json", required: true },
+          capacity: { type: "json", required: true },
+          continuation: { type: "json", required: true },
           pageNames: { type: "array", items: { type: "string" }, required: true },
           pages: { type: "array", items: { type: "json" }, required: true },
           pageRelations: { type: "array", items: { type: "json" }, required: true },
@@ -4509,6 +4572,7 @@ function draw2codeReadTool(store) {
         [
           `board: ${value.board ?? ""} \xB7 ${value.elementCount ?? 0} elements`,
           `pages: ${(value.pageNames ?? []).join("\u3001") || "\uFF08\u672A\u8BC6\u522B\uFF09"} \xB7 relations: ${value.pageRelations?.length ?? 0}`,
+          `capacity: ${num3(recordValue(value.capacity)?.usedBytes)}/${num3(recordValue(value.capacity)?.maxBytes)} bytes \xB7 continuation: ${str3(recordValue(value.continuation)?.status) || "idle"}`,
           value.activeBoard !== void 0 && value.activeBoard !== value.board ? `\u5F53\u524D\u753B\u677F: ${value.activeBoard}\uFF08\u4E0E\u8BFB\u53D6\u76EE\u6807\u4E0D\u540C\uFF09` : "",
           (value.layoutWarnings ?? []).length > 0 ? `\u539F\u578B\u8D28\u91CF\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
@@ -4530,6 +4594,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         ...pageMembershipWarnings(scene.elements, pages)
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
       const prototypeQuality = inspectPrototypeQuality(scene.elements);
+      const operational = await boardOperationalState(store, args.root, target.name, rev, scene);
       const summary = scene.elements.map(describeElement).join("\n");
       const elementsJson = JSON.stringify(scene.elements);
       const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
@@ -4546,6 +4611,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         summary,
         layoutWarnings: qualityWarnings,
         prototypeQuality,
+        ...operational,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload
       };
@@ -4587,6 +4653,9 @@ function draw2codeUpdateTool(store) {
           completionReady: { type: "boolean", required: true },
           nextAction: { type: "string", required: true },
           nextActionCode: { type: "string" },
+          nextActionParams: { type: "json" },
+          capacity: { type: "json" },
+          timings: { type: "json" },
           prototypeQuality: { type: "json", required: true },
           revealRequestId: { type: "string" },
           reviewToken: { type: "string" },
@@ -4611,12 +4680,27 @@ function draw2codeUpdateTool(store) {
       render: (_args, value) => text2(
         value.pending === true ? `\u3010\u5F85\u786E\u8BA4\u3011\u68C0\u6D4B\u5230\u6F5C\u5728\u51B2\u7A81\uFF08${value.conflicts?.length ?? 0} \u6761\uFF09\uFF1A
 ${value.planSummary ?? ""}
-\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}; reviewToken=${value.reviewToken ?? "missing"}; pendingUpdateId=${value.pendingUpdateId ?? "none"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ""}. ${value.nextAction ?? ""}${value.writeVerified === true ? " The \u753B\u7801 sidebar opens automatically on this board." : ""}${(value.layoutWarnings ?? []).length > 0 ? `
+\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}; reviewToken=${value.reviewToken ?? "missing"}; pendingUpdateId=${value.pendingUpdateId ?? "none"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ""}. ${value.nextAction ?? ""}${recordValue(value.timings)?.totalMs === void 0 ? "" : ` toolTime=${num3(recordValue(value.timings)?.totalMs)}ms.`}${value.writeVerified === true ? " The \u753B\u7801 sidebar opens automatically on this board." : ""}${(value.layoutWarnings ?? []).length > 0 ? `
 \u7ED3\u6784\u4E0E\u5E03\u5C40\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       )
     },
     async execute(args) {
+      const startedAt = performance.now();
+      const stageTimings = { readMs: 0, preflightMs: 0, writeMs: 0, verificationMs: 0, publishMs: 0 };
+      let firstEffectiveWriteAt = null;
+      const rounded = (value) => Math.round(value * 10) / 10;
+      const timings = () => ({
+        scope: "tool-execution",
+        excludes: "agent-reasoning-before-tool-call",
+        readMs: rounded(stageTimings.readMs),
+        preflightMs: rounded(stageTimings.preflightMs),
+        writeMs: rounded(stageTimings.writeMs),
+        verificationMs: rounded(stageTimings.verificationMs),
+        publishMs: rounded(stageTimings.publishMs),
+        totalMs: rounded(performance.now() - startedAt),
+        timeToFirstEffectiveWriteMs: firstEffectiveWriteAt === null ? null : rounded(firstEffectiveWriteAt - startedAt)
+      });
       const safeMode = args.safeMode !== false;
       const force = args.force === true;
       const visualReview = parseVisualReview(args.visualReview);
@@ -4643,7 +4727,9 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       if (action === "review") {
         if (parsedOps.length > 0) throw new Error("visual-review-requires-empty-ops: action=review cannot mutate the board");
         const target2 = await resolveBoard(store, args.root, targetName);
+        const readStartedAt2 = performance.now();
         const board2 = await store.read(args.root, target2.name);
+        stageTimings.readMs += performance.now() - readStartedAt2;
         if (!board2.ok) throw new Error(`${board2.error.code}: ${board2.error.message}`);
         const evidence = visualReview === null ? parseReviewAction(args) : {
           phase: visualReview.phase,
@@ -4693,6 +4779,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           completionReady: completionReady2,
           nextAction: nextAction2,
           nextActionCode: nextActionCode2,
+          capacity: measureSceneCapacity(board2.value.scene),
           prototypeQuality: prototypeQuality2,
           revealRequestId: reviewToken,
           reviewToken,
@@ -4705,7 +4792,8 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           ...pendingWrite === null ? {} : { pendingUpdateId: pendingWrite.id },
           layoutWarnings: layoutWarnings(board2.value.scene.elements),
           requiresConfirmation: false,
-          pending: false
+          pending: false,
+          timings: timings()
         };
       }
       if (requestedAction === "write" && args.ops === void 0) throw new Error("invalid arguments: action=write requires ops");
@@ -4713,7 +4801,9 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
         throw new Error("visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]");
       }
       const target = await resolveBoard(store, args.root, targetName);
+      const readStartedAt = performance.now();
       const board = await store.read(args.root, target.name);
+      stageTimings.readMs += performance.now() - readStartedAt;
       if (pendingCommit !== null && (!board.ok || Math.abs(board.value.rev - pendingCommit.baseRev) > 0.5)) {
         throw new Error("pending-update-stale: board changed after the pending batch was preserved; read the latest board and create a new minimal update");
       }
@@ -4721,11 +4811,48 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const key = makeKey(args.root, target.name);
       const cache = boardCache.get(key);
       const currentElements = board.ok ? board.value.scene.elements : [];
+      const preflightStartedAt = performance.now();
       rejectNewPrototypeFrames(currentElements, parsedOps);
       const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
       const ops = normalizePageShellUpserts(currentElements, semanticOps);
       const prospectiveElements = previewElements(currentElements, ops);
+      const currentScene = board.ok ? board.value.scene : { elements: [] };
+      const currentCapacity = measureSceneCapacity(currentScene);
+      const projectedCapacity = measureSceneCapacity({ ...currentScene, elements: prospectiveElements });
+      if (projectedCapacity.usedBytes > projectedCapacity.maxBytes) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
+        const prototypeQuality2 = inspectPrototypeQuality(currentElements);
+        return {
+          rev: board.ok ? board.value.rev : 0,
+          targetBoard: target.name,
+          ...target.activeBoard === void 0 ? {} : { activeBoard: target.activeBoard },
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: "\u672C\u6279\u6B21\u4F1A\u8D85\u8FC7\u753B\u677F\u5BB9\u91CF\uFF1B\u4FDD\u7559\u5F53\u524D\u753B\u677F\u4E0D\u5199\u5165\uFF0C\u5C06\u66F4\u65B0\u62C6\u6210\u66F4\u5C0F\u7684\u72EC\u7ACB\u6279\u6B21\u540E\u91CD\u8BD5",
+          nextActionCode: "reduce_update_scope",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: target.name, action: "write", ops: "<smaller independent batch>" }
+          },
+          capacity: {
+            maxBytes: projectedCapacity.maxBytes,
+            usedBytes: currentCapacity.usedBytes,
+            remainingBytes: currentCapacity.remainingBytes,
+            projectedBytes: projectedCapacity.usedBytes,
+            excessBytes: projectedCapacity.usedBytes - projectedCapacity.maxBytes
+          },
+          timings: timings(),
+          prototypeQuality: prototypeQuality2,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false
+        };
+      }
       const storedRepresentative = await store.getBoardReview(args.root, target.name, "representative");
       if (!storedRepresentative.ok) throw new Error(`${storedRepresentative.error.code}: ${storedRepresentative.error.message}`);
       const storedRepresentativeReviewed = board.ok && storedRepresentative.value.receipt !== null && Math.abs(storedRepresentative.value.receipt.revision - board.value.rev) <= 0.5 && storedRepresentative.value.receipt.inspectedPageIds.some((id) => prototypePages(currentElements).some((page) => page.id === id));
@@ -4748,6 +4875,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           pendingReviewWrites.delete(pendingWrite.id);
           throw error2;
         }
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
         const prototypeQuality2 = inspectPrototypeQuality(currentElements);
         prototypeQuality2.visualReviewRequired = true;
         return {
@@ -4762,6 +4890,12 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           completionReady: false,
           nextAction: "\u5269\u4F59\u9875\u9762 ops \u5DF2\u5B89\u5168\u6682\u5B58\uFF1B\u5148\u67E5\u770B\u5F53\u524D\u4EE3\u8868\u9875\u5E76\u7528 action=review\u3001reviewToken \u548C phase=representative \u5B8C\u6210\u590D\u6838\uFF0C\u4E4B\u540E\u53EA\u63D0\u4EA4 pendingUpdateId\uFF0C\u4E0D\u8981\u91CD\u53D1\u5927 JSON",
           nextActionCode: "review_representative",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: target.name, action: "review", reviewToken: request.id, phase: "representative" }
+          },
+          capacity: currentCapacity,
+          timings: timings(),
           prototypeQuality: prototypeQuality2,
           revealRequestId: request.id,
           reviewToken: request.id,
@@ -4800,6 +4934,7 @@ ${formatLayoutIssues(layoutReport.errors)}
         throw new Error(`${board.error.code}: ${board.error.message}`);
       }
       if (safeMode && !force && conflicts.length > 0) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
         const elementCount = currentElements.length;
         const conflictValues = conflicts;
         const prototypeQuality2 = inspectPrototypeQuality(currentElements);
@@ -4813,6 +4948,13 @@ ${formatLayoutIssues(layoutReport.errors)}
           writeVerified: false,
           completionReady: false,
           nextAction: "\u5148\u786E\u8BA4\u51B2\u7A81\uFF1B\u672C\u8F6E\u5C1A\u672A\u5199\u5165\uFF0C\u4E5F\u4E0D\u80FD\u8FDB\u5165\u89C6\u89C9\u5B8C\u6210\u9A8C\u6536",
+          nextActionCode: "confirm_overwrite",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: target.name, action: "write", force: true }
+          },
+          capacity: currentCapacity,
+          timings: timings(),
           prototypeQuality: prototypeQuality2,
           layoutWarnings: layoutWarnings(currentElements),
           requiresConfirmation: true,
@@ -4826,8 +4968,13 @@ ${formatLayoutIssues(layoutReport.errors)}
           }
         };
       }
+      stageTimings.preflightMs += performance.now() - preflightStartedAt;
+      const writeStartedAt = performance.now();
       const result = await store.applyOps(args.root, target.name, ops, board.ok ? board.value.rev : void 0);
+      stageTimings.writeMs += performance.now() - writeStartedAt;
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+      firstEffectiveWriteAt = performance.now();
+      const verificationStartedAt = performance.now();
       const refreshed = await store.read(args.root, target.name);
       if (!refreshed.ok) throw new Error(`${refreshed.error.code}: ${refreshed.error.message}`);
       if (refreshed.value.scene.elements.length !== result.value.elementCount) {
@@ -4835,12 +4982,15 @@ ${formatLayoutIssues(layoutReport.errors)}
       }
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements);
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`);
+      stageTimings.verificationMs += performance.now() - verificationStartedAt;
       if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id);
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements });
+      const publishStartedAt = performance.now();
       const selected = await store.setActiveBoard(args.root, target.name);
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`);
       const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev);
       if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`);
+      stageTimings.publishMs += performance.now() - publishStartedAt;
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements);
       const pages = prototypePages(refreshed.value.scene.elements);
       const prototypeQuality = inspectPrototypeQuality(refreshed.value.scene.elements);
@@ -4860,6 +5010,8 @@ ${formatLayoutIssues(layoutReport.errors)}
         completionReady,
         nextAction,
         nextActionCode,
+        capacity: measureSceneCapacity(refreshed.value.scene),
+        timings: timings(),
         prototypeQuality,
         revealRequestId: revealed.value.id,
         reviewToken: revealed.value.id,
@@ -5948,16 +6100,19 @@ var Draw2CodeRuntimeImpl = class {
       if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`);
       const board = active.value.name;
       let revision = 0;
+      let operational = {};
       if (board !== null) {
         const read = await scenes.read(command.root, board);
         if (!read.ok) throw new Error(`${read.error.code}: ${read.error.message}`);
         revision = read.value.rev;
+        operational = await boardOperationalState(scenes, command.root, board, revision, read.value.scene);
       }
       const presentation = choosePresentation(command.presentation, context.uiCapabilities);
       data = {
         board,
         revision,
         presentation,
+        ...operational,
         ...presentation === "inline" ? { resourceUri: "ui://draw2code/canvas.html" } : {},
         opened: false
       };

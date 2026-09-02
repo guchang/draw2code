@@ -32,7 +32,7 @@ const GENERATION_ID_RE = /^generation-[0-9a-f-]{36}$/
 export const PAGES_DIR = 'draw2code-pages'
 
 /** Caps: scene JSON bytes, element count, per-element bytes, text length. */
-const MAX_SCENE_BYTES = 512 * 1024
+export const MAX_SCENE_BYTES = 512 * 1024
 const MAX_ELEMENTS = 2000
 const MAX_ELEMENT_BYTES = 16 * 1024
 const MAX_TEXT_CHARS = 4000
@@ -143,6 +143,13 @@ export interface SceneFile {
   source: string
   elements: Array<Record<string, unknown>>
   appState: { viewBackgroundColor: string }
+}
+
+export interface SceneCapacity {
+  maxBytes: number
+  usedBytes: number
+  remainingBytes: number
+  utilizationPercent: number
 }
 
 /** Read one scene (rev = file mtime in ms). */
@@ -503,6 +510,21 @@ function normalizeScene(input: unknown): SceneFile {
         : '#ffffff',
     },
   }
+}
+
+function capacityForNormalizedScene(scene: SceneFile): SceneCapacity {
+  const usedBytes = Buffer.byteLength(JSON.stringify(scene, null, 2), 'utf8')
+  return {
+    maxBytes: MAX_SCENE_BYTES,
+    usedBytes,
+    remainingBytes: MAX_SCENE_BYTES - usedBytes,
+    utilizationPercent: Math.round((usedBytes / MAX_SCENE_BYTES) * 1000) / 10,
+  }
+}
+
+/** Exact persisted size after applying the same normalization as write(). */
+export function measureSceneCapacity(input: unknown): SceneCapacity {
+  return capacityForNormalizedScene(normalizeScene(input))
 }
 
 /** An empty scene. */

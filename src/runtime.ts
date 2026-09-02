@@ -5,7 +5,7 @@ import { ProjectStore } from './project-store.ts'
 import { SceneStore, isPathInside } from './scene-store.ts'
 import { storeContextFor } from './store-context.ts'
 import { draw2codeCreateTool } from './create-tool.ts'
-import { draw2codeGenerateTool, draw2codeListTool, draw2codeReadTool, draw2codeUpdateTool } from './tools.ts'
+import { boardOperationalState, draw2codeGenerateTool, draw2codeListTool, draw2codeReadTool, draw2codeUpdateTool } from './tools.ts'
 
 export type HostKind = 'dsh' | 'codex' | 'mcp' | 'cli'
 export type Presentation = 'inline' | 'browser' | 'handoff' | 'headless'
@@ -170,16 +170,19 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
       if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`)
       const board = active.value.name
       let revision = 0
+      let operational: Record<string, unknown> = {}
       if (board !== null) {
         const read = await scenes.read(command.root, board)
         if (!read.ok) throw new Error(`${read.error.code}: ${read.error.message}`)
         revision = read.value.rev
+        operational = await boardOperationalState(scenes, command.root, board, revision, read.value.scene)
       }
       const presentation = choosePresentation(command.presentation, context.uiCapabilities)
       data = {
         board,
         revision,
         presentation,
+        ...operational,
         ...(presentation === 'inline' ? { resourceUri: 'ui://draw2code/canvas.html' } : {}),
         opened: false,
       } satisfies CanvasHandle as unknown as Record<string, unknown>

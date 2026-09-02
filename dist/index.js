@@ -337,6 +337,18 @@ function normalizeScene(input) {
     }
   };
 }
+function capacityForNormalizedScene(scene) {
+  const usedBytes = Buffer.byteLength(JSON.stringify(scene, null, 2), "utf8");
+  return {
+    maxBytes: MAX_SCENE_BYTES,
+    usedBytes,
+    remainingBytes: MAX_SCENE_BYTES - usedBytes,
+    utilizationPercent: Math.round(usedBytes / MAX_SCENE_BYTES * 1e3) / 10
+  };
+}
+function measureSceneCapacity(input) {
+  return capacityForNormalizedScene(normalizeScene(input));
+}
 function emptyScene() {
   return {
     type: "excalidraw",
@@ -3859,6 +3871,55 @@ function pendingReviewWriteFor(root, board, baseRev) {
   prunePendingReviewWrites();
   return [...pendingReviewWrites.values()].filter((pending) => pending.root === root && pending.board === board && Math.abs(pending.baseRev - baseRev) <= 0.5).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
+async function boardOperationalState(store, root, board, revision, scene) {
+  const [reveal, representativeReview] = await Promise.all([
+    store.getBoardReveal(root),
+    store.getBoardReview(root, board, "representative")
+  ]);
+  if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
+  if (!representativeReview.ok) throw new Error(`${representativeReview.error.code}: ${representativeReview.error.message}`);
+  const currentReveal = reveal.value.request !== null && reveal.value.request.board === board && Math.abs(reveal.value.request.revision - revision) <= 0.5 ? reveal.value.request : null;
+  const currentRepresentativeReview = representativeReview.value.receipt !== null && Math.abs(representativeReview.value.receipt.revision - revision) <= 0.5 ? representativeReview.value.receipt : null;
+  const pendingWrite = pendingReviewWriteFor(root, board, revision);
+  let continuation2;
+  if (pendingWrite !== null && currentRepresentativeReview !== null) {
+    continuation2 = {
+      status: "commit_pending_write",
+      pendingUpdateId: pendingWrite.id,
+      nextAction: {
+        tool: "draw2code_update",
+        arguments: { root, name: board, action: "commit_pending", pendingUpdateId: pendingWrite.id }
+      }
+    };
+  } else if (pendingWrite !== null && currentReveal !== null) {
+    continuation2 = {
+      status: "review_representative",
+      reviewToken: currentReveal.id,
+      pendingUpdateId: pendingWrite.id,
+      canvasAcknowledged: typeof currentReveal.consumedAt === "number",
+      nextAction: {
+        tool: "draw2code_update",
+        arguments: { root, name: board, action: "review", reviewToken: currentReveal.id, phase: "representative" }
+      }
+    };
+  } else if (currentReveal !== null) {
+    continuation2 = {
+      status: "review_available",
+      reviewToken: currentReveal.id,
+      canvasAcknowledged: typeof currentReveal.consumedAt === "number",
+      nextAction: {
+        tool: "draw2code_update",
+        arguments: { root, name: board, action: "review", reviewToken: currentReveal.id }
+      }
+    };
+  } else {
+    continuation2 = { status: "idle", nextAction: null };
+  }
+  return {
+    capacity: measureSceneCapacity(scene),
+    continuation: continuation2
+  };
+}
 async function resolveBoard(store, root, requested) {
   const active = await store.getActiveBoard(root);
   const activeBoard = active.ok && active.value.name !== null ? active.value.name : void 0;
@@ -4151,7 +4212,7 @@ function validatePhasedDrawing(currentElements, prospectiveElements, visualRevie
   if (currentPages.length === 0 && newPages.length >= 3) {
     throw new Error("visual-review-required: first draw one representative page, inspect it in the visible \u753B\u7801 canvas, then add the remaining pages; do not author three or more unseen pages in the first batch");
   }
-  if (currentPages.length > 0 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
+  if (currentPages.length > 0 && currentPages.length < 3 && newPages.length > 0 && prototypePages(prospectiveElements).length >= 3) {
     const representativeReviewed = visualReview?.phase === "representative" && visualReview.passed && visualReview.observations.length > 0 && visualReview.inspectedPageIds.some((id) => currentPageIds.has(id));
     if (!representativeReviewed && !storedRepresentativeReviewed) {
       throw new Error("visual-review-required: before adding multiple remaining pages, visibly inspect the existing representative page and call draw2code_update with action=review, the latest reviewToken, phase=representative, passed=true, inspectedPageIds and observations");
@@ -4470,7 +4531,7 @@ function draw2codeListTool(store) {
 function draw2codeReadTool(store) {
   return defineTool2({
     name: "draw2code_read",
-    description: "Read one \u753B\u7801 prototype board: a compact per-element summary plus the full elements JSON (needed before updating or before generating frontend pages from the board). Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
+    description: "Read one \u753B\u7801 prototype board: current elements, exact scene capacity, and continuation with opaque review/pending IDs plus executable next-action arguments. Call this once before editing an existing board; do not search chat history for reviewToken or pendingUpdateId. A new independent small edit may proceed even when an older review is available; only resume continuation when it belongs to the user's current requested batch. Also required before generating frontend pages. Triggers: \u67E5\u770B\u753B\u677F / \u8BFB\u539F\u578B / board read.",
     parameters: {
       root: { type: "string", required: true, description: "Workspace root (the session working directory)." },
       name: { type: "string", description: "Board name. Omit to use the board currently selected in the \u753B\u7801 UI." }
@@ -4487,6 +4548,8 @@ function draw2codeReadTool(store) {
           summary: { type: "string", required: true },
           layoutWarnings: { type: "array", items: { type: "json" }, required: true },
           prototypeQuality: { type: "json", required: true },
+          capacity: { type: "json", required: true },
+          continuation: { type: "json", required: true },
           pageNames: { type: "array", items: { type: "string" }, required: true },
           pages: { type: "array", items: { type: "json" }, required: true },
           pageRelations: { type: "array", items: { type: "json" }, required: true },
@@ -4499,6 +4562,7 @@ function draw2codeReadTool(store) {
         [
           `board: ${value.board ?? ""} \xB7 ${value.elementCount ?? 0} elements`,
           `pages: ${(value.pageNames ?? []).join("\u3001") || "\uFF08\u672A\u8BC6\u522B\uFF09"} \xB7 relations: ${value.pageRelations?.length ?? 0}`,
+          `capacity: ${num3(recordValue(value.capacity)?.usedBytes)}/${num3(recordValue(value.capacity)?.maxBytes)} bytes \xB7 continuation: ${str3(recordValue(value.continuation)?.status) || "idle"}`,
           value.activeBoard !== void 0 && value.activeBoard !== value.board ? `\u5F53\u524D\u753B\u677F: ${value.activeBoard}\uFF08\u4E0E\u8BFB\u53D6\u76EE\u6807\u4E0D\u540C\uFF09` : "",
           (value.layoutWarnings ?? []).length > 0 ? `\u539F\u578B\u8D28\u91CF\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
@@ -4520,6 +4584,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         ...pageMembershipWarnings(scene.elements, pages)
       ].filter((warning, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(warning)) === index);
       const prototypeQuality = inspectPrototypeQuality(scene.elements);
+      const operational = await boardOperationalState(store, args.root, target.name, rev, scene);
       const summary = scene.elements.map(describeElement).join("\n");
       const elementsJson = JSON.stringify(scene.elements);
       const elementsBytes = Buffer.byteLength(elementsJson, "utf8");
@@ -4536,6 +4601,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : "",
         summary,
         layoutWarnings: qualityWarnings,
         prototypeQuality,
+        ...operational,
         file: `draw2code/${target.name}.excalidraw.json`,
         elements: payload
       };
@@ -4577,6 +4643,9 @@ function draw2codeUpdateTool(store) {
           completionReady: { type: "boolean", required: true },
           nextAction: { type: "string", required: true },
           nextActionCode: { type: "string" },
+          nextActionParams: { type: "json" },
+          capacity: { type: "json" },
+          timings: { type: "json" },
           prototypeQuality: { type: "json", required: true },
           revealRequestId: { type: "string" },
           reviewToken: { type: "string" },
@@ -4601,12 +4670,27 @@ function draw2codeUpdateTool(store) {
       render: (_args, value) => text2(
         value.pending === true ? `\u3010\u5F85\u786E\u8BA4\u3011\u68C0\u6D4B\u5230\u6F5C\u5728\u51B2\u7A81\uFF08${value.conflicts?.length ?? 0} \u6761\uFF09\uFF1A
 ${value.planSummary ?? ""}
-\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}; reviewToken=${value.reviewToken ?? "missing"}; pendingUpdateId=${value.pendingUpdateId ?? "none"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ""}. ${value.nextAction ?? ""}${value.writeVerified === true ? " The \u753B\u7801 sidebar opens automatically on this board." : ""}${(value.layoutWarnings ?? []).length > 0 ? `
+\u8BF7\u5148\u786E\u8BA4\u540E\u518D\u91CD\u8BD5\uFF1A\u5728\u4F60\u786E\u8BA4\u4E86\u4E4B\u540E\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002` : `board ${value.targetBoard ?? ""}. verified=${value.verified === true}; writeVerified=${value.writeVerified === true}; reviewVerified=${value.reviewVerified === true}; completionReady=${value.completionReady === true}; visualReviewRequired=${value.prototypeQuality !== null && typeof value.prototypeQuality === "object" && value.prototypeQuality.visualReviewRequired === true}; boardRevision=${value.rev ?? "missing"}; revealRequestId=${value.revealRequestId ?? "missing"}; reviewToken=${value.reviewToken ?? "missing"}; pendingUpdateId=${value.pendingUpdateId ?? "none"}. ${value.applied ?? 0} ops applied, ${value.elementCount ?? 0} elements on board. nextAction=${value.nextActionCode ?? value.nextAction ?? ""}. ${value.nextAction ?? ""}${recordValue(value.timings)?.totalMs === void 0 ? "" : ` toolTime=${num3(recordValue(value.timings)?.totalMs)}ms.`}${value.writeVerified === true ? " The \u753B\u7801 sidebar opens automatically on this board." : ""}${(value.layoutWarnings ?? []).length > 0 ? `
 \u7ED3\u6784\u4E0E\u5E03\u5C40\u63D0\u9192\uFF1A
 ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       )
     },
     async execute(args) {
+      const startedAt = performance.now();
+      const stageTimings = { readMs: 0, preflightMs: 0, writeMs: 0, verificationMs: 0, publishMs: 0 };
+      let firstEffectiveWriteAt = null;
+      const rounded = (value) => Math.round(value * 10) / 10;
+      const timings = () => ({
+        scope: "tool-execution",
+        excludes: "agent-reasoning-before-tool-call",
+        readMs: rounded(stageTimings.readMs),
+        preflightMs: rounded(stageTimings.preflightMs),
+        writeMs: rounded(stageTimings.writeMs),
+        verificationMs: rounded(stageTimings.verificationMs),
+        publishMs: rounded(stageTimings.publishMs),
+        totalMs: rounded(performance.now() - startedAt),
+        timeToFirstEffectiveWriteMs: firstEffectiveWriteAt === null ? null : rounded(firstEffectiveWriteAt - startedAt)
+      });
       const safeMode = args.safeMode !== false;
       const force = args.force === true;
       const visualReview = parseVisualReview(args.visualReview);
@@ -4633,7 +4717,9 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       if (action === "review") {
         if (parsedOps.length > 0) throw new Error("visual-review-requires-empty-ops: action=review cannot mutate the board");
         const target2 = await resolveBoard(store, args.root, targetName);
+        const readStartedAt2 = performance.now();
         const board2 = await store.read(args.root, target2.name);
+        stageTimings.readMs += performance.now() - readStartedAt2;
         if (!board2.ok) throw new Error(`${board2.error.code}: ${board2.error.message}`);
         const evidence = visualReview === null ? parseReviewAction(args) : {
           phase: visualReview.phase,
@@ -4683,6 +4769,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           completionReady: completionReady2,
           nextAction: nextAction2,
           nextActionCode: nextActionCode2,
+          capacity: measureSceneCapacity(board2.value.scene),
           prototypeQuality: prototypeQuality2,
           revealRequestId: reviewToken,
           reviewToken,
@@ -4695,7 +4782,8 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           ...pendingWrite === null ? {} : { pendingUpdateId: pendingWrite.id },
           layoutWarnings: layoutWarnings(board2.value.scene.elements),
           requiresConfirmation: false,
-          pending: false
+          pending: false,
+          timings: timings()
         };
       }
       if (requestedAction === "write" && args.ops === void 0) throw new Error("invalid arguments: action=write requires ops");
@@ -4703,7 +4791,9 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
         throw new Error("visual-review-final-requires-empty-ops: final visualReview must be submitted after all writes in a separate call with ops=[]");
       }
       const target = await resolveBoard(store, args.root, targetName);
+      const readStartedAt = performance.now();
       const board = await store.read(args.root, target.name);
+      stageTimings.readMs += performance.now() - readStartedAt;
       if (pendingCommit !== null && (!board.ok || Math.abs(board.value.rev - pendingCommit.baseRev) > 0.5)) {
         throw new Error("pending-update-stale: board changed after the pending batch was preserved; read the latest board and create a new minimal update");
       }
@@ -4711,11 +4801,48 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const key = makeKey(args.root, target.name);
       const cache = boardCache.get(key);
       const currentElements = board.ok ? board.value.scene.elements : [];
+      const preflightStartedAt = performance.now();
       rejectNewPrototypeFrames(currentElements, parsedOps);
       const frameNormalizedOps = normalizeFrameLocalCoordinates(currentElements, parsedOps);
       const semanticOps = normalizeSemanticUpserts(currentElements, frameNormalizedOps);
       const ops = normalizePageShellUpserts(currentElements, semanticOps);
       const prospectiveElements = previewElements(currentElements, ops);
+      const currentScene = board.ok ? board.value.scene : { elements: [] };
+      const currentCapacity = measureSceneCapacity(currentScene);
+      const projectedCapacity = measureSceneCapacity({ ...currentScene, elements: prospectiveElements });
+      if (projectedCapacity.usedBytes > projectedCapacity.maxBytes) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
+        const prototypeQuality2 = inspectPrototypeQuality(currentElements);
+        return {
+          rev: board.ok ? board.value.rev : 0,
+          targetBoard: target.name,
+          ...target.activeBoard === void 0 ? {} : { activeBoard: target.activeBoard },
+          elementCount: currentElements.length,
+          applied: 0,
+          verified: false,
+          writeVerified: false,
+          reviewVerified: false,
+          completionReady: false,
+          nextAction: "\u672C\u6279\u6B21\u4F1A\u8D85\u8FC7\u753B\u677F\u5BB9\u91CF\uFF1B\u4FDD\u7559\u5F53\u524D\u753B\u677F\u4E0D\u5199\u5165\uFF0C\u5C06\u66F4\u65B0\u62C6\u6210\u66F4\u5C0F\u7684\u72EC\u7ACB\u6279\u6B21\u540E\u91CD\u8BD5",
+          nextActionCode: "reduce_update_scope",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: target.name, action: "write", ops: "<smaller independent batch>" }
+          },
+          capacity: {
+            maxBytes: projectedCapacity.maxBytes,
+            usedBytes: currentCapacity.usedBytes,
+            remainingBytes: currentCapacity.remainingBytes,
+            projectedBytes: projectedCapacity.usedBytes,
+            excessBytes: projectedCapacity.usedBytes - projectedCapacity.maxBytes
+          },
+          timings: timings(),
+          prototypeQuality: prototypeQuality2,
+          layoutWarnings: layoutWarnings(currentElements),
+          requiresConfirmation: false,
+          pending: false
+        };
+      }
       const storedRepresentative = await store.getBoardReview(args.root, target.name, "representative");
       if (!storedRepresentative.ok) throw new Error(`${storedRepresentative.error.code}: ${storedRepresentative.error.message}`);
       const storedRepresentativeReviewed = board.ok && storedRepresentative.value.receipt !== null && Math.abs(storedRepresentative.value.receipt.revision - board.value.rev) <= 0.5 && storedRepresentative.value.receipt.inspectedPageIds.some((id) => prototypePages(currentElements).some((page) => page.id === id));
@@ -4738,6 +4865,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           pendingReviewWrites.delete(pendingWrite.id);
           throw error2;
         }
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
         const prototypeQuality2 = inspectPrototypeQuality(currentElements);
         prototypeQuality2.visualReviewRequired = true;
         return {
@@ -4752,6 +4880,12 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           completionReady: false,
           nextAction: "\u5269\u4F59\u9875\u9762 ops \u5DF2\u5B89\u5168\u6682\u5B58\uFF1B\u5148\u67E5\u770B\u5F53\u524D\u4EE3\u8868\u9875\u5E76\u7528 action=review\u3001reviewToken \u548C phase=representative \u5B8C\u6210\u590D\u6838\uFF0C\u4E4B\u540E\u53EA\u63D0\u4EA4 pendingUpdateId\uFF0C\u4E0D\u8981\u91CD\u53D1\u5927 JSON",
           nextActionCode: "review_representative",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: target.name, action: "review", reviewToken: request.id, phase: "representative" }
+          },
+          capacity: currentCapacity,
+          timings: timings(),
           prototypeQuality: prototypeQuality2,
           revealRequestId: request.id,
           reviewToken: request.id,
@@ -4790,6 +4924,7 @@ ${formatLayoutIssues(layoutReport.errors)}
         throw new Error(`${board.error.code}: ${board.error.message}`);
       }
       if (safeMode && !force && conflicts.length > 0) {
+        stageTimings.preflightMs += performance.now() - preflightStartedAt;
         const elementCount = currentElements.length;
         const conflictValues = conflicts;
         const prototypeQuality2 = inspectPrototypeQuality(currentElements);
@@ -4803,6 +4938,13 @@ ${formatLayoutIssues(layoutReport.errors)}
           writeVerified: false,
           completionReady: false,
           nextAction: "\u5148\u786E\u8BA4\u51B2\u7A81\uFF1B\u672C\u8F6E\u5C1A\u672A\u5199\u5165\uFF0C\u4E5F\u4E0D\u80FD\u8FDB\u5165\u89C6\u89C9\u5B8C\u6210\u9A8C\u6536",
+          nextActionCode: "confirm_overwrite",
+          nextActionParams: {
+            tool: "draw2code_update",
+            arguments: { root: args.root, name: target.name, action: "write", force: true }
+          },
+          capacity: currentCapacity,
+          timings: timings(),
           prototypeQuality: prototypeQuality2,
           layoutWarnings: layoutWarnings(currentElements),
           requiresConfirmation: true,
@@ -4816,8 +4958,13 @@ ${formatLayoutIssues(layoutReport.errors)}
           }
         };
       }
+      stageTimings.preflightMs += performance.now() - preflightStartedAt;
+      const writeStartedAt = performance.now();
       const result = await store.applyOps(args.root, target.name, ops, board.ok ? board.value.rev : void 0);
+      stageTimings.writeMs += performance.now() - writeStartedAt;
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+      firstEffectiveWriteAt = performance.now();
+      const verificationStartedAt = performance.now();
       const refreshed = await store.read(args.root, target.name);
       if (!refreshed.ok) throw new Error(`${refreshed.error.code}: ${refreshed.error.message}`);
       if (refreshed.value.scene.elements.length !== result.value.elementCount) {
@@ -4825,12 +4972,15 @@ ${formatLayoutIssues(layoutReport.errors)}
       }
       const verificationError = verifyAppliedOps(ops, refreshed.value.scene.elements);
       if (verificationError !== null) throw new Error(`draw2code_update write verification failed: ${verificationError}`);
+      stageTimings.verificationMs += performance.now() - verificationStartedAt;
       if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id);
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements });
+      const publishStartedAt = performance.now();
       const selected = await store.setActiveBoard(args.root, target.name);
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`);
       const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev);
       if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`);
+      stageTimings.publishMs += performance.now() - publishStartedAt;
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements);
       const pages = prototypePages(refreshed.value.scene.elements);
       const prototypeQuality = inspectPrototypeQuality(refreshed.value.scene.elements);
@@ -4850,6 +5000,8 @@ ${formatLayoutIssues(layoutReport.errors)}
         completionReady,
         nextAction,
         nextActionCode,
+        capacity: measureSceneCapacity(refreshed.value.scene),
+        timings: timings(),
         prototypeQuality,
         revealRequestId: revealed.value.id,
         reviewToken: revealed.value.id,
@@ -5842,7 +5994,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 }
 
 // references/workflow-contract.md
-var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u7531\u72EC\u7ACB `draw2code-open` \u5FEB\u901F\u5165\u53E3\u5904\u7406\uFF0C\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_open`\uFF1A\u4E0D\u8BFB\u53D6\u672C\u5951\u7EA6\u7684\u5176\u4F59\u5DE5\u4F5C\u6D41\uFF0C\u4E0D\u8C03\u7528\u5176\u4ED6 Draw2Code \u5DE5\u5177\uFF0C\u4E0D\u8FDB\u5165\u4EE3\u8868\u9875\u590D\u6838\u6216\u8D28\u91CF\u95E8\u7981\uFF1B\u6709 active board \u5C31\u6062\u590D\uFF0C\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName`\u3001\u540C\u4E00\u4EFD `brief` \u548C\u7ED3\u6784\u5316 `drawingPlan` \u8C03\u7528 `draw2code_update`\u3002\u5F53 `drawingPlan.nextActionCode=write_representative` \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A `allowedPageIds` \u751F\u6210 ops\uFF0C\u4E0D\u80FD\u9884\u5148\u6784\u9020\u5168\u90E8\u9875\u9762\u3002\u4EE3\u8868\u9875\u5199\u5165\u540E\u7B49\u5F85 Canvas \u6D88\u8D39\u8FD4\u56DE\u7684 reveal\uFF0C\u518D\u4EE5 `action=review`\u3001`reviewToken`\u3001`phase=representative`\u3001`passed=true`\u3001`inspectedPageIds` \u548C `observations` \u5355\u72EC\u8BB0\u5F55\u53EF\u89C1\u590D\u6838\uFF1Breview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\u3002\u5DE5\u5177\u8FD4\u56DE `nextActionCode=write_remaining_pages` \u540E\u624D\u751F\u6210 `remainingPageIds`\u3002\u5982\u679C Agent \u8BEF\u5728\u590D\u6838\u524D\u63D0\u4EA4\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u8FD4\u56DE `nextActionCode=review_representative` \u548C `pendingUpdateId`\uFF0C\u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u5B8C\u6210\u4EE3\u8868\u9875\u590D\u6838\u540E\u7528 `action=commit_pending` \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u4E0D\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20 ops\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528 `action=review`\u3001`phase=final` \u8986\u76D6\u6240\u6709 page id\u3002\u65E7 `visualReview` \u53EA\u4FDD\u7559\u517C\u5BB9\uFF1B\u65B0\u6D41\u7A0B\u4E0D\u624B\u5DE5\u62FC `rev` \u4E0E `revealRequestId`\u3002\u5DF2\u6709\u753B\u677F\u4FEE\u6539\u5FC5\u987B\u5148 `draw2code_read` \u518D `draw2code_update`\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- MCP/Codex \u7684 `draw2code_open` \u9ED8\u8BA4\u4F7F\u7528 `presentation=handoff`\uFF0C\u4E0D\u6CE8\u518C\u9759\u6001 `openai/outputTemplate`\uFF0C\u4E5F\u4E0D\u628A\u52A8\u6001 localhost \u753B\u677F\u5957\u8FDB MCP App iframe\u3002\u5DE5\u5177\u53EA\u51C6\u5907\u77ED\u671F URL \u5E76\u8FD4\u56DE `displayState=handoff-ready`\uFF1B`auto` \u4E0E `inline` \u4EC5\u4F5C\u4E3A\u517C\u5BB9\u522B\u540D\uFF0C\u540C\u6837\u56DE\u9000\u5230 handoff\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u8981\u6C42\u5916\u90E8\u6D4F\u89C8\u5668\u65F6\u624D\u4F7F\u7528 `presentation=browser`\u3002\n- \u5BBF\u4E3B\u8D1F\u8D23\u628A handoff URL \u5BFC\u822A\u5230\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6216\u6D4F\u89C8\u5668\u5E76\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u5355\u7EAF\u5BFC\u822A\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u80FD\u529B\uFF0C\u4E0D\u4E3A\u6B64\u521D\u59CB\u5316\u901A\u7528\u6D4F\u89C8\u5668\u81EA\u52A8\u5316\uFF1B\u53EA\u6709\u9700\u8981 DOM\u3001\u63A7\u5236\u53F0\u6216\u4EA4\u4E92\u8BC1\u636E\u65F6\u624D\u63A5\u7BA1\u6D4F\u89C8\u5668\u3002\u53EA\u6709\u753B\u5E03\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\u82E5\u672A\u6765\u9700\u8981\u5BF9\u8BDD\u5185\u5D4C\u753B\u677F\uFF0C\u5FC5\u987B\u5355\u72EC\u5B9E\u73B0\u76F4\u63A5\u8FD0\u884C Canvas \u7684 MCP App\uFF0C\u4E0D\u80FD\u6062\u590D\u52A8\u6001 localhost iframe \u58F3\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u590D\u7528\u73B0\u6709\u6807\u7B7E\u9875\u5E76\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F write \u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request\u3001\u8FD4\u56DE\u4E0D\u900F\u660E `reviewToken` \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002`action=review` \u53EA\u8BB0\u5F55\u8BE5\u53EF\u89C1\u7248\u672C\u7684 review receipt\uFF0C\u8FD4\u56DE `reviewVerified=true`\uFF0C\u4E0D\u4F1A\u5199\u753B\u677F\u6216\u53D1\u5E03\u65B0 reveal\uFF1B\u91CD\u590D\u63D0\u4EA4\u540C\u4E00 token \u662F\u5E42\u7B49\u7684\u3002\u53EA\u6709 final review \u8FD4\u56DE `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n- \u72EC\u7ACB\u753B\u7801\u53EF\u4EE5\u5217\u51FA\u5F53\u524D workspace \u548C\u672C\u673A\u5DF2\u7531\u5BBF\u4E3B\u660E\u786E\u6CE8\u518C\u3001\u6301\u4E45\u5316\u4E14\u786E\u5B9E\u542B\u6709\u753B\u677F\u7684\u5176\u4ED6 workspace\uFF1B\u63D2\u4EF6\u7F13\u5B58\u548C\u7A7A root \u4E0D\u8FDB\u5165\u5207\u6362\u83DC\u5355\u3002\u5207\u6362\u524D\u5FC5\u987B\u5148\u843D\u76D8\u5F53\u524D\u5F85\u4FDD\u5B58\u7F16\u8F91\uFF0C\u518D\u7528\u5F53\u524D\u77ED\u671F\u4F1A\u8BDD\u6362\u53D6\u76EE\u6807 root \u7684\u65B0 workspace-scoped token\u3002\u65E7 token \u4E0D\u80FD\u76F4\u63A5\u8BBF\u95EE\u76EE\u6807 root\uFF0CAgent \u5DE5\u5177\u9ED8\u8BA4\u8303\u56F4\u4E5F\u4E0D\u80FD\u56E0\u4E3A UI \u5207\u6362\u800C\u6269\u5927\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F\u3001\u6D3B\u52A8\u7EED\u671F\u7684 workspace-scoped token\uFF0C\u53EF\u5728\u8BE5 root \u5185\u7BA1\u7406\u591A\u4E2A\u753B\u677F\u4F46\u4E0D\u80FD\u8DE8 root \u8BBF\u95EE\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n- \u4E0D\u9012\u5F52\u626B\u63CF\u6574\u53F0\u7535\u8111\u5BFB\u627E workspace\uFF0C\u4E5F\u4E0D\u81EA\u52A8\u590D\u5236\u3001\u5408\u5E76\u6216\u8FC1\u79FB\u4E0D\u540C root \u7684\u753B\u677F\uFF1B\u65B0\u6253\u5F00\u7684\u753B\u7801\u53EA\u83B7\u5F97\u6253\u5F00\u5F53\u65F6\u5DF2\u6CE8\u518C workspace \u7684\u5FEB\u7167\u3002\n";
+var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u7531\u72EC\u7ACB `draw2code-open` \u5FEB\u901F\u5165\u53E3\u5904\u7406\uFF0C\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_open`\uFF1A\u4E0D\u8BFB\u53D6\u672C\u5951\u7EA6\u7684\u5176\u4F59\u5DE5\u4F5C\u6D41\uFF0C\u4E0D\u8C03\u7528\u5176\u4ED6 Draw2Code \u5DE5\u5177\uFF0C\u4E0D\u8FDB\u5165\u4EE3\u8868\u9875\u590D\u6838\u6216\u8D28\u91CF\u95E8\u7981\uFF1B\u6709 active board \u5C31\u6062\u590D\uFF0C\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName`\u3001\u540C\u4E00\u4EFD `brief` \u548C\u7ED3\u6784\u5316 `drawingPlan` \u8C03\u7528 `draw2code_update`\u3002\u5F53 `drawingPlan.nextActionCode=write_representative` \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A `allowedPageIds` \u751F\u6210 ops\uFF0C\u4E0D\u80FD\u9884\u5148\u6784\u9020\u5168\u90E8\u9875\u9762\u3002\u4EE3\u8868\u9875\u5199\u5165\u540E\u7B49\u5F85 Canvas \u6D88\u8D39\u8FD4\u56DE\u7684 reveal\uFF0C\u518D\u4EE5 `action=review`\u3001`reviewToken`\u3001`phase=representative`\u3001`passed=true`\u3001`inspectedPageIds` \u548C `observations` \u5355\u72EC\u8BB0\u5F55\u53EF\u89C1\u590D\u6838\uFF1Breview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\u3002\u5DE5\u5177\u8FD4\u56DE `nextActionCode=write_remaining_pages` \u540E\u624D\u751F\u6210 `remainingPageIds`\u3002\u5982\u679C Agent \u8BEF\u5728\u590D\u6838\u524D\u63D0\u4EA4\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u8FD4\u56DE `nextActionCode=review_representative` \u548C `pendingUpdateId`\uFF0C\u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u5B8C\u6210\u4EE3\u8868\u9875\u590D\u6838\u540E\u7528 `action=commit_pending` \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u4E0D\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20 ops\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528 `action=review`\u3001`phase=final` \u8986\u76D6\u6240\u6709 page id\u3002\u65E7 `visualReview` \u53EA\u4FDD\u7559\u517C\u5BB9\uFF1B\u65B0\u6D41\u7A0B\u4E0D\u624B\u5DE5\u62FC `rev` \u4E0E `revealRequestId`\u3002\u5DF2\u6709\u753B\u677F\u4FEE\u6539\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_read`\uFF0C\u76F4\u63A5\u4F7F\u7528\u5B83\u8FD4\u56DE\u7684 `capacity`\u3001`continuation` \u548C\u4E0D\u900F\u660E ID\uFF0C\u4E0D\u641C\u7D22\u5BF9\u8BDD\u5386\u53F2\uFF1B\u53EA\u6709\u6062\u590D\u540C\u4E00\u6279\u6682\u5B58\u64CD\u4F5C\u65F6\u624D\u6267\u884C `continuation.nextAction`\uFF0C\u5DF2\u6709 3 \u9875\u4EE5\u4E0A\u753B\u677F\u7684\u72EC\u7ACB\u5C0F\u6539\u52A8\u76F4\u63A5\u63D0\u4EA4\u6700\u5C0F ops\u3002\n- `draw2code_read` / `draw2code_open` \u8FD4\u56DE\u753B\u677F `usedBytes`\u3001`remainingBytes` \u4E0E\u5F53\u524D workflow continuation\u3002\u5927\u6279\u66F4\u65B0\u5FC5\u987B\u5148\u770B\u5BB9\u91CF\uFF1B\u9884\u68C0\u8FD4\u56DE `nextActionCode=reduce_update_scope` \u65F6\u6309 `nextActionParams` \u62C6\u6279\uFF0C\u4E0D\u80FD\u91CD\u590D\u751F\u6210\u539F\u59CB\u5927 JSON\u3002`update.timings` \u7684\u8303\u56F4\u4EC5\u4E3A\u5DE5\u5177\u6267\u884C\uFF0C\u4E0D\u5305\u542B\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- MCP/Codex \u7684 `draw2code_open` \u9ED8\u8BA4\u4F7F\u7528 `presentation=handoff`\uFF0C\u4E0D\u6CE8\u518C\u9759\u6001 `openai/outputTemplate`\uFF0C\u4E5F\u4E0D\u628A\u52A8\u6001 localhost \u753B\u677F\u5957\u8FDB MCP App iframe\u3002\u5DE5\u5177\u53EA\u51C6\u5907\u77ED\u671F URL \u5E76\u8FD4\u56DE `displayState=handoff-ready`\uFF1B`auto` \u4E0E `inline` \u4EC5\u4F5C\u4E3A\u517C\u5BB9\u522B\u540D\uFF0C\u540C\u6837\u56DE\u9000\u5230 handoff\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u8981\u6C42\u5916\u90E8\u6D4F\u89C8\u5668\u65F6\u624D\u4F7F\u7528 `presentation=browser`\u3002\n- \u5BBF\u4E3B\u8D1F\u8D23\u628A handoff URL \u5BFC\u822A\u5230\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6216\u6D4F\u89C8\u5668\u5E76\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u5355\u7EAF\u5BFC\u822A\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u80FD\u529B\uFF0C\u4E0D\u4E3A\u6B64\u521D\u59CB\u5316\u901A\u7528\u6D4F\u89C8\u5668\u81EA\u52A8\u5316\uFF1B\u53EA\u6709\u9700\u8981 DOM\u3001\u63A7\u5236\u53F0\u6216\u4EA4\u4E92\u8BC1\u636E\u65F6\u624D\u63A5\u7BA1\u6D4F\u89C8\u5668\u3002\u53EA\u6709\u753B\u5E03\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\u82E5\u672A\u6765\u9700\u8981\u5BF9\u8BDD\u5185\u5D4C\u753B\u677F\uFF0C\u5FC5\u987B\u5355\u72EC\u5B9E\u73B0\u76F4\u63A5\u8FD0\u884C Canvas \u7684 MCP App\uFF0C\u4E0D\u80FD\u6062\u590D\u52A8\u6001 localhost iframe \u58F3\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u590D\u7528\u73B0\u6709\u6807\u7B7E\u9875\u5E76\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F write \u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request\u3001\u8FD4\u56DE\u4E0D\u900F\u660E `reviewToken` \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002`action=review` \u53EA\u8BB0\u5F55\u8BE5\u53EF\u89C1\u7248\u672C\u7684 review receipt\uFF0C\u8FD4\u56DE `reviewVerified=true`\uFF0C\u4E0D\u4F1A\u5199\u753B\u677F\u6216\u53D1\u5E03\u65B0 reveal\uFF1B\u91CD\u590D\u63D0\u4EA4\u540C\u4E00 token \u662F\u5E42\u7B49\u7684\u3002\u53EA\u6709 final review \u8FD4\u56DE `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n- \u72EC\u7ACB\u753B\u7801\u53EF\u4EE5\u5217\u51FA\u5F53\u524D workspace \u548C\u672C\u673A\u5DF2\u7531\u5BBF\u4E3B\u660E\u786E\u6CE8\u518C\u3001\u6301\u4E45\u5316\u4E14\u786E\u5B9E\u542B\u6709\u753B\u677F\u7684\u5176\u4ED6 workspace\uFF1B\u63D2\u4EF6\u7F13\u5B58\u548C\u7A7A root \u4E0D\u8FDB\u5165\u5207\u6362\u83DC\u5355\u3002\u5207\u6362\u524D\u5FC5\u987B\u5148\u843D\u76D8\u5F53\u524D\u5F85\u4FDD\u5B58\u7F16\u8F91\uFF0C\u518D\u7528\u5F53\u524D\u77ED\u671F\u4F1A\u8BDD\u6362\u53D6\u76EE\u6807 root \u7684\u65B0 workspace-scoped token\u3002\u65E7 token \u4E0D\u80FD\u76F4\u63A5\u8BBF\u95EE\u76EE\u6807 root\uFF0CAgent \u5DE5\u5177\u9ED8\u8BA4\u8303\u56F4\u4E5F\u4E0D\u80FD\u56E0\u4E3A UI \u5207\u6362\u800C\u6269\u5927\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F\u3001\u6D3B\u52A8\u7EED\u671F\u7684 workspace-scoped token\uFF0C\u53EF\u5728\u8BE5 root \u5185\u7BA1\u7406\u591A\u4E2A\u753B\u677F\u4F46\u4E0D\u80FD\u8DE8 root \u8BBF\u95EE\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n- \u4E0D\u9012\u5F52\u626B\u63CF\u6574\u53F0\u7535\u8111\u5BFB\u627E workspace\uFF0C\u4E5F\u4E0D\u81EA\u52A8\u590D\u5236\u3001\u5408\u5E76\u6216\u8FC1\u79FB\u4E0D\u540C root \u7684\u753B\u677F\uFF1B\u65B0\u6253\u5F00\u7684\u753B\u7801\u53EA\u83B7\u5F97\u6253\u5F00\u5F53\u65F6\u5DF2\u6CE8\u518C workspace \u7684\u5FEB\u7167\u3002\n";
 
 // src/guidance.ts
 var SECTION_ORDER = 220;
@@ -5854,8 +6006,8 @@ var DRAW2CODE_GUIDANCE = [
   "\u8981\u70B9\uFF1A\u753B\u677F\u6587\u4EF6\u662F\u5DE5\u4F5C\u533A\u91CC\u7684 draw2code/<name>.excalidraw.json\uFF08\u7528\u6237\u53EF\u5728\u753B\u677F\u5DE5\u5177\u680F\u5207\u6362/\u65B0\u5EFA\u591A\u5757\u753B\u677F\uFF0C\u5982 prototype / \u987E\u5BA2\u7AEF / \u5E97\u5BB6\u7AEF\uFF09\uFF1B\u753B\u677F\u4F1A\u628A\u5F53\u524D\u9009\u4E2D\u7684\u540D\u5B57\u540C\u6B65\u5230\u5DE5\u4F5C\u533A\uFF0CAgent \u5DE5\u5177\u7701\u7565 name \u65F6\u5FC5\u987B\u66F4\u65B0\u7528\u6237\u5F53\u524D\u6B63\u5728\u770B\u7684\u753B\u677F\uFF0C\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u4F20 name\u3002draw2code_list \u4F1A\u8FD4\u56DE\u5F53\u524D\u753B\u677F\u3002\u5DE5\u5177 root \u53C2\u6570\u586B\u4F1A\u8BDD\u5DE5\u4F5C\u76EE\u5F55\u3002draw2code_update \u7528 ops \u6279\u91CF upsert/delete\uFF08\u6309 id \u5E42\u7B49\uFF09\uFF0C\u5143\u7D20\u5750\u6807\u4E3A\u753B\u5E03\u50CF\u7D20\uFF08y \u5411\u4E0B\uFF09\uFF0Ctext \u5143\u7D20\u9700\u7ED9 text \u5B57\u6BB5\uFF1B\u65B0\u9875\u9762\u7528 prototype-page rectangle\uFF0C\u9875\u9762\u5185\u6A21\u5757\u4FDD\u6301\u81EA\u7531\u5143\u7D20\uFF0C\u6D41\u7A0B\u7528 arrow\uFF08points \u76F8\u5BF9\u5750\u6807 [[0,0],[dx,dy]]\uFF09\u3002\u4E0D\u8981\u4E3A\u4E86\u9875\u9762\u5F52\u5C5E\u7ED9\u65B0\u5143\u7D20\u8BBE\u7F6E frameId\uFF0C\u4E5F\u4E0D\u8981\u628A\u6574\u9875\u5F3A\u5236\u6210\u7EC4\uFF1B\u8FD9\u6837\u7528\u6237\u53EF\u4EE5\u81EA\u7531\u7F16\u8F91\uFF0C\u624B\u7ED8\u8DE8\u9875\u7BAD\u5934\u4E5F\u4E0D\u4F1A\u88AB Frame \u88C1\u5207\u3002\u4E25\u7981\u7528 Bash\u3001\u811A\u672C\u6216\u76F4\u63A5\u6587\u4EF6\u5199\u5165\u4FEE\u6539 .excalidraw.json\uFF0C\u5FC5\u987B\u8D70 draw2code_update\uFF0C\u5426\u5219\u65E0\u6CD5\u8FDB\u884C\u51B2\u7A81\u548C\u5199\u5165\u9A8C\u8BC1\u3002\u753B\u5B8C\u539F\u578B\u4E3B\u52A8\u63D0\u793A\u7528\u6237\uFF1A\u53EF\u4EE5\u5728\u53F3\u4FA7\u753B\u677F\u4E0A\u76F4\u63A5\u62D6\u6539\u3001\u5220\u6539\u6216\u8865\u5145\u6587\u6848\u3002",
   "\u751F\u6210\u9875\u9762\uFF1A\u7528\u6237\u660E\u786E\u8BF4\u300C\u751F\u6210\u9875\u9762 / \u751F\u6210XX\u9875\u9762 / \u6839\u636E\u753B\u677F\u751F\u6210\u524D\u7AEF / \u6309\u6700\u65B0\u753B\u677F\u91CD\u65B0\u751F\u6210\u300D\u65F6\uFF0C\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u95EE\u4E00\u6B21\u201C\u6709\u6CA1\u6709\u53C2\u8003\u98CE\u683C\u7684\u56FE\u7247\uFF1F\u6709\u7684\u8BDD\u76F4\u63A5\u53D1\u56FE\uFF0C\u6CA1\u6709\u4E5F\u53EF\u4EE5\u7531\u6211\u667A\u80FD\u63A8\u8350\u201D\uFF1B\u8FD9\u53E5\u8BDD\u4E0D\u4F7F\u7528 ask_user_question\u3002\u7528\u6237\u5DF2\u7ECF\u968F\u8BF7\u6C42\u9644\u56FE\u65F6\u4E0D\u8981\u91CD\u590D\u95EE\uFF1B\u67E5\u770B\u56FE\u7247\u540E\u628A\u89C6\u89C9\u6458\u8981\u6216\u8DEF\u5F84\u4F5C\u4E3A referenceStyle \u4F20\u5165\uFF0C\u6CA1\u6709\u5219\u4F20 none\u3002\u7136\u540E\u5FC5\u987B\u8C03\u7528 draw2code_generate action=start\uFF0C\u4E0D\u80FD\u51ED\u8BB0\u5FC6\u624B\u5199\uFF0C\u4E5F\u4E0D\u80FD\u628A\u7528\u6237\u70B9\u540D\u7684\u9875\u9762\u76F4\u63A5\u5F53\u6210\u5DF2\u786E\u8BA4\u8303\u56F4\u3002\u5DE5\u5177\u7F3A\u5C11 referenceStyle \u65F6\u4F1A\u8FD4\u56DE reference-style-prompt \u4E14\u4E0D\u521B\u5EFA\u4F1A\u8BDD\u3002pages \u53EA\u4F20\u7528\u6237\u672C\u6B21\u70B9\u540D\u7684\u9875\u9762\uFF0C\u4F5C\u4E3A\u9875\u9762\u591A\u9009\u9898\u7684\u63A8\u8350\u4F9D\u636E\uFF1Bframes \u4EC5\u662F\u65E7\u8C03\u7528\u517C\u5BB9\u522B\u540D\uFF0C\u4E24\u8005\u540C\u65F6\u4F20\u5165\u65F6\u5FC5\u987B\u4E00\u81F4\u3002\u5DE5\u5177\u4F1A\u8BC6\u522B\u65B0 prototype-page rectangle \u548C\u65E7\u547D\u540D Frame\uFF0C\u8FD4\u56DE\u753B\u677F\u5168\u90E8\u9875\u9762\uFF0C\u5FC5\u987B\u7528\u5BBF\u4E3B ask_user_question \u5C55\u793A\u5168\u90E8 options\uFF0C\u8BA9\u7528\u6237\u76F4\u63A5\u9009\u62E9\u3002\u6BCF\u4E2A question \u90FD\u9644\u5E26 askUserQuestionArgs\uFF0C\u8C03\u7528\u5BBF\u4E3B\u65F6\u5FC5\u987B\u539F\u6837\u590D\u5236\uFF1Bpage-scope \u7684 multi_select \u6C38\u8FDC\u4E3A true\uFF0C\u5373\u4F7F\u7528\u6237\u53EA\u70B9\u540D\u4E86\u4E00\u4E2A\u9875\u9762\u4E5F\u7981\u6B62\u6539\u6210\u5355\u9009\u3002\u63A8\u8350\u9879\u5DF2\u88AB\u5DE5\u5177\u7F6E\u9876\u5E76\u5728 label \u4E2D\u6807\u8BB0\u201C\u63A8\u8350\u201D\uFF0Cdescription \u542B\u539F\u56E0\uFF0C\u4E0D\u80FD\u81EA\u884C\u5220\u6389\uFF1B\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u9884\u52FE\u9009\uFF0C\u56E0\u6B64\u4E0D\u8981\u58F0\u79F0\u63A8\u8350\u9879\u5DF2\u7ECF\u9009\u4E2D\u3002\u968F\u540E\u6309 question \u7EE7\u7EED action=answer\uFF1B\u6709\u53C2\u8003\u56FE\u65F6\u89C6\u89C9\u65B9\u5411\u9898\u4F18\u5148\u63A8\u8350\u6CBF\u7528\u53C2\u8003\u56FE\uFF0C\u6CA1\u6709\u65F6\u6839\u636E\u4EA7\u54C1\u8BED\u4E49\u667A\u80FD\u63A8\u8350\u3002\u9996\u6B21\u751F\u6210\u53EA\u9009\u62E9\u4E00\u4E2A\u6574\u4F53\u89C6\u89C9\u65B9\u5411\uFF0C\u4E0D\u9010\u9879\u8FFD\u95EE\u989C\u8272\u3001\u5B57\u4F53\u3001\u5706\u89D2\u548C\u6280\u672F\u6808\uFF0C\u540E\u7EED\u751F\u6210\u9ED8\u8BA4\u7EE7\u627F\uFF1B\u5DE5\u5177\u4F1A\u628A\u8FD9\u4E00\u9009\u62E9\u5C55\u5F00\u4E3A\u7ED3\u6784\u5316\u89C6\u89C9\u7B80\u62A5\uFF0C\u4E0D\u8981\u518D\u5411\u7528\u6237\u9010\u9879\u786E\u8BA4\u3002status=blocked \u65F6\u5148\u6309 blockers \u7528 draw2code_update \u628A\u7ED3\u6784\u3001\u6587\u6848\u3001mock \u6570\u636E\u6216\u4EA4\u4E92\u4E8B\u5B9E\u8865\u56DE\u753B\u677F\uFF0C\u7528\u6237\u770B\u5230\u5E76\u68C0\u67E5\u540E\u7528\u540C\u4E00 sessionId/revision \u8C03 action=recheck\uFF0C\u7981\u6B62\u91CD\u590D\u9875\u9762\u548C\u89C6\u89C9\u95EE\u9898\u3002status=ready \u65F6\u53EA\u5C55\u793A\u4E00\u6B21 brief\uFF0C\u5E76\u7ACB\u5373\u7528\u5BBF\u4E3B ask_user_question \u539F\u6837\u5C55\u793A confirmation \u7684\u201C\u786E\u8BA4\u751F\u6210 / \u4FEE\u6539\u9875\u9762\u8303\u56F4 / \u4FEE\u6539\u89C6\u89C9\u65B9\u5411\u201D\u4E09\u4E2A\u9009\u9879\uFF0C\u7981\u6B62\u8BA9\u7528\u6237\u5728\u8F93\u5165\u6846\u91CC\u624B\u52A8\u8F93\u5165\u201C\u786E\u8BA4\u201D\uFF1B\u9009\u62E9\u540E\u5206\u522B\u8C03\u7528 action=confirm\uFF0C\u6216 action=revise + \u5BF9\u5E94 questionId\u3002\u53EA\u6709 confirmed \u7ED3\u679C\u624D\u5305\u542B elements\u3001pageRelations \u4E0E instructions\uFF0C\u53EF\u5F00\u59CB\u5199 draw2code-pages/<board>/index.html\u3002\u4E25\u683C\u751F\u6210\u5355\u6587\u4EF6\u5185\u8054 HTML\uFF0C\u53EA\u66F4\u65B0\u6240\u9009\u9875\u9762\u5E76\u4FDD\u7559\u672A\u9009\u9875\u9762\uFF1B\u753B\u677F\u662F\u9875\u9762\u3001\u4FE1\u606F\u5C42\u7EA7\u3001\u6587\u6848\u3001mock \u6570\u636E\u3001\u7EC4\u4EF6\u8BED\u4E49\u548C\u4EA4\u4E92\u5173\u7CFB\u7684\u4E8B\u5B9E\u6765\u6E90\uFF0C\u4E0D\u662F\u50CF\u7D20\u6A21\u677F\u3002\u6700\u7EC8\u9875\u9762\u5FC5\u987B\u4F7F\u7528\u5185\u5BB9\u6D41\u3001CSS Grid/Flex \u548C\u54CD\u5E94\u5F0F\u7EA6\u675F\u91CD\u65B0\u6392\u7248\uFF0C\u7981\u6B62\u7167\u642C Excalidraw \u7EDD\u5BF9\u5750\u6807\uFF1B\u53C2\u8003\u56FE\u53EA\u51B3\u5B9A\u89C6\u89C9\u8868\u73B0\uFF0C\u5185\u5BB9\u548C\u6D41\u7A0B\u4ECD\u4EE5\u539F\u578B\u4E3A\u51C6\u3002\u5199\u5165\u6587\u4EF6\u4E0D\u7B49\u4E8E\u5B8C\u6210\uFF1A\u5FC5\u987B\u81EA\u52A8\u6253\u5F00\u771F\u5B9E\u6D4F\u89C8\u5668\u9884\u89C8\uFF0C\u9010\u9875\u622A\u56FE\uFF0C\u68C0\u67E5\u76EE\u6807\u89C6\u53E3\u3001\u63A7\u5236\u53F0\u3001DOM\u3001\u6A2A\u5411\u6EA2\u51FA\u3001\u5185\u5BB9\u88C1\u5207\u3001\u6309\u94AE\u6587\u6848\u5C45\u4E2D\u548C\u5E95\u90E8\u5BFC\u822A\uFF0C\u5E76\u8D70\u901A\u6838\u5FC3\u6D41\u7A0B\uFF1B\u5B9E\u73B0\u95EE\u9898\u81EA\u52A8\u4FEE\u590D\u5E76\u91CD\u9A8C\u3002\u5168\u90E8\u901A\u8FC7\u540E\u63D0\u4EA4\u5305\u542B previewUrl\u3001viewports\u3001\u9010\u9875 screenshots\u3001consoleErrors\u3001domChecks\u3001layoutChecks \u548C interactionChecks \u7684 verificationEvidence\uFF0C\u518D\u8C03\u7528 action=complete\uFF1B\u51E0\u4E2A\u81EA\u62A5\u5E03\u5C14\u503C\u4E0D\u80FD\u66FF\u4EE3\u8BC1\u636E\u3002\u53EA\u6709\u8FD4\u56DE status=completed \u624D\u80FD\u5411\u7528\u6237\u62A5\u544A\u5B8C\u6210\u3002\u4E2D\u65AD\u65F6 action=resume \u4ECE\u5F53\u524D\u9636\u6BB5\u7EE7\u7EED\uFF1B\u666E\u901A\u540E\u7EED\u6539\u6837\u5F0F\u6216\u6587\u6848\u4E0D\u81EA\u52A8\u91CD\u8FDB generate\uFF0C\u53EA\u6709\u7528\u6237\u518D\u6B21\u660E\u786E\u8981\u6C42\u91CD\u65B0\u751F\u6210\u624D action=start\u3002",
   "generate \u8BC1\u636E\u4E0E\u9875\u9762\u4FDD\u62A4\u8865\u5145\uFF1A\u6BCF\u4E2A\u9875\u9762\u5FC5\u987B\u7528 <!-- d2c-page:<\u9875\u9762\u539F\u540D>:start/end --> \u6CE8\u91CA\u5305\u4F4F\uFF0C\u91CD\u65B0\u751F\u6210\u65F6\u5DE5\u5177\u4F1A\u76F4\u63A5\u6BD4\u8F83\u672A\u9009\u9875\u9762\u5757\u7684\u54C8\u5E0C\u3002verificationEvidence \u5FC5\u987B\u5E26\u672C\u6B21\u9A8C\u6536\u552F\u4E00 captureId \u548C\u5F53\u524D\u751F\u6210\u5165\u53E3 outputSha256\uFF1BpreviewUrl \u8FD4\u56DE\u5185\u5BB9\u7684\u54C8\u5E0C\u5FC5\u987B\u7B49\u4E8E outputSha256\u3002screenshots \u548C domSnapshots \u90FD\u5FC5\u987B\u4FDD\u5B58\u4E3A workspace \u5185\u771F\u5B9E\u6587\u4EF6\uFF0C\u643A\u5E26\u540C\u4E00\u4E2A captureId \u4E0E\u5404\u81EA sha256\uFF1B\u622A\u56FE\u5FC5\u987B\u662F\u4E0E viewport \u5C3A\u5BF8\u4E00\u81F4\u7684\u53EF\u89E3\u538B PNG\uFF0CDOM \u5FEB\u7167\u5FC5\u987B\u5305\u542B\u539F\u578B\u4E2D\u7684\u5173\u952E\u6587\u6848\u548C mock \u6570\u636E\u3002consoleErrors \u4E0E consoleWarnings \u90FD\u5FC5\u987B\u662F\u7A7A\u6570\u7EC4\uFF1B\u591A\u9875\u9762\u751F\u6210\u8FD8\u5FC5\u987B\u63D0\u4EA4 page-switching \u68C0\u67E5\u3002\u65E7\u7684 previewOpened\u3001selectedPagesVisible\u3001coreFlowPassed\u3001mockDataVisible \u548C unselectedPagesPreserved \u53EA\u4FDD\u7559\u53C2\u6570\u517C\u5BB9\uFF0C\u4E0D\u518D\u80FD\u5355\u72EC\u5B8C\u6210\u9A8C\u6536\u3002",
-  "\u753B\u7F16\u8F91\u534F\u4F5C\u89C4\u5219\uFF1A\u6BCF\u6B21 draw2code_update action=write \u90FD\u5E94\u5148\u8F93\u51FA\u4E00\u6BB5\u201C\u66F4\u65B0\u6458\u8981\u201D\uFF08\u4E0D\u662F\u6A21\u677F\u5316\u63D0\u95EE\uFF09\uFF1A1) \u4E0A\u4E00\u8F6E\u7528\u6237\u624B\u5DE5\u6539\u52A8\uFF1B2) \u8FD9\u4E00\u8F6E\u8BA1\u5212\u6539\u52A8\uFF1B3) \u51B2\u7A81\u68C0\u67E5\uFF08\u662F\u5426\u89E6\u53CA\u624B\u5DE5\u6539\u52A8\u6216\u66FF\u6362/\u6E05\u7A7A\uFF09\u3002\u53EA\u6709\u201C\u51B2\u7A81\u201D\u65F6\u624D\u8981\u6C42\u786E\u8BA4\uFF0C\u8FD4\u56DE pending \u540E\u8BF7\u53EA\u8BE2\u95EE\u76F8\u5173\u53D8\u66F4\u662F\u5426\u8986\u76D6\uFF1B\u6CA1\u51B2\u7A81\u5219\u76F4\u63A5\u6267\u884C\u5E76\u6C47\u62A5\u7ED3\u679C\uFF08\u4E0D\u6253\u65AD\u7528\u6237\uFF09\u3002\u5199\u5165\u6210\u529F\u4F1A\u9009\u4E2D\u76EE\u6807\u753B\u677F\u3001\u53D1\u5E03 reveal request \u5E76\u8FD4\u56DE\u4E0D\u900F\u660E reviewToken\uFF1BCanvas \u5B9E\u9645\u53EF\u89C1\u540E\u7528 action=review \u5355\u72EC\u590D\u6838\uFF0Creview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\uFF0C\u5E76\u6309 nextActionCode \u7EE7\u7EED\u3002\u82E5 Agent \u8BEF\u5728\u4EE3\u8868\u9875\u590D\u6838\u524D\u63D0\u4EA4\u4E86\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u4F1A\u8FD4\u56DE pendingUpdateId \u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u590D\u6838\u540E\u4F7F\u7528 action=commit_pending \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u7981\u6B62\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20\u5927 JSON\u3002\u65E7 visualReview \u4EC5\u4E3A\u517C\u5BB9\uFF0C\u65B0\u7684\u8C03\u7528\u4E0D\u8981\u624B\u5DE5\u62FC boardRevision/revealRequestId\u3002verified=true / writeVerified=true \u53EA\u8BC1\u660E\u5199\u76D8\u548C\u56DE\u8BFB\u4E00\u81F4\uFF0C\u4E0D\u7B49\u4E8E\u539F\u578B\u5B8C\u6210\uFF1B\u53EA\u6709 final review \u8FD4\u56DE completionReady=true \u624D\u80FD\u8BF4\u6574\u5957\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002prototypeQuality.warnings \u8981\u4F5C\u4E3A\u4E0B\u4E00\u8F6E\u6253\u78E8\u4F9D\u636E\uFF0C\u4E0D\u80FD\u88AB verified \u63A9\u76D6\u3002\u82E5\u68C0\u6D4B\u5230\u624B\u5DE5\u6539\u52A8\u4E0E\u672C\u8F6E upsert/delete \u540C id\u3001\u6216\u6267\u884C clear/replace \u4E14\u9762\u677F\u975E\u7A7A\uFF0C\u5C31\u5E94\u8FDB\u5165\u786E\u8BA4\u6D41\u7A0B\uFF1B\u786E\u8BA4\u540E\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002",
-  "\u9650\u5236\uFF1A\u5355\u753B\u677F \u22642000 \u5143\u7D20\u3001\u2264512KB\uFF1B\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u5148 draw2code_read \u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5E26\u81EA\u52A8\u7248\u672C\u5B58\u6863\uFF1A\u4F60\u7684\u6BCF\u6B21 draw2code_update \u90FD\u4F1A\u5148\u5FEB\u7167\u65E7\u72B6\u6001\uFF08\u7528\u6237\u53EF\u5728\u300C\u5386\u53F2\u300D\u83DC\u5355\u56DE\u6EDA\u4EFB\u610F\u7248\u672C\uFF09\uFF0C\u56E0\u6B64\u5927\u6539\u4E0D\u5FC5\u72B9\u8C6B\u3002\u53EA\u6709\u660E\u786E\u7684 Draw2Code / \u753B\u7801 / \u753B\u539F\u578B\u5524\u9192\u672C\u63D2\u4EF6\uFF1B\u5524\u9192\u540E\u7684\u540C\u4E00\u4EFB\u52A1\u91CC\uFF0C\u753B\u677F\u3001\u539F\u578B\u3001\u753B\u4E00\u4E0B\u7B49\u540E\u7EED\u8BF4\u6CD5\u7EE7\u7EED\u6CBF\u7528\u672C\u5DE5\u4F5C\u6D41\u3002",
+  "\u753B\u7F16\u8F91\u534F\u4F5C\u89C4\u5219\uFF1A\u5DF2\u6709\u9879\u76EE\u5148\u8C03\u7528\u4E00\u6B21 draw2code_read\uFF0C\u5E76\u76F4\u63A5\u8BFB\u53D6 continuation \u4E0E capacity\uFF0C\u7981\u6B62\u641C\u7D22\u4F1A\u8BDD\u5386\u53F2\u6765\u627E reviewToken \u6216 pendingUpdateId\u3002\u53EA\u6709\u5F53\u524D\u4EFB\u52A1\u786E\u5B9E\u662F\u5728\u6062\u590D\u540C\u4E00\u6279\u6682\u5B58\u5199\u5165\u65F6\uFF0C\u624D\u6267\u884C continuation.nextAction\uFF1B\u65B0\u7684\u72EC\u7ACB\u5C0F\u6539\u52A8\u76F4\u63A5\u6309\u6700\u65B0\u753B\u677F\u751F\u6210\u6700\u5C0F ops\uFF0C\u5DF2\u6709 3 \u9875\u4EE5\u4E0A\u7684\u6210\u719F\u753B\u677F\u4E0D\u4F1A\u88AB\u65E7\u7684\u9996\u6B21\u4EE3\u8868\u9875\u95E8\u7981\u62E6\u622A\u3002\u6BCF\u6B21 draw2code_update action=write \u90FD\u5E94\u5148\u8F93\u51FA\u4E00\u6BB5\u201C\u66F4\u65B0\u6458\u8981\u201D\uFF08\u4E0D\u662F\u6A21\u677F\u5316\u63D0\u95EE\uFF09\uFF1A1) \u4E0A\u4E00\u8F6E\u7528\u6237\u624B\u5DE5\u6539\u52A8\uFF1B2) \u8FD9\u4E00\u8F6E\u8BA1\u5212\u6539\u52A8\uFF1B3) \u51B2\u7A81\u68C0\u67E5\uFF08\u662F\u5426\u89E6\u53CA\u624B\u5DE5\u6539\u52A8\u6216\u66FF\u6362/\u6E05\u7A7A\uFF09\u3002\u53EA\u6709\u201C\u51B2\u7A81\u201D\u65F6\u624D\u8981\u6C42\u786E\u8BA4\uFF0C\u8FD4\u56DE pending \u540E\u8BF7\u53EA\u8BE2\u95EE\u76F8\u5173\u53D8\u66F4\u662F\u5426\u8986\u76D6\uFF1B\u6CA1\u51B2\u7A81\u5219\u76F4\u63A5\u6267\u884C\u5E76\u6C47\u62A5\u7ED3\u679C\uFF08\u4E0D\u6253\u65AD\u7528\u6237\uFF09\u3002\u5199\u5165\u6210\u529F\u4F1A\u9009\u4E2D\u76EE\u6807\u753B\u677F\u3001\u53D1\u5E03 reveal request \u5E76\u8FD4\u56DE\u4E0D\u900F\u660E reviewToken\uFF1BCanvas \u5B9E\u9645\u53EF\u89C1\u540E\u7528 action=review \u5355\u72EC\u590D\u6838\uFF0Creview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\uFF0C\u5E76\u6309 nextActionCode \u7EE7\u7EED\u3002\u82E5 Agent \u8BEF\u5728\u4EE3\u8868\u9875\u590D\u6838\u524D\u63D0\u4EA4\u4E86\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u4F1A\u8FD4\u56DE pendingUpdateId \u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u590D\u6838\u540E\u4F7F\u7528 action=commit_pending \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u7981\u6B62\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20\u5927 JSON\u3002\u65E7 visualReview \u4EC5\u4E3A\u517C\u5BB9\uFF0C\u65B0\u7684\u8C03\u7528\u4E0D\u8981\u624B\u5DE5\u62FC boardRevision/revealRequestId\u3002verified=true / writeVerified=true \u53EA\u8BC1\u660E\u5199\u76D8\u548C\u56DE\u8BFB\u4E00\u81F4\uFF0C\u4E0D\u7B49\u4E8E\u539F\u578B\u5B8C\u6210\uFF1B\u53EA\u6709 final review \u8FD4\u56DE completionReady=true \u624D\u80FD\u8BF4\u6574\u5957\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002prototypeQuality.warnings \u8981\u4F5C\u4E3A\u4E0B\u4E00\u8F6E\u6253\u78E8\u4F9D\u636E\uFF0C\u4E0D\u80FD\u88AB verified \u63A9\u76D6\u3002\u82E5\u68C0\u6D4B\u5230\u624B\u5DE5\u6539\u52A8\u4E0E\u672C\u8F6E upsert/delete \u540C id\u3001\u6216\u6267\u884C clear/replace \u4E14\u9762\u677F\u975E\u7A7A\uFF0C\u5C31\u5E94\u8FDB\u5165\u786E\u8BA4\u6D41\u7A0B\uFF1B\u786E\u8BA4\u540E\u91CD\u65B0\u8C03\u7528 draw2code_update \u5E76\u8BBE\u7F6E force=true\u3002",
+  "\u9650\u5236\uFF1A\u5355\u753B\u677F \u22642000 \u5143\u7D20\u3001\u2264512KB\uFF1Bdraw2code_read / draw2code_open \u4F1A\u8FD4\u56DE\u7CBE\u786E usedBytes\u3001remainingBytes \u548C continuation\u3002\u751F\u6210\u5927\u6279 ops \u524D\u5148\u770B remainingBytes\uFF1B\u82E5 update \u8FD4\u56DE nextActionCode=reduce_update_scope\uFF0C\u6309 nextActionParams \u62C6\u6210\u66F4\u5C0F\u7684\u72EC\u7ACB\u6279\u6B21\uFF0C\u4E0D\u8981\u91CD\u590D\u751F\u6210\u539F\u6279 JSON\u3002update.timings \u53EA\u7EDF\u8BA1\u5DE5\u5177\u5185\u90E8\u8BFB\u76D8\u3001\u9884\u68C0\u3001\u5199\u76D8\u3001\u56DE\u8BFB\u9A8C\u8BC1\u548C\u53D1\u5E03\u9636\u6BB5\uFF0C\u4E0D\u5305\u542B\u5DE5\u5177\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u65F6\u95F4\u3002\u751F\u6210\u524D\u7AEF\u9875\u9762\u524D\u5FC5\u987B\u5148 draw2code_read \u6700\u65B0\u753B\u677F\uFF0C\u4E0D\u8981\u51ED\u8BB0\u5FC6\u753B\u7ED3\u6784\u3002\u753B\u677F\u5E26\u81EA\u52A8\u7248\u672C\u5B58\u6863\uFF1A\u4F60\u7684\u6BCF\u6B21 draw2code_update \u90FD\u4F1A\u5148\u5FEB\u7167\u65E7\u72B6\u6001\uFF08\u7528\u6237\u53EF\u5728\u300C\u5386\u53F2\u300D\u83DC\u5355\u56DE\u6EDA\u4EFB\u610F\u7248\u672C\uFF09\uFF0C\u56E0\u6B64\u5927\u6539\u4E0D\u5FC5\u72B9\u8C6B\u3002\u53EA\u6709\u660E\u786E\u7684 Draw2Code / \u753B\u7801 / \u753B\u539F\u578B\u5524\u9192\u672C\u63D2\u4EF6\uFF1B\u5524\u9192\u540E\u7684\u540C\u4E00\u4EFB\u52A1\u91CC\uFF0C\u753B\u677F\u3001\u539F\u578B\u3001\u753B\u4E00\u4E0B\u7B49\u540E\u7EED\u8BF4\u6CD5\u7EE7\u7EED\u6CBF\u7528\u672C\u5DE5\u4F5C\u6D41\u3002",
   workflow_contract_default
 ].join("\n\n");
 
@@ -5975,16 +6127,19 @@ var Draw2CodeRuntimeImpl = class {
       if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`);
       const board = active.value.name;
       let revision = 0;
+      let operational = {};
       if (board !== null) {
         const read = await scenes.read(command.root, board);
         if (!read.ok) throw new Error(`${read.error.code}: ${read.error.message}`);
         revision = read.value.rev;
+        operational = await boardOperationalState(scenes, command.root, board, revision, read.value.scene);
       }
       const presentation = choosePresentation(command.presentation, context.uiCapabilities);
       data = {
         board,
         revision,
         presentation,
+        ...operational,
         ...presentation === "inline" ? { resourceUri: "ui://draw2code/canvas.html" } : {},
         opened: false
       };

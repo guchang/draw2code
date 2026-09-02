@@ -53,6 +53,10 @@ test('runtime open restores active board and never creates one', async () => {
   assert.equal(opened.ok, true)
   assert.equal(opened.data.board, 'prototype')
   assert.equal(opened.data.opened, false)
+  assert.equal(opened.data.capacity.maxBytes, 512 * 1024)
+  assert.equal(opened.data.capacity.remainingBytes, opened.data.capacity.maxBytes - opened.data.capacity.usedBytes)
+  assert.equal(opened.data.continuation.status, 'review_available')
+  assert.equal(opened.data.continuation.nextAction.tool, 'draw2code_update')
 })
 
 test('presentation uses capability detection instead of host names', () => {
