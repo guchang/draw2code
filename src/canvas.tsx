@@ -7,6 +7,7 @@ const params = new URLSearchParams(window.location.search)
 const workspaceRoot = params.get('root') ?? ''
 const token = params.get('token') ?? undefined
 const board = params.get('board')
+const viewId = params.get('view') ?? 'standalone'
 
 document.documentElement.style.height = '100%'
 document.body.style.cssText = 'height:100%;margin:0;overflow:hidden;background:#f6f6f8'
@@ -19,6 +20,7 @@ createRoot(mount).render(
     cwd={workspaceRoot}
     visible
     initialBoard={board}
+    viewId={viewId}
     api={new D2cApi({ baseUrl: window.location.origin, token })}
     workspaceSwitching
   />,

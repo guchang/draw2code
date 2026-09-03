@@ -10,10 +10,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { execFile } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import type { SceneStore } from './scene-store.ts'
+import { sceneRequestBodyLimitBytes, type SceneStore } from './scene-store.ts'
 
-/** Cap on JSON request bodies (whole scenes are under it). */
-const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+/** Small control requests retain a narrow defensive cap. */
+const MAX_CONTROL_BODY_BYTES = 2 * 1024 * 1024
 
 /** Run one native command without a shell and capture its output. */
 function runNative(command: string, args: string[]): Promise<{ stdout: string; stderr: string; code?: string | number }> {
@@ -82,12 +82,12 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(json)
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(req: IncomingMessage, maxBytes = MAX_CONTROL_BODY_BYTES): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     size += (chunk as Buffer).length
-    if (size > MAX_JSON_BODY_BYTES) throw new Error('request body too large')
+    if (size > maxBytes) throw new Error('request body too large')
     chunks.push(chunk as Buffer)
   }
   const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -113,6 +113,7 @@ function respond<T>(res: ServerResponse, result: { ok: true; value: T } | { ok: 
  * @returns the WebRoute array to register on the shared webserver.
  */
 export function makeRoutes(store: SceneStore): WebRoute[] {
+  const maxSceneBodyBytes = sceneRequestBodyLimitBytes(store.capacityLimits().hardCapBytes)
   const guard = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
     if (req.method !== method) {
       writeJson(res, 405, { ok: false, error: { code: 'method', message: `method not allowed: ${req.method}` } })
@@ -150,7 +151,7 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
         else respond(res, result)
       },
     },
-    // --------------------------------------------- active board (shared UI state)
+    // --------------------------------------- active board (view-scoped UI state)
     {
       kind: 'exact',
       path: '/api/draw2code/active-board',
@@ -166,14 +167,18 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
             writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: 'missing root' } })
             return
           }
-          respond(res, await store.getActiveBoard(root))
+          respond(res, await store.getActiveBoard(root, query(req, 'clientId')))
           return
         }
         if (method === 'PUT') {
           if (!guard(req, res, 'PUT')) return
           try {
             const body = await readJsonBody(req)
-            respond(res, await store.setActiveBoard(String(body.root ?? ''), String(body.name ?? '')))
+            respond(res, await store.setActiveBoard(
+              String(body.root ?? ''),
+              String(body.name ?? ''),
+              typeof body.clientId === 'string' ? body.clientId : undefined,
+            ))
           } catch (error) {
             writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
           }
@@ -195,14 +200,19 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
             writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: 'missing root' } })
             return
           }
-          respond(res, await store.getBoardReveal(root))
+          respond(res, await store.getBoardReveal(root, query(req, 'clientId')))
           return
         }
         if (method === 'PUT') {
           if (!guard(req, res, 'PUT')) return
           try {
             const body = await readJsonBody(req)
-            respond(res, await store.ackBoardReveal(String(body.root ?? ''), String(body.id ?? ''), String(body.board ?? '')))
+            respond(res, await store.ackBoardReveal(
+              String(body.root ?? ''),
+              String(body.id ?? ''),
+              String(body.board ?? ''),
+              typeof body.clientId === 'string' ? body.clientId : undefined,
+            ))
           } catch (error) {
             writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
           }
@@ -273,7 +283,7 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
       handler: async (req, res) => {
         if (!guard(req, res, 'PUT')) return
         try {
-          const body = await readJsonBody(req)
+          const body = await readJsonBody(req, maxSceneBodyBytes)
           const baseRev = typeof body.baseRev === 'number' ? body.baseRev : undefined
           respond(res, await store.write(String(body.root ?? ''), String(body.name ?? ''), body.scene, baseRev))
         } catch (error) {
@@ -335,13 +345,13 @@ export function makeRoutes(store: SceneStore): WebRoute[] {
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req)
+          const body = await readJsonBody(req, maxSceneBodyBytes)
           if (typeof body.scene !== 'object' || body.scene === null || !Array.isArray((body.scene as { elements?: unknown }).elements)) {
             writeJson(res, 400, { ok: false, error: { code: 'bad-scene', message: 'scene.elements must be an array' } })
             return
           }
           const json = JSON.stringify(body.scene, null, 2)
-          if (typeof json !== 'string' || Buffer.byteLength(json) > MAX_JSON_BODY_BYTES) {
+          if (typeof json !== 'string' || Buffer.byteLength(json) > maxSceneBodyBytes) {
             writeJson(res, 400, { ok: false, error: { code: 'too-large', message: 'scene exceeds export size limit' } })
             return
           }

@@ -1314,6 +1314,8 @@ export function draw2codeUpdateTool(store: SceneStore) {
       observations?: string[]
       pendingUpdateId?: string
       visualReview?: unknown
+      /** Runtime-only view identity; not exposed in the public tool schema. */
+      clientId?: string
     }) {
       const startedAt = performance.now()
       const stageTimings = { readMs: 0, preflightMs: 0, writeMs: 0, verificationMs: 0, publishMs: 0 }
@@ -1335,6 +1337,11 @@ export function draw2codeUpdateTool(store: SceneStore) {
       const visualReview = parseVisualReview(args.visualReview)
       let parsedOps = args.ops === undefined ? [] : parseUpdateOps(args.ops)
       let targetName = args.name
+      if (targetName === undefined && args.clientId !== undefined) {
+        const selected = await store.getActiveBoard(args.root, args.clientId)
+        if (!selected.ok) throw new Error(`${selected.error.code}: ${selected.error.message}`)
+        targetName = selected.value.name ?? undefined
+      }
       let pendingCommit: PendingReviewWrite | null = null
       const requestedAction = args.action ?? (visualReview !== null && parsedOps.length === 0 ? 'review' : 'write')
       const action = requestedAction === 'commit_pending' ? 'write' : requestedAction
@@ -1412,7 +1419,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
               ? '代表页复核已记录；可以写入其余页面，不需要再次传递旧 revision 或 revealRequestId'
               : '代表页复核已记录；此前提交的剩余页面 ops 已保留，请用 action=commit_pending 和 pendingUpdateId 提交，不要重发大 JSON'
             : '最终复核已记录，但仍需先修复 prototypeQuality.warnings，再重新查看最新画板'
-        const active = await store.getActiveBoard(args.root)
+        const active = await store.getActiveBoard(args.root, args.clientId)
         if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`)
         return {
           rev: board.value.rev,
@@ -1556,7 +1563,7 @@ export function draw2codeUpdateTool(store: SceneStore) {
           baseRev: board.value.rev,
           ops,
         })
-        const reveal = await store.getBoardReveal(args.root)
+        const reveal = await store.getBoardReveal(args.root, args.clientId)
         if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`)
         const request = reveal.value.request
         if (request === null || request.board !== target.name || Math.abs(request.revision - board.value.rev) > 0.5) {
@@ -1677,9 +1684,9 @@ export function draw2codeUpdateTool(store: SceneStore) {
       if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id)
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements })
       const publishStartedAt = performance.now()
-      const selected = await store.setActiveBoard(args.root, target.name)
+      const selected = await store.setActiveBoard(args.root, target.name, args.clientId)
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`)
-      const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev)
+      const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev, args.clientId)
       if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`)
       stageTimings.publishMs += performance.now() - publishStartedAt
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements)

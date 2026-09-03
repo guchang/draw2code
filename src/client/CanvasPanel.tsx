@@ -4,7 +4,7 @@
  *
  * - the board persists as `<workspace>/draw2code/<name>.excalidraw.json`;
  * - the toolbar lists / creates / deletes boards (host /api/draw2code/*);
- *   the active board is remembered per workspace (localStorage);
+ *   the active board is remembered per session view (localStorage);
  * - local edits debounce-save (gated until the first pull settles, so the
  *   mount-time onChange echo can never hit the disk); pending saves are
  *   flushed under the OLD board name before any board switch;
@@ -42,7 +42,7 @@ const LIST_POLL_MS = 5000
 const IDLE_MS = 4000
 /** Ignore onChange for a short period after applying remote scenes from disk. */
 const REMOTE_SYNC_IGNORE_MS = 350
-/** localStorage key prefix for the per-workspace active board. */
+/** localStorage key prefix for the per-session-view active board. */
 const BOARD_PREFX = 'dsh.draw2code.board.'
 
 interface RawLibraryFile {
@@ -88,6 +88,8 @@ interface Props {
   api?: D2cApi
   /** Board requested by draw2code_open. */
   initialBoard?: string | null
+  /** Stable per-session/tab identity used to isolate board selection. */
+  viewId?: string
   /** Standalone canvas can switch between explicitly registered workspaces. */
   workspaceSwitching?: boolean
 }
@@ -149,19 +151,19 @@ function UndoIcon(): JSX.Element {
   )
 }
 
-/** Load the remembered active board for a workspace (sanitized, best-effort). */
-function rememberedBoard(cwd: string): string {
+/** Load the remembered active board for one workspace view (best-effort). */
+function rememberedBoard(cwd: string, viewId: string): string {
   if (cwd === '') return DEFAULT_BOARD
   try {
-    const value = window.localStorage.getItem(BOARD_PREFX + cwd)
+    const value = window.localStorage.getItem(`${BOARD_PREFX}${encodeURIComponent(viewId)}.${cwd}`)
     if (typeof value === 'string' && value.trim() !== '') return value
   } catch { /* storage unavailable */ }
   return DEFAULT_BOARD
 }
 
-function rememberBoard(cwd: string, name: string): void {
+function rememberBoard(cwd: string, viewId: string, name: string): void {
   try {
-    window.localStorage.setItem(BOARD_PREFX + cwd, name)
+    window.localStorage.setItem(`${BOARD_PREFX}${encodeURIComponent(viewId)}.${cwd}`, name)
   } catch { /* storage unavailable */ }
 }
 
@@ -182,7 +184,7 @@ function operationErrorMessage(error: { code: string; message: string }): string
 /**
  * The board component.
  */
-export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitching = false }: Props): JSX.Element {
+export function CanvasPanel({ cwd, visible, api, initialBoard, viewId = 'standalone', workspaceSwitching = false }: Props): JSX.Element {
   const apiRef = useRef<D2cApi>(api ?? new D2cApi())
   const excalidrawRef = useRef<LooseExcalidrawApi | null>(null)
   const lastLocalEditRef = useRef(0)
@@ -210,8 +212,6 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
   const pendingSaveRef = useRef<PendingSave | null>(null)
   /** The board currently loaded in the canvas (source of truth for saves). */
   const boardRef = useRef(DEFAULT_BOARD)
-  /** Avoid an active-board poll racing a user's own board selection. */
-  const lastLocalBoardChangeRef = useRef(0)
   /** Saves already handed to the host, keyed by board for delete barriers. */
   const inFlightSavesRef = useRef(new Map<string, Promise<boolean>>())
   /** Board selections are serialized; only the latest requested target commits. */
@@ -220,7 +220,7 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
   const deletingBoardsRef = useRef(new Set<string>())
 
   const [dark, setDark] = useState(false)
-  const [boardName, setBoardName] = useState(() => initialBoard ?? rememberedBoard(cwd))
+  const [boardName, setBoardName] = useState(() => initialBoard ?? rememberedBoard(cwd, viewId))
   const [boards, setBoards] = useState<SceneMetaRow[]>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceMetaRow[]>([])
   const [switchingWorkspace, setSwitchingWorkspace] = useState<string | null>(null)
@@ -246,12 +246,12 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
   // A URL selected by draw2code_open is authoritative for the first load.
   // Fall back to browser memory only when the host did not request a board.
   useEffect(() => {
-    const selected = initialBoard ?? rememberedBoard(cwd)
+    const selected = initialBoard ?? rememberedBoard(cwd, viewId)
     if (selected !== boardRef.current) {
       boardRef.current = selected
       setBoardName(selected)
     }
-  }, [cwd, initialBoard])
+  }, [cwd, initialBoard, viewId])
 
   // ---- board-host styles (injected once; see comment below) -------------
   useEffect(() => {
@@ -423,13 +423,13 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
     readyRef.current = false
 
     const acknowledgeRenderedReveal = async (revision: number): Promise<void> => {
-      const reveal = await apiRef.current.getBoardReveal(cwd)
+      const reveal = await apiRef.current.getBoardReveal(cwd, viewId)
       if (cancelled || !reveal.ok || reveal.request === null || reveal.request.consumedAt !== undefined) return
       if (reveal.request.board !== boardName || reveal.request.revision !== revision) return
       // Let Excalidraw commit the pulled scene before reporting it visible.
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())))
       if (cancelled || boardRef.current !== boardName || revRef.current !== revision || !readyRef.current) return
-      const acknowledged = await apiRef.current.ackBoardReveal(cwd, reveal.request.id, boardName)
+      const acknowledged = await apiRef.current.ackBoardReveal(cwd, reveal.request.id, boardName, viewId)
       if (!acknowledged.ok) console.warn('[dsh-draw2code] reveal acknowledgement failed:', acknowledged.error.message)
     }
 
@@ -479,16 +479,14 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
       cancelled = true
       clearInterval(timer)
     }
-  }, [cwd, boardName, visible, applyRemoteScene, remoteEpoch, showNotice])
+  }, [cwd, boardName, visible, applyRemoteScene, remoteEpoch, showNotice, viewId])
 
   useEffect(() => apiRef.current.subscribe(cwd, (event) => {
-    if (event.type === 'scene.updated' || event.type === 'active-board.changed' || event.type === 'board.deleted') {
+    if (event.type === 'scene.updated' || event.type === 'board.deleted') {
       setRemoteEpoch((value) => value + 1)
     }
-    if (event.type === 'active-board.changed' || event.type === 'board.deleted') {
-      setActiveBoardEpoch((value) => value + 1)
-    }
-  }), [cwd])
+    if (event.type === 'active-board.changed') setActiveBoardEpoch((value) => value + 1)
+  }, viewId), [cwd, viewId])
 
   useEffect(() => {
     if (!workspaceSwitching || cwd === '' || !visible) return
@@ -594,11 +592,10 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
   // ---- board management actions ------------------------------------------
   const switchBoard = useCallback((name: string, force = false): void => {
     if (!force && name === boardRef.current) return
-    lastLocalBoardChangeRef.current = Date.now()
     void boardSwitchActionsRef.current.run(async (isCurrent) => {
       if (!await flushPendingSave() || !isCurrent()) return false
       if (cwd !== '') {
-        const selected = await apiRef.current.setActiveBoard(cwd, name)
+        const selected = await apiRef.current.setActiveBoard(cwd, name, viewId)
         if (!selected.ok) {
           if (isCurrent()) showNotice(operationErrorMessage(selected.error), 'error')
           return false
@@ -621,32 +618,22 @@ export function CanvasPanel({ cwd, visible, api, initialBoard, workspaceSwitchin
       lastLocalEditRef.current = 0
       boardRef.current = name
       setBoardName(name)
-      rememberBoard(cwd, name)
+      rememberBoard(cwd, viewId, name)
       setMenuOpen(false)
     }).catch((error) => showNotice(`操作失败：${error instanceof Error ? error.message : String(error)}`, 'error'))
-  }, [cwd, flushPendingSave, showNotice])
+  }, [cwd, flushPendingSave, showNotice, viewId])
 
-  // The host can create and select an isolated board during
-  // draw2code_create. Follow the shared active-board pointer so the board
-  // that the agent just confirmed becomes visible in the current sidebar;
-  // without this, the tool could truthfully create a board while the user
-  // continued looking at the old one.
+  // Navigation events are daemon-targeted to this view. The workspace
+  // default is deliberately not polled: another session may select it.
   useEffect(() => {
-    if (cwd === '' || !visible) return
+    if (activeBoardEpoch === 0 || cwd === '' || !visible) return
     let cancelled = false
-    const syncActiveBoard = async (): Promise<void> => {
-      const result = await apiRef.current.getActiveBoard(cwd)
+    void apiRef.current.getActiveBoard(cwd, viewId).then((result) => {
       if (cancelled || !result.ok || result.name === null || result.name === boardRef.current) return
-      if (Date.now() - lastLocalBoardChangeRef.current < 1500) return
       switchBoard(result.name, true)
-    }
-    void syncActiveBoard()
-    const timer = setInterval(() => { void syncActiveBoard() }, LIST_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [cwd, visible, switchBoard, activeBoardEpoch])
+    })
+    return () => { cancelled = true }
+  }, [activeBoardEpoch, cwd, switchBoard, viewId, visible])
 
   const createBoard = useCallback(async (): Promise<void> => {
     const name = newName.trim()

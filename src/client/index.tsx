@@ -22,6 +22,12 @@ export const inject = ['betterSidebar', 'sessions']
 /** The tab id (also the SidebarTab.type value). */
 const TAB_ID = 'draw2code:board'
 
+function boardFromPath(path: string | undefined): string | null {
+  if (path === undefined || !path.endsWith('.excalidraw.json')) return null
+  const filename = path.slice(path.lastIndexOf('/') + 1)
+  return filename.slice(0, -'.excalidraw.json'.length) || null
+}
+
 /** Apply the browser half: one 画码 tab in the right sidebar. */
 export function apply(ctx: ClientContext): void {
   ctx.effect(
@@ -44,7 +50,12 @@ export function apply(ctx: ClientContext): void {
         </svg>
       ),
       component: (props: TabComponentProps) => (
-        <CanvasPanel cwd={props.scope.cwd ?? ''} visible={props.visible} />
+        <CanvasPanel
+          cwd={props.scope.cwd ?? ''}
+          visible={props.visible}
+          initialBoard={boardFromPath(props.tab.path)}
+          viewId={props.scope.sessionId}
+        />
       ),
     }
     return sidebar.registerTab(descriptor)

@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
@@ -15,6 +16,11 @@ const client = new Draw2CodeDaemonClient(daemonEntry, canvasHtml)
 const openedWorkspaces = new Set<string>()
 const configuredWorkspaceRoot = process.env.DRAW2CODE_WORKSPACE_ROOT?.trim() || undefined
 let advertisedRootsPromise: Promise<string[]> | undefined
+
+interface McpRequestExtra {
+  _meta?: Record<string, unknown>
+  taskId?: string
+}
 
 const instructions = workflowContract
 
@@ -32,7 +38,20 @@ function advertisedRoots(): Promise<string[]> {
   return advertisedRootsPromise
 }
 
-async function contextFor(root: string): Promise<HostContext> {
+function requestClientId(extra?: McpRequestExtra): string {
+  const relatedTask = extra?._meta?.['io.modelcontextprotocol/related-task']
+  const relatedTaskId = relatedTask !== null && typeof relatedTask === 'object'
+    ? (relatedTask as Record<string, unknown>).taskId
+    : undefined
+  const taskId = typeof relatedTaskId === 'string' && relatedTaskId.trim() !== ''
+    ? relatedTaskId
+    : extra?.taskId
+  if (typeof taskId !== 'string' || taskId.trim() === '') return `mcp-${process.pid}`
+  const digest = createHash('sha256').update(taskId).digest('hex').slice(0, 24)
+  return `mcp-task-${digest}`
+}
+
+async function contextFor(root: string, extra?: McpRequestExtra): Promise<HostContext> {
   let workspaceRoot = configuredWorkspaceRoot ?? root
   if (configuredWorkspaceRoot === undefined) {
     const roots = await advertisedRoots()
@@ -41,7 +60,7 @@ async function contextFor(root: string): Promise<HostContext> {
     else if (roots.length > 0) workspaceRoot = process.cwd()
   }
   return {
-    clientId: `mcp-${process.pid}`,
+    clientId: requestClientId(extra),
     host: 'mcp',
     workspaceRoot,
     interactive: process.env.DRAW2CODE_HEADLESS !== '1',
@@ -60,8 +79,8 @@ function toolResult(result: Draw2CodeResult) {
   }
 }
 
-async function execute(command: Draw2CodeCommand): Promise<ReturnType<typeof toolResult>> {
-  const context = await contextFor(command.root)
+async function execute(command: Draw2CodeCommand, extra?: McpRequestExtra): Promise<ReturnType<typeof toolResult>> {
+  const context = await contextFor(command.root, extra)
   // MCP clients may run the tool from a nested repository while advertising
   // a broader workspace root. Boards are workspace-scoped, so normalize every
   // command to the advertised root; otherwise the browser and DSH silently
@@ -76,7 +95,7 @@ server.registerTool('draw2code_list', {
   title: 'List Draw2Code boards',
   description: 'List boards and the shared active board without writing files.',
   inputSchema: { root },
-}, async ({ root }) => execute({ type: 'list', root }))
+}, async ({ root }, extra) => execute({ type: 'list', root }, extra))
 
 server.registerTool('draw2code_read', {
   title: 'Read Draw2Code board',
@@ -92,7 +111,7 @@ server.registerTool('draw2code_read', {
     cursor: z.string().optional(),
     limit: z.number().int().positive().max(250).optional(),
   },
-}, async ({ root, board, ...scope }) => execute({ type: 'read', root, ...scope, ...(board === undefined ? {} : { board }) }))
+}, async ({ root, board, ...scope }, extra) => execute({ type: 'read', root, ...scope, ...(board === undefined ? {} : { board }) }, extra))
 
 server.registerTool('draw2code_create', {
   title: 'Create Draw2Code project',
@@ -112,7 +131,7 @@ server.registerTool('draw2code_create', {
     brief: z.record(z.unknown()).optional(),
     stopReason: z.string().optional(),
   },
-}, async ({ root, ...input }) => execute({ type: 'create', root, input }))
+}, async ({ root, ...input }, extra) => execute({ type: 'create', root, input }, extra))
 
 server.registerTool('draw2code_update', {
   title: 'Update Draw2Code board',
@@ -132,7 +151,7 @@ server.registerTool('draw2code_update', {
     pendingUpdateId: z.string().optional(),
     visualReview: z.record(z.unknown()).optional(),
   },
-}, async ({ root, board, action, ops, force, safeMode, reviewToken, phase, passed, inspectedPageIds, observations, pendingUpdateId, visualReview }) => execute({
+}, async ({ root, board, action, ops, force, safeMode, reviewToken, phase, passed, inspectedPageIds, observations, pendingUpdateId, visualReview }, extra) => execute({
   type: 'update', root,
   ...(board === undefined ? {} : { board }),
   ...(action === undefined ? {} : { action }),
@@ -146,7 +165,7 @@ server.registerTool('draw2code_update', {
   ...(observations === undefined ? {} : { observations }),
   ...(pendingUpdateId === undefined ? {} : { pendingUpdateId }),
   ...(visualReview === undefined ? {} : { visualReview }),
-}))
+}, extra))
 
 server.registerTool('draw2code_generate', {
   title: 'Generate frontend from Draw2Code',
@@ -171,11 +190,11 @@ server.registerTool('draw2code_generate', {
     mockDataVisible: z.boolean().optional(),
     unselectedPagesPreserved: z.boolean().optional(),
   },
-}, async ({ root, board, ...input }) => execute({
+}, async ({ root, board, ...input }, extra) => execute({
   type: 'generate',
   root,
   input: { ...input, ...(board === undefined ? {} : { name: board }) },
-}))
+}, extra))
 
 server.registerTool('draw2code_open', {
   title: 'Open Draw2Code canvas',
@@ -192,8 +211,8 @@ server.registerTool('draw2code_open', {
     idempotentHint: true,
     openWorldHint: false,
   },
-}, async ({ root, board, presentation }) => {
-  const context = await contextFor(root)
+}, async ({ root, board, presentation }, extra) => {
+  const context = await contextFor(root, extra)
   const workspaceRoot = context.workspaceRoot
   const requestedPresentation = presentation === 'browser' ? 'browser' : 'handoff'
   const opened = await client.execute({

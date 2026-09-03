@@ -39,6 +39,7 @@ export interface BoardRevealRequest {
   board: string
   revision: number
   createdAt: number
+  targetClientId?: string
   consumedAt?: number
 }
 
@@ -173,14 +174,14 @@ export class D2cApi {
   }
 
   /** WebSocket-first scene notifications; callers keep polling as fallback. */
-  subscribe(root: string, listener: (event: Record<string, unknown>) => void): () => void {
+  subscribe(root: string, listener: (event: Record<string, unknown>) => void, clientId?: string): () => void {
     if (typeof WebSocket === 'undefined') return () => undefined
     let socket: WebSocket | null = null
     let cancelled = false
     const connect = async (): Promise<void> => {
       let url: URL
       if (this.options.baseUrl === undefined) {
-        const response = await get<{ url: string }>(`/api/draw2code/events-config?root=${encodeURIComponent(root)}`)
+        const response = await get<{ url: string }>(`/api/draw2code/events-config?root=${encodeURIComponent(root)}${clientId === undefined ? '' : `&clientId=${encodeURIComponent(clientId)}`}`)
         if (!response.ok) return
         url = new URL(response.url)
       } else {
@@ -188,6 +189,7 @@ export class D2cApi {
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
         url.searchParams.set('root', root)
         if (this.options.token !== undefined) url.searchParams.set('token', this.options.token)
+        if (clientId !== undefined) url.searchParams.set('clientId', clientId)
       }
       if (cancelled) return
       socket = new WebSocket(url)
@@ -217,20 +219,20 @@ export class D2cApi {
     return send(this.path('/canvas-workspace-token'), 'POST', { root, targetRoot }, this.options.token)
   }
 
-  getActiveBoard(root: string): Promise<D2cResult<{ name: string | null }>> {
-    return get(this.path(`/api/draw2code/active-board?root=${encodeURIComponent(root)}`), this.options.token)
+  getActiveBoard(root: string, clientId?: string): Promise<D2cResult<{ name: string | null }>> {
+    return get(this.path(`/api/draw2code/active-board?root=${encodeURIComponent(root)}${clientId === undefined ? '' : `&clientId=${encodeURIComponent(clientId)}`}`), this.options.token)
   }
 
-  setActiveBoard(root: string, name: string): Promise<D2cResult<{ name: string }>> {
-    return send(this.path('/api/draw2code/active-board'), 'PUT', { root, name }, this.options.token)
+  setActiveBoard(root: string, name: string, clientId?: string): Promise<D2cResult<{ name: string }>> {
+    return send(this.path('/api/draw2code/active-board'), 'PUT', { root, name, ...(clientId === undefined ? {} : { clientId }) }, this.options.token)
   }
 
-  getBoardReveal(root: string): Promise<D2cResult<{ request: BoardRevealRequest | null }>> {
-    return get(this.path(`/api/draw2code/reveal-request?root=${encodeURIComponent(root)}`), this.options.token)
+  getBoardReveal(root: string, clientId?: string): Promise<D2cResult<{ request: BoardRevealRequest | null }>> {
+    return get(this.path(`/api/draw2code/reveal-request?root=${encodeURIComponent(root)}${clientId === undefined ? '' : `&clientId=${encodeURIComponent(clientId)}`}`), this.options.token)
   }
 
-  ackBoardReveal(root: string, id: string, board: string): Promise<D2cResult<BoardRevealRequest>> {
-    return send(this.path('/api/draw2code/reveal-request'), 'PUT', { root, id, board }, this.options.token)
+  ackBoardReveal(root: string, id: string, board: string, clientId?: string): Promise<D2cResult<BoardRevealRequest>> {
+    return send(this.path('/api/draw2code/reveal-request'), 'PUT', { root, id, board, ...(clientId === undefined ? {} : { clientId }) }, this.options.token)
   }
 
   read(root: string, name: string): Promise<D2cResult<{ rev: number; scene: ScenePayload }>> {

@@ -14,8 +14,8 @@ test('standalone canvas exposes safe history preview and visible session errors'
 
 test('an explicitly requested board wins over remembered browser state on first load', async () => {
   const source = await readFile(new URL('../src/client/CanvasPanel.tsx', import.meta.url), 'utf8')
-  assert.match(source, /const selected = initialBoard \?\? rememberedBoard\(cwd\)/)
-  assert.match(source, /useEffect\(\(\) => \{[\s\S]*?setBoardName\(selected\)[\s\S]*?\}, \[cwd, initialBoard\]\)/)
+  assert.match(source, /const selected = initialBoard \?\? rememberedBoard\(cwd, viewId\)/)
+  assert.match(source, /useEffect\(\(\) => \{[\s\S]*?setBoardName\(selected\)[\s\S]*?\}, \[cwd, initialBoard, viewId\]\)/)
 })
 
 test('standalone canvas offers registered workspace switching without widening one token', async () => {

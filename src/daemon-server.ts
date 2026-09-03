@@ -5,15 +5,17 @@ import { basename } from 'node:path'
 import { URL } from 'node:url'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { makeRoutes } from './routes.ts'
-import { SceneStore } from './scene-store.ts'
+import { SceneStore, sceneRequestBodyLimitBytes } from './scene-store.ts'
 import { Draw2CodeRuntimeImpl, createDaemonDescriptor, type DaemonDescriptor, type Draw2CodeCommand, type HostContext } from './runtime.ts'
 import type { Draw2CodeStoreContext } from './store-context.ts'
 import { WorkspaceRegistry, defaultWorkspaceRegistryPath, isWorkspacePickerCandidate } from './workspace-registry.ts'
 
-const MAX_BODY_BYTES = 2 * 1024 * 1024
+const MAX_CONTROL_BODY_BYTES = 2 * 1024 * 1024
 const CANVAS_TOKEN_TTL_MS = 15 * 60_000
+const LARGE_BODY_PATHS = new Set(['/api/draw2code/scene/write', '/api/draw2code/export'])
 
-interface CanvasGrant { root: string; allowedRoots: string[]; expiresAt: number }
+interface CanvasGrant { root: string; allowedRoots: string[]; clientId: string; expiresAt: number }
+interface CanvasSocket { root: string; clientId: string }
 type Authorized = { ok: true; grant?: CanvasGrant } | { ok: false }
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
@@ -21,13 +23,13 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage, maxBytes = MAX_CONTROL_BODY_BYTES): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk as Uint8Array)
     size += buffer.length
-    if (size > MAX_BODY_BYTES) throw new Error('request body too large')
+    if (size > maxBytes) throw new Error('request body too large')
     chunks.push(buffer)
   }
   const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -72,7 +74,7 @@ export async function startDaemon(options: {
   const workspaceRegistry = new WorkspaceRegistry(options.workspaceRegistryPath ?? defaultWorkspaceRegistryPath())
   const roots = new Set((await workspaceRegistry.list()).map((row) => row.path))
   const grants = new Map<string, CanvasGrant>()
-  const sockets = new Map<WebSocket, string>()
+  const sockets = new Map<WebSocket, CanvasSocket>()
   let descriptor: DaemonDescriptor
   let lastActivity = Date.now()
   const canvasTokenTtlMs = options.canvasTokenTtlMs ?? CANVAS_TOKEN_TTL_MS
@@ -80,7 +82,9 @@ export async function startDaemon(options: {
     workspaceRegistry: { list: () => [...roots].map((path) => ({ path })) },
     logger: { warn: (message, ...args) => console.warn(message, ...args) },
   }
-  const sceneRoutes = makeRoutes(new SceneStore(storeContext))
+  const store = new SceneStore(storeContext)
+  const sceneRoutes = makeRoutes(store)
+  const maxSceneBodyBytes = sceneRequestBodyLimitBytes(store.capacityLimits().hardCapBytes)
 
   const registerWorkspace = async (path: string): Promise<string> => {
     const canonical = await realpath(path)
@@ -90,11 +94,11 @@ export async function startDaemon(options: {
     return canonical
   }
 
-  const issueCanvasGrant = (root: string, allowedRoots: string[], board: string | null): { token: string; expiresAt: number; url: string } => {
+  const issueCanvasGrant = (root: string, allowedRoots: string[], board: string | null, clientId: string): { token: string; expiresAt: number; url: string } => {
     const token = randomBytes(24).toString('base64url')
     const expiresAt = Date.now() + canvasTokenTtlMs
-    grants.set(token, { root, allowedRoots, expiresAt })
-    const query = new URLSearchParams({ root, token, ...(board === null ? {} : { board }) })
+    grants.set(token, { root, allowedRoots, clientId, expiresAt })
+    const query = new URLSearchParams({ root, token, view: clientId, ...(board === null ? {} : { board }) })
     return { token, expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` }
   }
 
@@ -136,12 +140,14 @@ export async function startDaemon(options: {
     typeof body?.name === 'string' ? body.name : url.searchParams.get('name')
   )
 
-  const broadcast = async (root: string, event: Record<string, unknown>): Promise<void> => {
+  const broadcast = async (root: string, event: Record<string, unknown>, targetClientId?: string): Promise<void> => {
     let canonicalRoot: string
     try { canonicalRoot = await realpath(root) } catch { return }
     const payload = JSON.stringify(event)
-    for (const [socket, socketRoot] of sockets) {
-      if (socketRoot === canonicalRoot && socket.readyState === socket.OPEN) socket.send(payload)
+    for (const [socket, registration] of sockets) {
+      if (registration.root !== canonicalRoot || socket.readyState !== socket.OPEN) continue
+      if (targetClientId !== undefined && registration.clientId !== targetClientId) continue
+      socket.send(payload)
     }
   }
 
@@ -210,7 +216,7 @@ export async function startDaemon(options: {
         if (root !== workspace && !root.startsWith(`${workspace}/`)) throw new Error('root is outside the host workspace')
         await registerWorkspace(workspace)
         const board = typeof body.board === 'string' ? body.board : null
-        writeJson(res, 200, { ok: true, ...issueCanvasGrant(root, await switchableRoots(root), board) })
+        writeJson(res, 200, { ok: true, ...issueCanvasGrant(root, await switchableRoots(root), board, context.clientId) })
       } catch (error) {
         writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
       }
@@ -248,7 +254,7 @@ export async function startDaemon(options: {
           writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'target workspace was not registered when this canvas opened' } })
           return
         }
-        writeJson(res, 200, { ok: true, root: targetRoot, ...issueCanvasGrant(targetRoot, authorized.grant.allowedRoots, null) })
+        writeJson(res, 200, { ok: true, root: targetRoot, ...issueCanvasGrant(targetRoot, authorized.grant.allowedRoots, null, authorized.grant.clientId) })
       } catch (error) {
         writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
       }
@@ -277,7 +283,7 @@ export async function startDaemon(options: {
       let body: Record<string, unknown> | undefined
       if (req.method !== 'GET' && req.method !== 'DELETE') {
         try {
-          body = await readJson(req)
+          body = await readJson(req, LARGE_BODY_PATHS.has(url.pathname) ? maxSceneBodyBytes : MAX_CONTROL_BODY_BYTES)
           const encoded = Buffer.from(JSON.stringify(body))
           ;(req as IncomingMessage & { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] = async function* () { yield encoded }
         } catch (error) {
@@ -308,7 +314,8 @@ export async function startDaemon(options: {
         await broadcast(root, { type: 'board.deleted', root, board, revision: Date.now(), sourceClientId: 'canvas' })
       }
       if (root !== null && url.pathname === '/api/draw2code/active-board' && req.method === 'PUT' && typeof body?.name === 'string') {
-        await broadcast(root, { type: 'active-board.changed', root, board: body.name, sourceClientId: 'canvas' })
+        const sourceClientId = authorized.grant?.clientId ?? 'canvas'
+        await broadcast(root, { type: 'active-board.changed', root, board: body.name, sourceClientId }, sourceClientId)
       }
       return
     }
@@ -327,13 +334,14 @@ export async function startDaemon(options: {
     let canonicalRoot: string
     try { canonicalRoot = await realpath(root) } catch { socket.destroy(); return }
     websocket.handleUpgrade(req, socket, head, (client) => {
-      sockets.set(client, canonicalRoot)
+      sockets.set(client, { root: canonicalRoot, clientId: authorized.grant?.clientId ?? 'canvas' })
       client.once('close', () => sockets.delete(client))
       client.send(JSON.stringify({ type: 'connected', root: canonicalRoot }))
     })
   })
   runtime.subscribe({} as HostContext, (event) => {
-    void broadcast(event.root, event)
+    const targeted = event.type === 'active-board.changed' || event.type === 'board.reveal-requested'
+    void broadcast(event.root, event, targeted ? event.sourceClientId : undefined)
   })
 
   await new Promise<void>((resolve, reject) => {

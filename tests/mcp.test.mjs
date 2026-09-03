@@ -164,6 +164,69 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   assert.equal(openedFromLegacyInlineRequest.result.structuredContent.data.displayState, 'handoff-ready')
 })
 
+test('stdio MCP isolates active boards by related Codex task in one shared process', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-task-scope-'))
+  const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-task-runtime-'))
+  const descriptorPath = join(runtime, 'daemon.json')
+  const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
+    cwd: process.cwd(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, DRAW2CODE_WORKSPACE_ROOT: root, DRAW2CODE_DESCRIPTOR_PATH: descriptorPath, DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'), DRAW2CODE_HEADLESS: '1' },
+  })
+  t.after(async () => {
+    child.kill('SIGTERM')
+    const descriptor = await validateDaemonDescriptor(descriptorPath)
+    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+  })
+  const client = protocolClient(child, root)
+  await client.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'draw2code-task-scope-test', version: '1.0.0' },
+  })
+  client.notify('notifications/initialized')
+
+  const taskMeta = (taskId) => ({
+    'io.modelcontextprotocol/related-task': { taskId },
+  })
+  const update = (taskId, board, id) => client.request('tools/call', {
+    _meta: taskMeta(taskId),
+    name: 'draw2code_update',
+    arguments: {
+      root,
+      board,
+      ops: [{ op: 'upsert', element: { id, type: 'text', text: board } }],
+    },
+  })
+  const list = (taskId) => client.request('tools/call', {
+    _meta: taskMeta(taskId),
+    name: 'draw2code_list',
+    arguments: { root },
+  })
+
+  assert.equal((await update('codex-task-a', '画板 A', 'title-a')).result.structuredContent.ok, true)
+  assert.equal((await update('codex-task-b', '画板 B', 'title-b')).result.structuredContent.ok, true)
+
+  assert.equal((await list('codex-task-a')).result.structuredContent.data.activeBoard, '画板 A')
+  assert.equal((await list('codex-task-b')).result.structuredContent.data.activeBoard, '画板 B')
+
+  const openedA = await client.request('tools/call', {
+    _meta: taskMeta('codex-task-a'),
+    name: 'draw2code_open',
+    arguments: { root, presentation: 'handoff' },
+  })
+  const openedB = await client.request('tools/call', {
+    _meta: taskMeta('codex-task-b'),
+    name: 'draw2code_open',
+    arguments: { root, presentation: 'handoff' },
+  })
+  const viewA = new URL(openedA.result.structuredContent.data.url).searchParams.get('view')
+  const viewB = new URL(openedB.result.structuredContent.data.url).searchParams.get('view')
+  assert.match(viewA, /^mcp-task-[a-f0-9]{24}$/)
+  assert.match(viewB, /^mcp-task-[a-f0-9]{24}$/)
+  assert.notEqual(viewA, viewB)
+})
+
 test('stdio MCP does not report a canvas opened when no browser launcher exists', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-browser-workspace-'))
   const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-browser-runtime-'))

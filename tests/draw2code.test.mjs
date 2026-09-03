@@ -338,6 +338,30 @@ test('the client ignores missing and failed board reveal requests', () => {
   assert.equal(calls.length, 0)
 })
 
+test('the client does not consume another session\'s board reveal', () => {
+  const calls = []
+  const consumed = autoOpen.consumeBoardReveal({
+    root: '/workspace/demo',
+    sessionId: 'session-a',
+    result: {
+      ok: true,
+      request: {
+        id: 'reveal-for-b',
+        board: '画板 B',
+        revision: 9,
+        createdAt: 456,
+        targetClientId: 'session-b',
+      },
+    },
+    handledIds: new Map(),
+    storage: { getItem: () => null, setItem: () => undefined },
+    sidebar: { openTab: (...args) => { calls.push(args) } },
+  })
+
+  assert.equal(consumed, false)
+  assert.equal(calls.length, 0)
+})
+
 test('local deletion survives agent additions and repeated write conflicts', async () => {
   const base = [
     { id: 'keep', type: 'rectangle' },
@@ -756,6 +780,26 @@ test('an explicit non-active update selects and reveals the target board', async
   assert.equal(reveal.ok, true)
   assert.equal(reveal.value.request.board, 'prototype')
   assert.equal(reveal.value.request.id, result.revealRequestId)
+})
+
+test('active boards and reveal requests are isolated per client in one workspace', async () => {
+  const { root, store } = await makeStore()
+
+  assert.equal((await store.setActiveBoard(root, '画板 A', 'session-a')).ok, true)
+  assert.equal((await store.setActiveBoard(root, '画板 B', 'session-b')).ok, true)
+  assert.equal((await store.getActiveBoard(root, 'session-a')).value.name, '画板 A')
+  assert.equal((await store.getActiveBoard(root, 'session-b')).value.name, '画板 B')
+
+  const revealA = await store.publishBoardReveal(root, '画板 A', 11, 'session-a')
+  const revealB = await store.publishBoardReveal(root, '画板 B', 12, 'session-b')
+  assert.equal(revealA.ok, true)
+  assert.equal(revealB.ok, true)
+  assert.equal((await store.getBoardReveal(root, 'session-a')).value.request.id, revealA.value.id)
+  assert.equal((await store.getBoardReveal(root, 'session-b')).value.request.id, revealB.value.id)
+
+  assert.equal((await store.ackBoardReveal(root, revealA.value.id, '画板 A', 'session-a')).ok, true)
+  assert.equal((await store.getBoardReveal(root, 'session-a')).value.request.consumedAt !== undefined, true)
+  assert.equal((await store.getBoardReveal(root, 'session-b')).value.request.consumedAt, undefined)
 })
 
 test('draw2code_update render exposes write, completion, quality, and reveal evidence', async () => {

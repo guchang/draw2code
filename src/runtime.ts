@@ -154,9 +154,15 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
     let data: Record<string, unknown>
     if (command.type === 'list') {
       data = await draw2codeListTool(scenes).execute({ root: command.root }, {} as never) as Record<string, unknown>
+      const selected = await scenes.getActiveBoard(command.root, context.clientId)
+      if (!selected.ok) throw new Error(`${selected.error.code}: ${selected.error.message}`)
+      if (selected.value.name === null) delete data.activeBoard
+      else data.activeBoard = selected.value.name
     } else if (command.type === 'read') {
       const { type: _type, board, ...readArgs } = command
-      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...(board === undefined ? {} : { name: board }) }, {} as never) as Record<string, unknown>
+      const selected = board === undefined ? await scenes.getActiveBoard(command.root, context.clientId) : { ok: true as const, value: { name: board } }
+      if (!selected.ok) throw new Error(`${selected.error.code}: ${selected.error.message}`)
+      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...(selected.value.name === null ? {} : { name: selected.value.name }) }, {} as never) as Record<string, unknown>
     } else if (command.type === 'create') {
       data = await draw2codeCreateTool(projects, scenes).execute({ ...command.input, root: command.root } as never, {} as never) as Record<string, unknown>
     } else if (command.type === 'update') {
@@ -174,11 +180,12 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
         ...(command.observations === undefined ? {} : { observations: command.observations }),
         ...(command.pendingUpdateId === undefined ? {} : { pendingUpdateId: command.pendingUpdateId }),
         ...(command.visualReview === undefined ? {} : { visualReview: command.visualReview }),
+        clientId: context.clientId,
       } as never, {} as never) as Record<string, unknown>
     } else if (command.type === 'generate') {
       data = await draw2codeGenerateTool(scenes, projects).execute({ ...command.input, root: command.root } as never, {} as never) as Record<string, unknown>
     } else {
-      const active = command.board === undefined ? await scenes.getActiveBoard(command.root) : { ok: true as const, value: { name: command.board } }
+      const active = command.board === undefined ? await scenes.getActiveBoard(command.root, context.clientId) : { ok: true as const, value: { name: command.board } }
       if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`)
       const board = active.value.name
       let revision = 0
@@ -212,6 +219,7 @@ export class Draw2CodeRuntimeImpl implements Draw2CodeRuntime {
       }
     }
     if (command.type === 'create' && data.status === 'confirmed' && typeof data.boardName === 'string') {
+      await scenes.setActiveBoard(command.root, data.boardName, context.clientId)
       this.emit({ type: 'active-board.changed', root: command.root, board: data.boardName, sourceClientId: context.clientId })
     }
     return { ok: true, command: command.type, data }

@@ -166,3 +166,32 @@ test('explicit update of a non-active board selects and reveals the target board
   const opened = await runtime.execute({ type: 'open', root }, context)
   assert.equal(opened.data.board, '后台画板')
 })
+
+test('two clients keep independent active boards in the same workspace', async () => {
+  const { root, context: contextA, runtime } = await fixture()
+  const contextB = { ...contextA, clientId: 'codex-test-b' }
+
+  assert.equal((await runtime.execute({
+    type: 'update', root, board: '画板 A',
+    ops: [{ op: 'upsert', element: { id: 'a-title', type: 'text', text: 'A' } }],
+  }, contextA)).ok, true)
+  assert.equal((await runtime.execute({
+    type: 'update', root, board: '画板 B',
+    ops: [{ op: 'upsert', element: { id: 'b-title', type: 'text', text: 'B' } }],
+  }, contextB)).ok, true)
+
+  assert.equal((await runtime.execute({ type: 'open', root }, contextA)).data.board, '画板 A')
+  assert.equal((await runtime.execute({ type: 'open', root }, contextB)).data.board, '画板 B')
+  assert.equal((await runtime.execute({ type: 'list', root }, contextA)).data.activeBoard, '画板 A')
+  assert.equal((await runtime.execute({ type: 'list', root }, contextB)).data.activeBoard, '画板 B')
+
+  const updatedA = await runtime.execute({
+    type: 'update', root,
+    ops: [{ op: 'upsert', element: { id: 'a-note', type: 'text', text: '只写入 A' } }],
+  }, contextA)
+  assert.equal(updatedA.ok, true)
+  assert.equal(updatedA.data.targetBoard, '画板 A')
+  const readB = await runtime.execute({ type: 'read', root }, contextB)
+  assert.equal(readB.ok, true)
+  assert.equal(readB.data.board, '画板 B')
+})

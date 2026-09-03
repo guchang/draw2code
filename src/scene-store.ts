@@ -39,6 +39,7 @@ export const DEFAULT_MAX_OPS_BYTES = 512 * 1024
 export const DEFAULT_MAX_OPS = 500
 export const DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024
 export const DEFAULT_MAX_ELEMENTS = 50_000
+const SCENE_REQUEST_ENVELOPE_BYTES = 1024 * 1024
 /** @deprecated Use DEFAULT_MAX_SCENE_BYTES or SceneStore.capacityLimits(). */
 export const MAX_SCENE_BYTES = DEFAULT_MAX_SCENE_BYTES
 const MAX_ELEMENT_BYTES = 16 * 1024
@@ -63,8 +64,38 @@ const CLIENT_ARCHIVE_INTERVAL_MS = 10 * 60_000
 // instance, so every mutation of the same physical file shares one queue.
 const WRITE_QUEUES = new Map<string, Promise<void>>()
 const BOARD_REVEALS = new Map<string, BoardRevealRequest>()
+const VIEW_ACTIVE_BOARDS = new Map<string, string>()
 const BOARD_REVIEWS = new Map<string, BoardReviewReceipt>()
 let revealCounter = 0
+
+function clientStateKey(root: string, clientId: string): string {
+  return `${root}\u0000${clientId}`
+}
+
+function latestReveal(root: string, clientId?: string): [string, BoardRevealRequest] | null {
+  if (clientId !== undefined) {
+    const key = clientStateKey(root, clientId)
+    const request = BOARD_REVEALS.get(key)
+    return request === undefined ? null : [key, request]
+  }
+  let latest: [string, BoardRevealRequest] | null = null
+  for (const entry of BOARD_REVEALS) {
+    if (entry[0] !== root && !entry[0].startsWith(`${root}\u0000`)) continue
+    if (latest === null || entry[1].createdAt > latest[1].createdAt) latest = entry
+  }
+  return latest
+}
+
+function revealById(root: string, id: string, clientId?: string): [string, BoardRevealRequest] | null {
+  if (clientId !== undefined) {
+    const entry = latestReveal(root, clientId)
+    return entry?.[1].id === id ? entry : null
+  }
+  for (const entry of BOARD_REVEALS) {
+    if ((entry[0] === root || entry[0].startsWith(`${root}\u0000`)) && entry[1].id === id) return entry
+  }
+  return null
+}
 
 /** Element types agents may author (render-safe subset). */
 const ALLOWED_TYPES = new Set([
@@ -197,6 +228,7 @@ export interface BoardRevealRequest {
   board: string
   revision: number
   createdAt: number
+  targetClientId?: string
   consumedAt?: number
 }
 
@@ -632,6 +664,15 @@ function positiveInteger(value: unknown, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
+/** Maximum JSON body needed to carry one valid scene plus route metadata. */
+export function sceneRequestBodyLimitBytes(hardCapBytes?: number): number {
+  const sceneBytes = positiveInteger(
+    hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
+    DEFAULT_MAX_SCENE_BYTES,
+  )
+  return Math.min(Number.MAX_SAFE_INTEGER, sceneBytes + SCENE_REQUEST_ENVELOPE_BYTES)
+}
+
 function resolvedCapacityLimits(options: SceneCapacityOptions = {}): SceneCapacityLimits {
   const hardCapBytes = positiveInteger(
     options.hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
@@ -840,10 +881,14 @@ export class SceneStore {
     }
   }
 
-  /** Read the board selected by the browser, without making it a scene. */
-  async getActiveBoard(root: string): Promise<SceneResult<{ name: string | null }>> {
+  /** Read one view's selected board, falling back to the workspace default. */
+  async getActiveBoard(root: string, clientId?: string): Promise<SceneResult<{ name: string | null }>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
+    if (clientId !== undefined) {
+      const selected = VIEW_ACTIVE_BOARDS.get(clientStateKey(gated.value, clientId))
+      if (selected !== undefined) return { ok: true, value: { name: selected } }
+    }
     let raw: string
     try {
       raw = await readFile(this.activeBoardPath(gated.value), 'utf8')
@@ -859,12 +904,16 @@ export class SceneStore {
     }
   }
 
-  /** Persist the browser's selected board for agent tools in this workspace. */
-  async setActiveBoard(root: string, name: string): Promise<SceneResult<{ name: string }>> {
+  /** Select a board for one view, or persist the legacy workspace default. */
+  async setActiveBoard(root: string, name: string, clientId?: string): Promise<SceneResult<{ name: string }>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
     const named = this.checkName(name)
     if (!named.ok) return named
+    if (clientId !== undefined) {
+      VIEW_ACTIVE_BOARDS.set(clientStateKey(gated.value, clientId), named.value)
+      return { ok: true, value: { name: named.value } }
+    }
     await mkdir(this.dir(gated.value), { recursive: true })
     const path = this.activeBoardPath(gated.value)
     return this.withWriteLock(path, async () => {
@@ -876,39 +925,41 @@ export class SceneStore {
   }
 
   /** Publish the latest verified update for the browser-side auto-open loop. */
-  async publishBoardReveal(root: string, name: string, revision: number): Promise<SceneResult<BoardRevealRequest>> {
+  async publishBoardReveal(root: string, name: string, revision: number, targetClientId?: string): Promise<SceneResult<BoardRevealRequest>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
     const named = this.checkName(name)
     if (!named.ok) return named
     revealCounter += 1
-    const request = {
+    const request: BoardRevealRequest = {
       id: `reveal-${Date.now().toString(36)}-${revealCounter.toString(36)}`,
       board: named.value,
       revision,
       createdAt: Date.now(),
+      ...(targetClientId === undefined ? {} : { targetClientId }),
     }
-    BOARD_REVEALS.set(gated.value, request)
+    BOARD_REVEALS.set(targetClientId === undefined ? gated.value : clientStateKey(gated.value, targetClientId), request)
     return { ok: true, value: request }
   }
 
   /** Read the latest reveal request; clients de-duplicate it by id. */
-  async getBoardReveal(root: string): Promise<SceneResult<{ request: BoardRevealRequest | null }>> {
+  async getBoardReveal(root: string, clientId?: string): Promise<SceneResult<{ request: BoardRevealRequest | null }>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
-    return { ok: true, value: { request: BOARD_REVEALS.get(gated.value) ?? null } }
+    return { ok: true, value: { request: latestReveal(gated.value, clientId)?.[1] ?? null } }
   }
 
   /** Record that the browser consumed the latest reveal and opened its tab. */
-  async ackBoardReveal(root: string, id: string, board: string): Promise<SceneResult<BoardRevealRequest>> {
+  async ackBoardReveal(root: string, id: string, board: string, clientId?: string): Promise<SceneResult<BoardRevealRequest>> {
     const gated = await this.gate(root)
     if (!gated.ok) return gated
-    const current = BOARD_REVEALS.get(gated.value)
-    if (current === undefined || current.id !== id || current.board !== board) {
+    const entry = revealById(gated.value, id, clientId)
+    if (entry === null || entry[1].board !== board) {
       return err('stale-reveal', 'reveal acknowledgement does not match the latest request')
     }
+    const [key, current] = entry
     const acknowledged = { ...current, consumedAt: current.consumedAt ?? Date.now() }
-    BOARD_REVEALS.set(gated.value, acknowledged)
+    BOARD_REVEALS.set(key, acknowledged)
     return { ok: true, value: acknowledged }
   }
 
@@ -921,8 +972,8 @@ export class SceneStore {
     if (!gated.ok) return gated
     const named = this.checkName(input.board)
     if (!named.ok) return named
-    const current = BOARD_REVEALS.get(gated.value)
-    if (current === undefined || current.id !== input.token || current.board !== named.value) {
+    const current = revealById(gated.value, input.token)?.[1]
+    if (current === undefined || current.board !== named.value) {
       return err('visual-review-stale', 'review token does not match the latest visible-board reveal')
     }
     if (Math.abs(current.revision - input.boardRevision) > 0.5) {
@@ -1442,7 +1493,12 @@ export class SceneStore {
           if (latest.ok && latest.value.name === named.value) await rm(activePath, { force: true })
         })
       }
-      BOARD_REVEALS.delete(gated.value)
+      for (const [key, request] of BOARD_REVEALS) {
+        if ((key === gated.value || key.startsWith(`${gated.value}\u0000`)) && request.board === named.value) BOARD_REVEALS.delete(key)
+      }
+      for (const [key, selected] of VIEW_ACTIVE_BOARDS) {
+        if (key.startsWith(`${gated.value}\u0000`) && selected === named.value) VIEW_ACTIVE_BOARDS.delete(key)
+      }
       BOARD_REVIEWS.delete(`${gated.value}\u0000${named.value}\u0000representative`)
       BOARD_REVIEWS.delete(`${gated.value}\u0000${named.value}\u0000final`)
       return { ok: true, value: { deleted: true } }

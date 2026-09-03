@@ -23,12 +23,16 @@ async function waitUntil(predicate, timeoutMs = 3000) {
 test('daemon is a token-gated single writer with workspace-scoped canvas access and WebSocket events', async (t) => {
   const previousTokenTtl = process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS
   const previousRegistryPath = process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH
+  const previousMaxSceneBytes = process.env.DRAW2CODE_MAX_SCENE_BYTES
   process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS = '1000'
+  process.env.DRAW2CODE_MAX_SCENE_BYTES = String(6 * 1024 * 1024)
   t.after(() => {
     if (previousTokenTtl === undefined) delete process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS
     else process.env.DRAW2CODE_CANVAS_TOKEN_TTL_MS = previousTokenTtl
     if (previousRegistryPath === undefined) delete process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH
     else process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH = previousRegistryPath
+    if (previousMaxSceneBytes === undefined) delete process.env.DRAW2CODE_MAX_SCENE_BYTES
+    else process.env.DRAW2CODE_MAX_SCENE_BYTES = previousMaxSceneBytes
   })
   const root = await mkdtemp(join(tmpdir(), 'draw2code-daemon-workspace-'))
   const secondRoot = await mkdtemp(join(tmpdir(), 'draw2code-daemon-workspace-'))
@@ -104,6 +108,19 @@ test('daemon is a token-gated single writer with workspace-scoped canvas access 
   })
   socket.on('message', (message) => events.push(JSON.parse(String(message))))
 
+  const peerContext = { ...context, clientId: 'daemon-test-peer' }
+  const peerCanvas = await client.canvas(root, null, peerContext)
+  const peerEvents = []
+  const peerWsUrl = new URL(peerCanvas.url)
+  peerWsUrl.protocol = 'ws:'
+  peerWsUrl.pathname = '/events'
+  const peerSocket = new WebSocket(peerWsUrl)
+  await new Promise((resolve, reject) => {
+    peerSocket.once('open', resolve)
+    peerSocket.once('error', reject)
+  })
+  peerSocket.on('message', (message) => peerEvents.push(JSON.parse(String(message))))
+
   await client.execute({ type: 'list', root: secondRoot }, secondContext)
   const secondCanvas = await client.canvas(secondRoot, null, secondContext)
   const workspaces = await fetch(`http://127.0.0.1:${descriptor.port}/canvas-workspaces?root=${encodeURIComponent(root)}`, {
@@ -154,10 +171,15 @@ test('daemon is a token-gated single writer with workspace-scoped canvas access 
   }, context)
   assert.equal(updated.ok, true)
   await waitUntil(() => events.some((event) => event.type === 'scene.updated'))
+  await waitUntil(() => peerEvents.some((event) => event.type === 'scene.updated'))
   assert.ok(events.some((event) => event.type === 'active-board.changed'))
+  assert.ok(events.some((event) => event.type === 'board.reveal-requested'))
+  assert.equal(peerEvents.some((event) => event.type === 'active-board.changed'), false)
+  assert.equal(peerEvents.some((event) => event.type === 'board.reveal-requested'), false)
   await new Promise((resolve) => setTimeout(resolve, 80))
   assert.equal(secondEvents.some((event) => event.type === 'scene.updated'), false)
   socket.close()
+  peerSocket.close()
   secondSocket.close()
 
   const create = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene`, {
@@ -214,6 +236,46 @@ test('daemon is a token-gated single writer with workspace-scoped canvas access 
   })
   assert.equal(createThird.status, 200)
   assert.equal((await createThird.json()).ok, true)
+
+  const largeScene = {
+    type: 'excalidraw',
+    version: 2,
+    source: 'dsh-draw2code',
+    elements: Array.from({ length: 560 }, (_, index) => ({
+      id: `large-text-${index}`,
+      type: 'text',
+      text: 'x'.repeat(4_000),
+    })),
+    appState: { viewBackgroundColor: '#ffffff' },
+  }
+  const largeWriteBody = JSON.stringify({ root, name: '大画板', scene: largeScene, baseRev: 0 })
+  assert.ok(Buffer.byteLength(largeWriteBody) > 2 * 1024 * 1024)
+  const largeWrite = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene/write`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${canvas.token}`, 'content-type': 'application/json' },
+    body: largeWriteBody,
+  })
+  assert.equal(largeWrite.status, 200, await largeWrite.text())
+
+  const oversizedScene = {
+    ...largeScene,
+    elements: Array.from({ length: 780 }, (_, index) => ({
+      id: `oversized-text-${index}`,
+      type: 'text',
+      text: 'x'.repeat(4_000),
+    })),
+  }
+  const oversizedWriteBody = JSON.stringify({ root, name: '超限画板', scene: oversizedScene, baseRev: 0 })
+  assert.ok(Buffer.byteLength(oversizedWriteBody) < 7 * 1024 * 1024)
+  const oversizedWrite = await fetch(`http://127.0.0.1:${descriptor.port}/api/draw2code/scene/write`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${canvas.token}`, 'content-type': 'application/json' },
+    body: oversizedWriteBody,
+  })
+  assert.equal(oversizedWrite.status, 400)
+  const oversizedResult = await oversizedWrite.json()
+  assert.equal(oversizedResult.error.code, 'too-large')
+  assert.match(oversizedResult.error.message, /6291456-byte hard cap/)
 })
 
 test('daemon client recovers a stale startup lock left by a crashed process', async (t) => {

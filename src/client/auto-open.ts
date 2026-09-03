@@ -16,6 +16,7 @@ export interface BoardRevealRequest {
   board: string
   revision: number
   createdAt: number
+  targetClientId?: string
   consumedAt?: number
 }
 
@@ -71,6 +72,7 @@ function scenePath(root: string, board: string): string {
 export function consumeBoardReveal(input: RevealConsumerInput): boolean {
   if (!input.result.ok || input.result.request === null) return false
   const request = input.result.request
+  if (request.targetClientId !== undefined && request.targetClientId !== input.sessionId) return false
   if (input.handledIds.get(input.root) === request.id) return false
   try {
     if (input.storage.getItem(storageKey(input.root)) === request.id) {
@@ -120,7 +122,7 @@ export function installBoardRevealWatcher(
     if (sessionId === undefined || root === undefined || root === '') return
     inFlight = true
     try {
-      const result = await api.getBoardReveal(root)
+      const result = await api.getBoardReveal(root, sessionId)
       if (disposed) return
       const latest = sessions.getSnapshot()
       if (latest.current !== sessionId || latest.byId[sessionId]?.cwd !== root) return

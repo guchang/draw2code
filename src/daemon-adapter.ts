@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { Draw2CodeDaemonClient } from './daemon-client.ts'
-import { isPathInside } from './scene-store.ts'
+import { isPathInside, sceneRequestBodyLimitBytes } from './scene-store.ts'
 import type { Draw2CodeCommand, Draw2CodeResult, HostContext } from './runtime.ts'
 
 const ROUTES = [
@@ -17,7 +17,9 @@ const ROUTES = [
   '/api/draw2code/restore',
   '/api/draw2code/export',
 ]
-const MAX_BODY_BYTES = 2 * 1024 * 1024
+const MAX_CONTROL_BODY_BYTES = 2 * 1024 * 1024
+const MAX_SCENE_BODY_BYTES = sceneRequestBodyLimitBytes()
+const LARGE_BODY_PATHS = new Set(['/api/draw2code/scene/write', '/api/draw2code/export'])
 
 function isLoopbackRequest(request: IncomingMessage): boolean {
   const address = request.socket.remoteAddress
@@ -41,14 +43,14 @@ function isLoopbackRequest(request: IncomingMessage): boolean {
   }
 }
 
-async function bodyBuffer(req: IncomingMessage): Promise<Buffer | undefined> {
+async function bodyBuffer(req: IncomingMessage, maxBytes = MAX_CONTROL_BODY_BYTES): Promise<Buffer | undefined> {
   if (req.method === 'GET' || req.method === 'DELETE') return undefined
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk as Uint8Array)
     size += buffer.length
-    if (size > MAX_BODY_BYTES) throw new Error('request body too large')
+    if (size > maxBytes) throw new Error('request body too large')
     chunks.push(buffer)
   }
   return Buffer.concat(chunks)
@@ -64,10 +66,10 @@ function rootFrom(req: IncomingMessage, body: Buffer | undefined): string | null
   } catch { return null }
 }
 
-export function dshContext(ctx: Context, root: string): HostContext {
+export function dshContext(ctx: Context, root: string, clientId = `dsh-${process.pid}`): HostContext {
   const workspace = ctx.workspaceRegistry.list().find((candidate) => isPathInside(candidate.path, root))
   return {
-    clientId: `dsh-${process.pid}`,
+    clientId,
     host: 'dsh',
     workspaceRoot: workspace?.path ?? '',
     interactive: true,
@@ -86,7 +88,7 @@ export function makeDaemonProxyRoutes(ctx: Context, client: Draw2CodeDaemonClien
         return
       }
       try {
-        const body = await bodyBuffer(req)
+        const body = await bodyBuffer(req, LARGE_BODY_PATHS.has(path) ? MAX_SCENE_BODY_BYTES : MAX_CONTROL_BODY_BYTES)
         const root = rootFrom(req, body)
         if (root !== null) await client.registerWorkspace(root, dshContext(ctx, root))
         const upstream = await client.proxy(req.url ?? path, { method: req.method ?? 'GET', body })
@@ -110,7 +112,8 @@ export function makeDaemonProxyRoutes(ctx: Context, client: Draw2CodeDaemonClien
       try {
         const root = rootFrom(req, undefined)
         if (root === null) throw new Error('missing root')
-        const context = dshContext(ctx, root)
+        const clientId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('clientId') ?? undefined
+        const context = dshContext(ctx, root, clientId)
         await client.registerWorkspace(root, context)
         const canvas = await client.canvas(root, null, context)
         const url = new URL(canvas.url)
@@ -137,7 +140,8 @@ export function daemonTool(
     ...base,
     async execute(args, exec) {
       const command = commandFor(args as Record<string, unknown>)
-      const result: Draw2CodeResult = await client.execute(command, dshContext(ctx, command.root))
+      const clientId = exec.agent === undefined ? undefined : String(exec.agent.id)
+      const result: Draw2CodeResult = await client.execute(command, dshContext(ctx, command.root, clientId))
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       return result.data as never
     },
