@@ -6915,6 +6915,7 @@ var require_dist = __commonJS({
 // src/mcp.ts
 import { fileURLToPath } from "node:url";
 import { resolve as resolve2 } from "node:path";
+import { createHash } from "node:crypto";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -21168,6 +21169,7 @@ var DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024;
 var DEFAULT_SOFT_SCENE_BYTES = 32 * 1024 * 1024;
 var DEFAULT_MAX_OPS_BYTES = 512 * 1024;
 var DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024;
+var SCENE_REQUEST_ENVELOPE_BYTES = 1024 * 1024;
 var MAX_ELEMENT_BYTES = 16 * 1024;
 var CLIENT_ARCHIVE_INTERVAL_MS = 10 * 6e4;
 
@@ -27256,7 +27258,15 @@ function advertisedRoots() {
   advertisedRootsPromise ??= server.server.listRoots().then((response) => response.roots.filter((item) => item.uri.startsWith("file:")).map((item) => fileURLToPath(item.uri))).catch(() => []);
   return advertisedRootsPromise;
 }
-async function contextFor(root2) {
+function requestClientId(extra2) {
+  const relatedTask = extra2?._meta?.["io.modelcontextprotocol/related-task"];
+  const relatedTaskId = relatedTask !== null && typeof relatedTask === "object" ? relatedTask.taskId : void 0;
+  const taskId = typeof relatedTaskId === "string" && relatedTaskId.trim() !== "" ? relatedTaskId : extra2?.taskId;
+  if (typeof taskId !== "string" || taskId.trim() === "") return `mcp-${process.pid}`;
+  const digest = createHash("sha256").update(taskId).digest("hex").slice(0, 24);
+  return `mcp-task-${digest}`;
+}
+async function contextFor(root2, extra2) {
   let workspaceRoot = configuredWorkspaceRoot ?? root2;
   if (configuredWorkspaceRoot === void 0) {
     const roots = await advertisedRoots();
@@ -27265,7 +27275,7 @@ async function contextFor(root2) {
     else if (roots.length > 0) workspaceRoot = process.cwd();
   }
   return {
-    clientId: `mcp-${process.pid}`,
+    clientId: requestClientId(extra2),
     host: "mcp",
     workspaceRoot,
     interactive: process.env.DRAW2CODE_HEADLESS !== "1",
@@ -27282,8 +27292,8 @@ function toolResult(result) {
     ...result.ok ? {} : { isError: true }
   };
 }
-async function execute(command) {
-  const context = await contextFor(command.root);
+async function execute(command, extra2) {
+  const context = await contextFor(command.root, extra2);
   const normalized = { ...command, root: context.workspaceRoot };
   return toolResult(await client.execute(normalized, context));
 }
@@ -27292,7 +27302,7 @@ server.registerTool("draw2code_list", {
   title: "List Draw2Code boards",
   description: "List boards and the shared active board without writing files.",
   inputSchema: { root }
-}, async ({ root: root2 }) => execute({ type: "list", root: root2 }));
+}, async ({ root: root2 }, extra2) => execute({ type: "list", root: root2 }, extra2));
 server.registerTool("draw2code_read", {
   title: "Read Draw2Code board",
   description: "Read bounded board metadata by default, or select elements by page, ids, region, or recent revision.",
@@ -27307,7 +27317,7 @@ server.registerTool("draw2code_read", {
     cursor: external_exports.string().optional(),
     limit: external_exports.number().int().positive().max(250).optional()
   }
-}, async ({ root: root2, board, ...scope }) => execute({ type: "read", root: root2, ...scope, ...board === void 0 ? {} : { board } }));
+}, async ({ root: root2, board, ...scope }, extra2) => execute({ type: "read", root: root2, ...scope, ...board === void 0 ? {} : { board } }, extra2));
 server.registerTool("draw2code_create", {
   title: "Create Draw2Code project",
   description: "Run the resumable Create state machine. Preserve structured question fields for native host choices.",
@@ -27326,7 +27336,7 @@ server.registerTool("draw2code_create", {
     brief: external_exports.record(external_exports.unknown()).optional(),
     stopReason: external_exports.string().optional()
   }
-}, async ({ root: root2, ...input }) => execute({ type: "create", root: root2, input }));
+}, async ({ root: root2, ...input }, extra2) => execute({ type: "create", root: root2, input }, extra2));
 server.registerTool("draw2code_update", {
   title: "Update Draw2Code board",
   description: "Write conflict-safe Excalidraw operations or record a visible review without mutating the board. Omit board to use the active visible board.",
@@ -27345,7 +27355,7 @@ server.registerTool("draw2code_update", {
     pendingUpdateId: external_exports.string().optional(),
     visualReview: external_exports.record(external_exports.unknown()).optional()
   }
-}, async ({ root: root2, board, action, ops, force, safeMode, reviewToken, phase, passed, inspectedPageIds, observations, pendingUpdateId, visualReview }) => execute({
+}, async ({ root: root2, board, action, ops, force, safeMode, reviewToken, phase, passed, inspectedPageIds, observations, pendingUpdateId, visualReview }, extra2) => execute({
   type: "update",
   root: root2,
   ...board === void 0 ? {} : { board },
@@ -27360,7 +27370,7 @@ server.registerTool("draw2code_update", {
   ...observations === void 0 ? {} : { observations },
   ...pendingUpdateId === void 0 ? {} : { pendingUpdateId },
   ...visualReview === void 0 ? {} : { visualReview }
-}));
+}, extra2));
 server.registerTool("draw2code_generate", {
   title: "Generate frontend from Draw2Code",
   description: "Run the resumable Generate and evidence-verification state machine.",
@@ -27384,11 +27394,11 @@ server.registerTool("draw2code_generate", {
     mockDataVisible: external_exports.boolean().optional(),
     unselectedPagesPreserved: external_exports.boolean().optional()
   }
-}, async ({ root: root2, board, ...input }) => execute({
+}, async ({ root: root2, board, ...input }, extra2) => execute({
   type: "generate",
   root: root2,
   input: { ...input, ...board === void 0 ? {} : { name: board } }
-}));
+}, extra2));
 server.registerTool("draw2code_open", {
   title: "Open Draw2Code canvas",
   description: "Return a short-lived canvas URL for the host to open, or explicitly open it in an external browser. Never creates a project.",
@@ -27403,8 +27413,8 @@ server.registerTool("draw2code_open", {
     idempotentHint: true,
     openWorldHint: false
   }
-}, async ({ root: root2, board, presentation }) => {
-  const context = await contextFor(root2);
+}, async ({ root: root2, board, presentation }, extra2) => {
+  const context = await contextFor(root2, extra2);
   const workspaceRoot = context.workspaceRoot;
   const requestedPresentation = presentation === "browser" ? "browser" : "handoff";
   const opened = await client.execute({

@@ -3659,336 +3659,10 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // src/routes.ts
 import { execFile } from "node:child_process";
-import { writeFile } from "node:fs/promises";
-var MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
-function runNative(command, args) {
-  return new Promise((resolve4) => {
-    execFile(command, args, { encoding: "utf8" }, (error2, stdout, stderr) => {
-      if (error2 !== null) {
-        resolve4({ stdout, stderr, code: error2.code });
-        return;
-      }
-      resolve4({ stdout, stderr });
-    });
-  });
-}
-async function chooseExportPath(defaultName) {
-  if (process.platform !== "darwin") throw new Error(`native export is unsupported on ${process.platform}`);
-  const script = [
-    "ObjC.import('Cocoa')",
-    "function run(argv) {",
-    "  const panel = $.NSSavePanel.savePanel",
-    '  panel.title = "\u5BFC\u51FA\u753B\u677F"',
-    '  panel.nameFieldStringValue = argv[0] || "prototype.excalidraw"',
-    "  panel.canCreateDirectories = true",
-    '  if (panel.runModal() !== $.NSModalResponseOK) return ""',
-    "  return ObjC.unwrap(panel.URL.path)",
-    "}"
-  ].join("\n");
-  const result = await runNative("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, defaultName]);
-  const output = result.stdout.trim();
-  const cancelled = result.code === -128 || result.code === "-128" || /user canceled|用户(?:已)?取消/i.test(`${result.stderr} ${result.stdout}`);
-  if (cancelled) return null;
-  if (result.code !== void 0) {
-    throw new Error(result.stderr.trim() || "native save dialog failed");
-  }
-  if (output === "") return null;
-  return output;
-}
-function isLoopbackRequest(request) {
-  const address = request.socket.remoteAddress;
-  if (address !== "127.0.0.1" && address !== "::1" && address !== "::ffff:127.0.0.1") return false;
-  const host = request.headers.host;
-  if (typeof host !== "string") return false;
-  let hostUrl;
-  try {
-    hostUrl = new URL(`http://${host}`);
-  } catch {
-    return false;
-  }
-  if (hostUrl.hostname !== "127.0.0.1" && hostUrl.hostname !== "localhost" && hostUrl.hostname !== "[::1]") return false;
-  if (request.headers["sec-fetch-site"] === "cross-site") return false;
-  const origin = request.headers.origin;
-  if (origin === void 0) return true;
-  try {
-    return new URL(origin).host === hostUrl.host;
-  } catch {
-    return false;
-  }
-}
-function writeJson(res, status, body) {
-  const json = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-  res.end(json);
-}
-async function readJsonBody(req) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_JSON_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(chunk);
-  }
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (typeof parsed !== "object" || parsed === null) throw new Error("request body must be a JSON object");
-  return parsed;
-}
-function respond(res, result) {
-  if (result.ok) {
-    writeJson(res, 200, { ok: true, ...result.value });
-  } else {
-    const status = result.error.code === "conflict" ? 409 : result.error.code === "not-found" || result.error.code === "workspace-unknown" ? 404 : 400;
-    writeJson(res, status, { ok: false, error: result.error });
-  }
-}
-function makeRoutes(store) {
-  const guard = (req, res, method) => {
-    if (req.method !== method) {
-      writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${req.method}` } });
-      return false;
-    }
-    if (!isLoopbackRequest(req)) {
-      writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-      return false;
-    }
-    return true;
-  };
-  const query = (req, key) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const value = url.searchParams.get(key);
-    return value === null ? void 0 : value;
-  };
-  return [
-    // -------------------------------------------------- scenes (list)
-    {
-      kind: "exact",
-      path: "/api/draw2code/scenes",
-      handler: async (req, res) => {
-        if (!guard(req, res, "GET")) return;
-        const root = query(req, "root");
-        if (root === void 0) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
-          return;
-        }
-        const result = await store.list(root);
-        if (result.ok) writeJson(res, 200, { ok: true, scenes: result.value });
-        else respond(res, result);
-      }
-    },
-    // --------------------------------------------- active board (shared UI state)
-    {
-      kind: "exact",
-      path: "/api/draw2code/active-board",
-      handler: async (req, res) => {
-        const method = req.method ?? "";
-        if (method === "GET") {
-          if (!isLoopbackRequest(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          const root = query(req, "root");
-          if (root === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
-            return;
-          }
-          respond(res, await store.getActiveBoard(root));
-          return;
-        }
-        if (method === "PUT") {
-          if (!guard(req, res, "PUT")) return;
-          try {
-            const body = await readJsonBody(req);
-            respond(res, await store.setActiveBoard(String(body.root ?? ""), String(body.name ?? "")));
-          } catch (error2) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-          }
-          return;
-        }
-        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
-      }
-    },
-    // ---------------------------------------- verified update reveal request
-    {
-      kind: "exact",
-      path: "/api/draw2code/reveal-request",
-      handler: async (req, res) => {
-        const method = req.method ?? "";
-        if (method === "GET") {
-          if (!guard(req, res, "GET")) return;
-          const root = query(req, "root");
-          if (root === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
-            return;
-          }
-          respond(res, await store.getBoardReveal(root));
-          return;
-        }
-        if (method === "PUT") {
-          if (!guard(req, res, "PUT")) return;
-          try {
-            const body = await readJsonBody(req);
-            respond(res, await store.ackBoardReveal(String(body.root ?? ""), String(body.id ?? ""), String(body.board ?? "")));
-          } catch (error2) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-          }
-          return;
-        }
-        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
-      }
-    },
-    // -------------------------------------------------- scene (read / create / delete)
-    {
-      kind: "exact",
-      path: "/api/draw2code/scene",
-      handler: async (req, res) => {
-        const method = req.method ?? "";
-        if (method === "GET") {
-          if (!isLoopbackRequest(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          const root = query(req, "root");
-          const name = query(req, "name");
-          if (root === void 0 || name === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
-            return;
-          }
-          const result = await store.read(root, name);
-          if (result.ok) {
-            writeJson(res, 200, { ok: true, rev: result.value.rev, scene: result.value.scene });
-          } else {
-            respond(res, result);
-          }
-          return;
-        }
-        if (method === "POST") {
-          if (!isLoopbackRequest(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          try {
-            const body = await readJsonBody(req);
-            respond(res, await store.create(String(body.root ?? ""), String(body.name ?? "")));
-          } catch (error2) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-          }
-          return;
-        }
-        if (method === "DELETE") {
-          if (!isLoopbackRequest(req)) {
-            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
-            return;
-          }
-          const root = query(req, "root");
-          const name = query(req, "name");
-          if (root === void 0 || name === void 0) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
-            return;
-          }
-          respond(res, await store.remove(root, name));
-          return;
-        }
-        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
-      }
-    },
-    // -------------------------------------------------- scene (write whole)
-    {
-      kind: "exact",
-      path: "/api/draw2code/scene/write",
-      handler: async (req, res) => {
-        if (!guard(req, res, "PUT")) return;
-        try {
-          const body = await readJsonBody(req);
-          const baseRev = typeof body.baseRev === "number" ? body.baseRev : void 0;
-          respond(res, await store.write(String(body.root ?? ""), String(body.name ?? ""), body.scene, baseRev));
-        } catch (error2) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-        }
-      }
-    },
-    // -------------------------------------------------- versions (list / restore)
-    {
-      kind: "exact",
-      path: "/api/draw2code/versions",
-      handler: async (req, res) => {
-        if (!guard(req, res, "GET")) return;
-        const root = query(req, "root");
-        const name = query(req, "name");
-        if (root === void 0 || name === void 0) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
-          return;
-        }
-        const result = await store.listVersions(root, name);
-        if (result.ok) writeJson(res, 200, { ok: true, versions: result.value });
-        else respond(res, result);
-      }
-    },
-    {
-      kind: "exact",
-      path: "/api/draw2code/version",
-      handler: async (req, res) => {
-        if (!guard(req, res, "GET")) return;
-        const root = query(req, "root");
-        const name = query(req, "name");
-        const id = query(req, "id");
-        if (root === void 0 || name === void 0 || id === void 0) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root, name or id" } });
-          return;
-        }
-        const result = await store.readVersion(root, name, id);
-        if (result.ok) writeJson(res, 200, { ok: true, ...result.value });
-        else respond(res, result);
-      }
-    },
-    {
-      kind: "exact",
-      path: "/api/draw2code/restore",
-      handler: async (req, res) => {
-        if (!guard(req, res, "POST")) return;
-        try {
-          const body = await readJsonBody(req);
-          respond(res, await store.restoreVersion(String(body.root ?? ""), String(body.name ?? ""), String(body.id ?? "")));
-        } catch (error2) {
-          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
-        }
-      }
-    },
-    // -------------------------------------------------- scene export
-    {
-      kind: "exact",
-      path: "/api/draw2code/export",
-      handler: async (req, res) => {
-        if (!guard(req, res, "POST")) return;
-        try {
-          const body = await readJsonBody(req);
-          if (typeof body.scene !== "object" || body.scene === null || !Array.isArray(body.scene.elements)) {
-            writeJson(res, 400, { ok: false, error: { code: "bad-scene", message: "scene.elements must be an array" } });
-            return;
-          }
-          const json = JSON.stringify(body.scene, null, 2);
-          if (typeof json !== "string" || Buffer.byteLength(json) > MAX_JSON_BODY_BYTES) {
-            writeJson(res, 400, { ok: false, error: { code: "too-large", message: "scene exceeds export size limit" } });
-            return;
-          }
-          const defaultName = typeof body.filename === "string" && body.filename.trim() !== "" ? body.filename.trim() : "prototype.excalidraw";
-          const selectedPath = await chooseExportPath(defaultName);
-          if (selectedPath === null) {
-            writeJson(res, 200, { ok: true, cancelled: true });
-            return;
-          }
-          await writeFile(selectedPath, `${json}
-`, "utf8");
-          writeJson(res, 200, { ok: true, exported: true, path: selectedPath });
-        } catch (error2) {
-          writeJson(res, 500, { ok: false, error: { code: "export-failed", message: error2 instanceof Error ? error2.message : String(error2) } });
-        }
-      }
-    }
-  ];
-}
+import { writeFile as writeFile2 } from "node:fs/promises";
 
 // src/scene-store.ts
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -4004,6 +3678,7 @@ var DEFAULT_MAX_OPS_BYTES = 512 * 1024;
 var DEFAULT_MAX_OPS = 500;
 var DEFAULT_MAX_VERSION_STORAGE_BYTES = 512 * 1024 * 1024;
 var DEFAULT_MAX_ELEMENTS = 5e4;
+var SCENE_REQUEST_ENVELOPE_BYTES = 1024 * 1024;
 var MAX_ELEMENT_BYTES = 16 * 1024;
 var MAX_TEXT_CHARS = 4e3;
 var NAME_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5 -]{0,63}$/;
@@ -4012,8 +3687,35 @@ var MAX_VERSIONS = 30;
 var CLIENT_ARCHIVE_INTERVAL_MS = 10 * 6e4;
 var WRITE_QUEUES = /* @__PURE__ */ new Map();
 var BOARD_REVEALS = /* @__PURE__ */ new Map();
+var VIEW_ACTIVE_BOARDS = /* @__PURE__ */ new Map();
 var BOARD_REVIEWS = /* @__PURE__ */ new Map();
 var revealCounter = 0;
+function clientStateKey(root, clientId) {
+  return `${root}\0${clientId}`;
+}
+function latestReveal(root, clientId) {
+  if (clientId !== void 0) {
+    const key = clientStateKey(root, clientId);
+    const request = BOARD_REVEALS.get(key);
+    return request === void 0 ? null : [key, request];
+  }
+  let latest = null;
+  for (const entry of BOARD_REVEALS) {
+    if (entry[0] !== root && !entry[0].startsWith(`${root}\0`)) continue;
+    if (latest === null || entry[1].createdAt > latest[1].createdAt) latest = entry;
+  }
+  return latest;
+}
+function revealById(root, id, clientId) {
+  if (clientId !== void 0) {
+    const entry = latestReveal(root, clientId);
+    return entry?.[1].id === id ? entry : null;
+  }
+  for (const entry of BOARD_REVEALS) {
+    if ((entry[0] === root || entry[0].startsWith(`${root}\0`)) && entry[1].id === id) return entry;
+  }
+  return null;
+}
 var ALLOWED_TYPES = /* @__PURE__ */ new Set([
   "rectangle",
   "diamond",
@@ -4376,6 +4078,13 @@ function positiveInteger(value, fallback) {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
+function sceneRequestBodyLimitBytes(hardCapBytes) {
+  const sceneBytes = positiveInteger(
+    hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
+    DEFAULT_MAX_SCENE_BYTES
+  );
+  return Math.min(Number.MAX_SAFE_INTEGER, sceneBytes + SCENE_REQUEST_ENVELOPE_BYTES);
+}
 function resolvedCapacityLimits(options = {}) {
   const hardCapBytes = positiveInteger(
     options.hardCapBytes ?? process.env.DRAW2CODE_MAX_SCENE_BYTES,
@@ -4546,10 +4255,14 @@ var SceneStore = class {
       if (WRITE_QUEUES.get(path) === tail) WRITE_QUEUES.delete(path);
     }
   }
-  /** Read the board selected by the browser, without making it a scene. */
-  async getActiveBoard(root) {
+  /** Read one view's selected board, falling back to the workspace default. */
+  async getActiveBoard(root, clientId) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
+    if (clientId !== void 0) {
+      const selected = VIEW_ACTIVE_BOARDS.get(clientStateKey(gated.value, clientId));
+      if (selected !== void 0) return { ok: true, value: { name: selected } };
+    }
     let raw;
     try {
       raw = await readFile(this.activeBoardPath(gated.value), "utf8");
@@ -4564,24 +4277,28 @@ var SceneStore = class {
       return { ok: true, value: { name: null } };
     }
   }
-  /** Persist the browser's selected board for agent tools in this workspace. */
-  async setActiveBoard(root, name) {
+  /** Select a board for one view, or persist the legacy workspace default. */
+  async setActiveBoard(root, name, clientId) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     const named = this.checkName(name);
     if (!named.ok) return named;
+    if (clientId !== void 0) {
+      VIEW_ACTIVE_BOARDS.set(clientStateKey(gated.value, clientId), named.value);
+      return { ok: true, value: { name: named.value } };
+    }
     await mkdir(this.dir(gated.value), { recursive: true });
     const path = this.activeBoardPath(gated.value);
     return this.withWriteLock(path, async () => {
       const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      await writeFile2(tmp, `${JSON.stringify({ name: named.value })}
+      await writeFile(tmp, `${JSON.stringify({ name: named.value })}
 `, "utf8");
       await rename(tmp, path);
       return { ok: true, value: { name: named.value } };
     });
   }
   /** Publish the latest verified update for the browser-side auto-open loop. */
-  async publishBoardReveal(root, name, revision) {
+  async publishBoardReveal(root, name, revision, targetClientId) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
     const named = this.checkName(name);
@@ -4591,27 +4308,29 @@ var SceneStore = class {
       id: `reveal-${Date.now().toString(36)}-${revealCounter.toString(36)}`,
       board: named.value,
       revision,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      ...targetClientId === void 0 ? {} : { targetClientId }
     };
-    BOARD_REVEALS.set(gated.value, request);
+    BOARD_REVEALS.set(targetClientId === void 0 ? gated.value : clientStateKey(gated.value, targetClientId), request);
     return { ok: true, value: request };
   }
   /** Read the latest reveal request; clients de-duplicate it by id. */
-  async getBoardReveal(root) {
+  async getBoardReveal(root, clientId) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    return { ok: true, value: { request: BOARD_REVEALS.get(gated.value) ?? null } };
+    return { ok: true, value: { request: latestReveal(gated.value, clientId)?.[1] ?? null } };
   }
   /** Record that the browser consumed the latest reveal and opened its tab. */
-  async ackBoardReveal(root, id, board) {
+  async ackBoardReveal(root, id, board, clientId) {
     const gated = await this.gate(root);
     if (!gated.ok) return gated;
-    const current = BOARD_REVEALS.get(gated.value);
-    if (current === void 0 || current.id !== id || current.board !== board) {
+    const entry = revealById(gated.value, id, clientId);
+    if (entry === null || entry[1].board !== board) {
       return err("stale-reveal", "reveal acknowledgement does not match the latest request");
     }
+    const [key, current] = entry;
     const acknowledged = { ...current, consumedAt: current.consumedAt ?? Date.now() };
-    BOARD_REVEALS.set(gated.value, acknowledged);
+    BOARD_REVEALS.set(key, acknowledged);
     return { ok: true, value: acknowledged };
   }
   /** Record a visible review of the latest reveal without writing the board. */
@@ -4620,8 +4339,8 @@ var SceneStore = class {
     if (!gated.ok) return gated;
     const named = this.checkName(input.board);
     if (!named.ok) return named;
-    const current = BOARD_REVEALS.get(gated.value);
-    if (current === void 0 || current.id !== input.token || current.board !== named.value) {
+    const current = revealById(gated.value, input.token)?.[1];
+    if (current === void 0 || current.board !== named.value) {
       return err("visual-review-stale", "review token does not match the latest visible-board reveal");
     }
     if (Math.abs(current.revision - input.boardRevision) > 0.5) {
@@ -4696,7 +4415,7 @@ var SceneStore = class {
     const target = join(dir, entry);
     const temp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     const compressed = gzipSync(Buffer.from(json, "utf8"), { level: 6 });
-    await writeFile2(temp, compressed);
+    await writeFile(temp, compressed);
     await rename(temp, target);
     return compressed.byteLength;
   }
@@ -4925,7 +4644,7 @@ var SceneStore = class {
     const path = join(dir, `${sessionId}.json`);
     const normalized = { ...draft, sessionId, updatedAt: Date.now() };
     const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await writeFile2(tmp, `${JSON.stringify(normalized, null, 2)}
+    await writeFile(tmp, `${JSON.stringify(normalized, null, 2)}
 `, "utf8");
     await rename(tmp, path);
     return { ok: true, value: normalized };
@@ -4953,7 +4672,7 @@ var SceneStore = class {
     const path = join(dir, `${named.value}.json`);
     const normalized = { ...settings, board: named.value, updatedAt: Date.now() };
     const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await writeFile2(tmp, `${JSON.stringify(normalized, null, 2)}
+    await writeFile(tmp, `${JSON.stringify(normalized, null, 2)}
 `, "utf8");
     await rename(tmp, path);
     return { ok: true, value: normalized };
@@ -5060,7 +4779,7 @@ var SceneStore = class {
       await mkdir(this.dir(gated.value), { recursive: true });
       await this.archiveCurrent(gated.value, named.value, json, archive === "agent");
       const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      await writeFile2(tmp, json + "\n", "utf8");
+      await writeFile(tmp, json + "\n", "utf8");
       await rename(tmp, path);
       const info = await stat(path);
       return {
@@ -5099,7 +4818,12 @@ var SceneStore = class {
           if (latest.ok && latest.value.name === named.value) await rm(activePath, { force: true });
         });
       }
-      BOARD_REVEALS.delete(gated.value);
+      for (const [key, request] of BOARD_REVEALS) {
+        if ((key === gated.value || key.startsWith(`${gated.value}\0`)) && request.board === named.value) BOARD_REVEALS.delete(key);
+      }
+      for (const [key, selected] of VIEW_ACTIVE_BOARDS) {
+        if (key.startsWith(`${gated.value}\0`) && selected === named.value) VIEW_ACTIVE_BOARDS.delete(key);
+      }
       BOARD_REVIEWS.delete(`${gated.value}\0${named.value}\0representative`);
       BOARD_REVIEWS.delete(`${gated.value}\0${named.value}\0final`);
       return { ok: true, value: { deleted: true } };
@@ -5188,6 +4912,344 @@ var SceneStore = class {
     return { ok: true, value: { ...written.value, applied } };
   }
 };
+
+// src/routes.ts
+var MAX_CONTROL_BODY_BYTES = 2 * 1024 * 1024;
+function runNative(command, args) {
+  return new Promise((resolve4) => {
+    execFile(command, args, { encoding: "utf8" }, (error2, stdout, stderr) => {
+      if (error2 !== null) {
+        resolve4({ stdout, stderr, code: error2.code });
+        return;
+      }
+      resolve4({ stdout, stderr });
+    });
+  });
+}
+async function chooseExportPath(defaultName) {
+  if (process.platform !== "darwin") throw new Error(`native export is unsupported on ${process.platform}`);
+  const script = [
+    "ObjC.import('Cocoa')",
+    "function run(argv) {",
+    "  const panel = $.NSSavePanel.savePanel",
+    '  panel.title = "\u5BFC\u51FA\u753B\u677F"',
+    '  panel.nameFieldStringValue = argv[0] || "prototype.excalidraw"',
+    "  panel.canCreateDirectories = true",
+    '  if (panel.runModal() !== $.NSModalResponseOK) return ""',
+    "  return ObjC.unwrap(panel.URL.path)",
+    "}"
+  ].join("\n");
+  const result = await runNative("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, defaultName]);
+  const output = result.stdout.trim();
+  const cancelled = result.code === -128 || result.code === "-128" || /user canceled|用户(?:已)?取消/i.test(`${result.stderr} ${result.stdout}`);
+  if (cancelled) return null;
+  if (result.code !== void 0) {
+    throw new Error(result.stderr.trim() || "native save dialog failed");
+  }
+  if (output === "") return null;
+  return output;
+}
+function isLoopbackRequest(request) {
+  const address = request.socket.remoteAddress;
+  if (address !== "127.0.0.1" && address !== "::1" && address !== "::ffff:127.0.0.1") return false;
+  const host = request.headers.host;
+  if (typeof host !== "string") return false;
+  let hostUrl;
+  try {
+    hostUrl = new URL(`http://${host}`);
+  } catch {
+    return false;
+  }
+  if (hostUrl.hostname !== "127.0.0.1" && hostUrl.hostname !== "localhost" && hostUrl.hostname !== "[::1]") return false;
+  if (request.headers["sec-fetch-site"] === "cross-site") return false;
+  const origin = request.headers.origin;
+  if (origin === void 0) return true;
+  try {
+    return new URL(origin).host === hostUrl.host;
+  } catch {
+    return false;
+  }
+}
+function writeJson(res, status, body) {
+  const json = JSON.stringify(body);
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.end(json);
+}
+async function readJsonBody(req, maxBytes = MAX_CONTROL_BODY_BYTES) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw new Error("request body too large");
+    chunks.push(chunk);
+  }
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (typeof parsed !== "object" || parsed === null) throw new Error("request body must be a JSON object");
+  return parsed;
+}
+function respond(res, result) {
+  if (result.ok) {
+    writeJson(res, 200, { ok: true, ...result.value });
+  } else {
+    const status = result.error.code === "conflict" ? 409 : result.error.code === "not-found" || result.error.code === "workspace-unknown" ? 404 : 400;
+    writeJson(res, status, { ok: false, error: result.error });
+  }
+}
+function makeRoutes(store) {
+  const maxSceneBodyBytes = sceneRequestBodyLimitBytes(store.capacityLimits().hardCapBytes);
+  const guard = (req, res, method) => {
+    if (req.method !== method) {
+      writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${req.method}` } });
+      return false;
+    }
+    if (!isLoopbackRequest(req)) {
+      writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
+      return false;
+    }
+    return true;
+  };
+  const query = (req, key) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const value = url.searchParams.get(key);
+    return value === null ? void 0 : value;
+  };
+  return [
+    // -------------------------------------------------- scenes (list)
+    {
+      kind: "exact",
+      path: "/api/draw2code/scenes",
+      handler: async (req, res) => {
+        if (!guard(req, res, "GET")) return;
+        const root = query(req, "root");
+        if (root === void 0) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
+          return;
+        }
+        const result = await store.list(root);
+        if (result.ok) writeJson(res, 200, { ok: true, scenes: result.value });
+        else respond(res, result);
+      }
+    },
+    // --------------------------------------- active board (view-scoped UI state)
+    {
+      kind: "exact",
+      path: "/api/draw2code/active-board",
+      handler: async (req, res) => {
+        const method = req.method ?? "";
+        if (method === "GET") {
+          if (!isLoopbackRequest(req)) {
+            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
+            return;
+          }
+          const root = query(req, "root");
+          if (root === void 0) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
+            return;
+          }
+          respond(res, await store.getActiveBoard(root, query(req, "clientId")));
+          return;
+        }
+        if (method === "PUT") {
+          if (!guard(req, res, "PUT")) return;
+          try {
+            const body = await readJsonBody(req);
+            respond(res, await store.setActiveBoard(
+              String(body.root ?? ""),
+              String(body.name ?? ""),
+              typeof body.clientId === "string" ? body.clientId : void 0
+            ));
+          } catch (error2) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
+          }
+          return;
+        }
+        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
+      }
+    },
+    // ---------------------------------------- verified update reveal request
+    {
+      kind: "exact",
+      path: "/api/draw2code/reveal-request",
+      handler: async (req, res) => {
+        const method = req.method ?? "";
+        if (method === "GET") {
+          if (!guard(req, res, "GET")) return;
+          const root = query(req, "root");
+          if (root === void 0) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root" } });
+            return;
+          }
+          respond(res, await store.getBoardReveal(root, query(req, "clientId")));
+          return;
+        }
+        if (method === "PUT") {
+          if (!guard(req, res, "PUT")) return;
+          try {
+            const body = await readJsonBody(req);
+            respond(res, await store.ackBoardReveal(
+              String(body.root ?? ""),
+              String(body.id ?? ""),
+              String(body.board ?? ""),
+              typeof body.clientId === "string" ? body.clientId : void 0
+            ));
+          } catch (error2) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
+          }
+          return;
+        }
+        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
+      }
+    },
+    // -------------------------------------------------- scene (read / create / delete)
+    {
+      kind: "exact",
+      path: "/api/draw2code/scene",
+      handler: async (req, res) => {
+        const method = req.method ?? "";
+        if (method === "GET") {
+          if (!isLoopbackRequest(req)) {
+            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
+            return;
+          }
+          const root = query(req, "root");
+          const name = query(req, "name");
+          if (root === void 0 || name === void 0) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
+            return;
+          }
+          const result = await store.read(root, name);
+          if (result.ok) {
+            writeJson(res, 200, { ok: true, rev: result.value.rev, scene: result.value.scene });
+          } else {
+            respond(res, result);
+          }
+          return;
+        }
+        if (method === "POST") {
+          if (!isLoopbackRequest(req)) {
+            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
+            return;
+          }
+          try {
+            const body = await readJsonBody(req);
+            respond(res, await store.create(String(body.root ?? ""), String(body.name ?? "")));
+          } catch (error2) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
+          }
+          return;
+        }
+        if (method === "DELETE") {
+          if (!isLoopbackRequest(req)) {
+            writeJson(res, 403, { ok: false, error: { code: "forbidden", message: "loopback-only" } });
+            return;
+          }
+          const root = query(req, "root");
+          const name = query(req, "name");
+          if (root === void 0 || name === void 0) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
+            return;
+          }
+          respond(res, await store.remove(root, name));
+          return;
+        }
+        writeJson(res, 405, { ok: false, error: { code: "method", message: `method not allowed: ${method}` } });
+      }
+    },
+    // -------------------------------------------------- scene (write whole)
+    {
+      kind: "exact",
+      path: "/api/draw2code/scene/write",
+      handler: async (req, res) => {
+        if (!guard(req, res, "PUT")) return;
+        try {
+          const body = await readJsonBody(req, maxSceneBodyBytes);
+          const baseRev = typeof body.baseRev === "number" ? body.baseRev : void 0;
+          respond(res, await store.write(String(body.root ?? ""), String(body.name ?? ""), body.scene, baseRev));
+        } catch (error2) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
+        }
+      }
+    },
+    // -------------------------------------------------- versions (list / restore)
+    {
+      kind: "exact",
+      path: "/api/draw2code/versions",
+      handler: async (req, res) => {
+        if (!guard(req, res, "GET")) return;
+        const root = query(req, "root");
+        const name = query(req, "name");
+        if (root === void 0 || name === void 0) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root or name" } });
+          return;
+        }
+        const result = await store.listVersions(root, name);
+        if (result.ok) writeJson(res, 200, { ok: true, versions: result.value });
+        else respond(res, result);
+      }
+    },
+    {
+      kind: "exact",
+      path: "/api/draw2code/version",
+      handler: async (req, res) => {
+        if (!guard(req, res, "GET")) return;
+        const root = query(req, "root");
+        const name = query(req, "name");
+        const id = query(req, "id");
+        if (root === void 0 || name === void 0 || id === void 0) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: "missing root, name or id" } });
+          return;
+        }
+        const result = await store.readVersion(root, name, id);
+        if (result.ok) writeJson(res, 200, { ok: true, ...result.value });
+        else respond(res, result);
+      }
+    },
+    {
+      kind: "exact",
+      path: "/api/draw2code/restore",
+      handler: async (req, res) => {
+        if (!guard(req, res, "POST")) return;
+        try {
+          const body = await readJsonBody(req);
+          respond(res, await store.restoreVersion(String(body.root ?? ""), String(body.name ?? ""), String(body.id ?? "")));
+        } catch (error2) {
+          writeJson(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
+        }
+      }
+    },
+    // -------------------------------------------------- scene export
+    {
+      kind: "exact",
+      path: "/api/draw2code/export",
+      handler: async (req, res) => {
+        if (!guard(req, res, "POST")) return;
+        try {
+          const body = await readJsonBody(req, maxSceneBodyBytes);
+          if (typeof body.scene !== "object" || body.scene === null || !Array.isArray(body.scene.elements)) {
+            writeJson(res, 400, { ok: false, error: { code: "bad-scene", message: "scene.elements must be an array" } });
+            return;
+          }
+          const json = JSON.stringify(body.scene, null, 2);
+          if (typeof json !== "string" || Buffer.byteLength(json) > maxSceneBodyBytes) {
+            writeJson(res, 400, { ok: false, error: { code: "too-large", message: "scene exceeds export size limit" } });
+            return;
+          }
+          const defaultName = typeof body.filename === "string" && body.filename.trim() !== "" ? body.filename.trim() : "prototype.excalidraw";
+          const selectedPath = await chooseExportPath(defaultName);
+          if (selectedPath === null) {
+            writeJson(res, 200, { ok: true, cancelled: true });
+            return;
+          }
+          await writeFile2(selectedPath, `${json}
+`, "utf8");
+          writeJson(res, 200, { ok: true, exported: true, path: selectedPath });
+        } catch (error2) {
+          writeJson(res, 500, { ok: false, error: { code: "export-failed", message: error2 instanceof Error ? error2.message : String(error2) } });
+        }
+      }
+    }
+  ];
+}
 
 // src/runtime.ts
 import { randomBytes } from "node:crypto";
@@ -14909,6 +14971,11 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
       const visualReview = parseVisualReview(args.visualReview);
       let parsedOps = args.ops === void 0 ? [] : parseUpdateOps(args.ops);
       let targetName = args.name;
+      if (targetName === void 0 && args.clientId !== void 0) {
+        const selected2 = await store.getActiveBoard(args.root, args.clientId);
+        if (!selected2.ok) throw new Error(`${selected2.error.code}: ${selected2.error.message}`);
+        targetName = selected2.value.name ?? void 0;
+      }
       let pendingCommit = null;
       const requestedAction = args.action ?? (visualReview !== null && parsedOps.length === 0 ? "review" : "write");
       const action = requestedAction === "commit_pending" ? "write" : requestedAction;
@@ -14968,7 +15035,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
         const pendingWrite = evidence.phase === "representative" ? pendingReviewWriteFor(args.root, target2.name, board2.value.rev) : null;
         const nextActionCode2 = completionReady2 ? "complete" : evidence.phase === "representative" ? pendingWrite === null ? "write_remaining_pages" : "commit_pending_write" : "fix_layout";
         const nextAction2 = completionReady2 ? "\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u4E14\u7ED3\u6784\u3001\u5185\u5BB9\u548C\u5E03\u5C40\u95E8\u7981\u5168\u90E8\u901A\u8FC7" : evidence.phase === "representative" ? pendingWrite === null ? "\u4EE3\u8868\u9875\u590D\u6838\u5DF2\u8BB0\u5F55\uFF1B\u53EF\u4EE5\u5199\u5165\u5176\u4F59\u9875\u9762\uFF0C\u4E0D\u9700\u8981\u518D\u6B21\u4F20\u9012\u65E7 revision \u6216 revealRequestId" : "\u4EE3\u8868\u9875\u590D\u6838\u5DF2\u8BB0\u5F55\uFF1B\u6B64\u524D\u63D0\u4EA4\u7684\u5269\u4F59\u9875\u9762 ops \u5DF2\u4FDD\u7559\uFF0C\u8BF7\u7528 action=commit_pending \u548C pendingUpdateId \u63D0\u4EA4\uFF0C\u4E0D\u8981\u91CD\u53D1\u5927 JSON" : "\u6700\u7EC8\u590D\u6838\u5DF2\u8BB0\u5F55\uFF0C\u4F46\u4ECD\u9700\u5148\u4FEE\u590D prototypeQuality.warnings\uFF0C\u518D\u91CD\u65B0\u67E5\u770B\u6700\u65B0\u753B\u677F";
-        const active = await store.getActiveBoard(args.root);
+        const active = await store.getActiveBoard(args.root, args.clientId);
         if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`);
         return {
           rev: board2.value.rev,
@@ -15109,7 +15176,7 @@ ${formatLayoutIssues(value.layoutWarnings ?? [])}` : ""}`
           baseRev: board.value.rev,
           ops
         });
-        const reveal = await store.getBoardReveal(args.root);
+        const reveal = await store.getBoardReveal(args.root, args.clientId);
         if (!reveal.ok) throw new Error(`${reveal.error.code}: ${reveal.error.message}`);
         const request = reveal.value.request;
         if (request === null || request.board !== target.name || Math.abs(request.revision - board.value.rev) > 0.5) {
@@ -15227,9 +15294,9 @@ ${formatLayoutIssues(layoutReport.errors)}
       if (pendingCommit !== null) pendingReviewWrites.delete(pendingCommit.id);
       rememberSnapshot(key, { rev: refreshed.value.rev, elements: refreshed.value.scene.elements });
       const publishStartedAt = performance.now();
-      const selected = await store.setActiveBoard(args.root, target.name);
+      const selected = await store.setActiveBoard(args.root, target.name, args.clientId);
       if (!selected.ok) throw new Error(`draw2code_update verified but could not select its board: ${selected.error.code}: ${selected.error.message}`);
-      const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev);
+      const revealed = await store.publishBoardReveal(args.root, target.name, refreshed.value.rev, args.clientId);
       if (!revealed.ok) throw new Error(`draw2code_update verified but could not queue its board reveal: ${revealed.error.code}: ${revealed.error.message}`);
       stageTimings.publishMs += performance.now() - publishStartedAt;
       const qualityWarnings = layoutWarnings(refreshed.value.scene.elements);
@@ -16314,9 +16381,15 @@ var Draw2CodeRuntimeImpl = class {
     let data;
     if (command.type === "list") {
       data = await draw2codeListTool(scenes).execute({ root: command.root }, {});
+      const selected = await scenes.getActiveBoard(command.root, context.clientId);
+      if (!selected.ok) throw new Error(`${selected.error.code}: ${selected.error.message}`);
+      if (selected.value.name === null) delete data.activeBoard;
+      else data.activeBoard = selected.value.name;
     } else if (command.type === "read") {
       const { type: _type, board, ...readArgs } = command;
-      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...board === void 0 ? {} : { name: board } }, {});
+      const selected = board === void 0 ? await scenes.getActiveBoard(command.root, context.clientId) : { ok: true, value: { name: board } };
+      if (!selected.ok) throw new Error(`${selected.error.code}: ${selected.error.message}`);
+      data = await draw2codeReadTool(scenes).execute({ ...readArgs, ...selected.value.name === null ? {} : { name: selected.value.name } }, {});
     } else if (command.type === "create") {
       data = await draw2codeCreateTool(projects, scenes).execute({ ...command.input, root: command.root }, {});
     } else if (command.type === "update") {
@@ -16333,12 +16406,13 @@ var Draw2CodeRuntimeImpl = class {
         ...command.inspectedPageIds === void 0 ? {} : { inspectedPageIds: command.inspectedPageIds },
         ...command.observations === void 0 ? {} : { observations: command.observations },
         ...command.pendingUpdateId === void 0 ? {} : { pendingUpdateId: command.pendingUpdateId },
-        ...command.visualReview === void 0 ? {} : { visualReview: command.visualReview }
+        ...command.visualReview === void 0 ? {} : { visualReview: command.visualReview },
+        clientId: context.clientId
       }, {});
     } else if (command.type === "generate") {
       data = await draw2codeGenerateTool(scenes, projects).execute({ ...command.input, root: command.root }, {});
     } else {
-      const active = command.board === void 0 ? await scenes.getActiveBoard(command.root) : { ok: true, value: { name: command.board } };
+      const active = command.board === void 0 ? await scenes.getActiveBoard(command.root, context.clientId) : { ok: true, value: { name: command.board } };
       if (!active.ok) throw new Error(`${active.error.code}: ${active.error.message}`);
       const board = active.value.name;
       let revision = 0;
@@ -16371,6 +16445,7 @@ var Draw2CodeRuntimeImpl = class {
       }
     }
     if (command.type === "create" && data.status === "confirmed" && typeof data.boardName === "string") {
+      await scenes.setActiveBoard(command.root, data.boardName, context.clientId);
       this.emit({ type: "active-board.changed", root: command.root, board: data.boardName, sourceClientId: context.clientId });
     }
     return { ok: true, command: command.type, data };
@@ -16463,19 +16538,20 @@ var WorkspaceRegistry = class {
 };
 
 // src/daemon-server.ts
-var MAX_BODY_BYTES = 2 * 1024 * 1024;
+var MAX_CONTROL_BODY_BYTES2 = 2 * 1024 * 1024;
 var CANVAS_TOKEN_TTL_MS = 15 * 6e4;
+var LARGE_BODY_PATHS = /* @__PURE__ */ new Set(["/api/draw2code/scene/write", "/api/draw2code/export"]);
 function writeJson2(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
 }
-async function readJson(req) {
+async function readJson(req, maxBytes = MAX_CONTROL_BODY_BYTES2) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk);
     size += buffer.length;
-    if (size > MAX_BODY_BYTES) throw new Error("request body too large");
+    if (size > maxBytes) throw new Error("request body too large");
     chunks.push(buffer);
   }
   const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -16512,7 +16588,9 @@ async function startDaemon(options) {
     workspaceRegistry: { list: () => [...roots].map((path) => ({ path })) },
     logger: { warn: (message, ...args) => console.warn(message, ...args) }
   };
-  const sceneRoutes = makeRoutes(new SceneStore(storeContext));
+  const store = new SceneStore(storeContext);
+  const sceneRoutes = makeRoutes(store);
+  const maxSceneBodyBytes = sceneRequestBodyLimitBytes(store.capacityLimits().hardCapBytes);
   const registerWorkspace = async (path) => {
     const canonical = await realpath6(path);
     if (roots.has(canonical)) return canonical;
@@ -16520,15 +16598,15 @@ async function startDaemon(options) {
     roots.add(canonical);
     return canonical;
   };
-  const issueCanvasGrant = (root, allowedRoots, board) => {
+  const issueCanvasGrant = (root, allowedRoots, board, clientId) => {
     const token = randomBytes2(24).toString("base64url");
     const expiresAt = Date.now() + canvasTokenTtlMs2;
-    grants.set(token, { root, allowedRoots, expiresAt });
-    const query = new URLSearchParams({ root, token, ...board === null ? {} : { board } });
+    grants.set(token, { root, allowedRoots, clientId, expiresAt });
+    const query = new URLSearchParams({ root, token, view: clientId, ...board === null ? {} : { board } });
     return { token, expiresAt, url: `http://127.0.0.1:${descriptor.port}/canvas?${query}` };
   };
   const switchableRoots = async (currentRoot) => {
-    const store = new SceneStore(storeContext);
+    const store2 = new SceneStore(storeContext);
     const allowed = [];
     for (const workspaceRoot of roots) {
       if (workspaceRoot === currentRoot) {
@@ -16536,7 +16614,7 @@ async function startDaemon(options) {
         continue;
       }
       if (!isWorkspacePickerCandidate(workspaceRoot)) continue;
-      const listed = await store.list(workspaceRoot);
+      const listed = await store2.list(workspaceRoot);
       if (listed.ok && listed.value.length > 0) allowed.push(workspaceRoot);
     }
     return allowed;
@@ -16559,7 +16637,7 @@ async function startDaemon(options) {
     }
   };
   const boardForRequest = (url, body) => typeof body?.name === "string" ? body.name : url.searchParams.get("name");
-  const broadcast = async (root, event) => {
+  const broadcast = async (root, event, targetClientId) => {
     let canonicalRoot;
     try {
       canonicalRoot = await realpath6(root);
@@ -16567,8 +16645,10 @@ async function startDaemon(options) {
       return;
     }
     const payload = JSON.stringify(event);
-    for (const [socket, socketRoot] of sockets) {
-      if (socketRoot === canonicalRoot && socket.readyState === socket.OPEN) socket.send(payload);
+    for (const [socket, registration] of sockets) {
+      if (registration.root !== canonicalRoot || socket.readyState !== socket.OPEN) continue;
+      if (targetClientId !== void 0 && registration.clientId !== targetClientId) continue;
+      socket.send(payload);
     }
   };
   const server = createServer(async (req, res) => {
@@ -16636,7 +16716,7 @@ async function startDaemon(options) {
         if (root !== workspace && !root.startsWith(`${workspace}/`)) throw new Error("root is outside the host workspace");
         await registerWorkspace(workspace);
         const board = typeof body.board === "string" ? body.board : null;
-        writeJson2(res, 200, { ok: true, ...issueCanvasGrant(root, await switchableRoots(root), board) });
+        writeJson2(res, 200, { ok: true, ...issueCanvasGrant(root, await switchableRoots(root), board, context.clientId) });
       } catch (error2) {
         writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
       }
@@ -16674,7 +16754,7 @@ async function startDaemon(options) {
           writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "target workspace was not registered when this canvas opened" } });
           return;
         }
-        writeJson2(res, 200, { ok: true, root: targetRoot, ...issueCanvasGrant(targetRoot, authorized.grant.allowedRoots, null) });
+        writeJson2(res, 200, { ok: true, root: targetRoot, ...issueCanvasGrant(targetRoot, authorized.grant.allowedRoots, null, authorized.grant.clientId) });
       } catch (error2) {
         writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: error2 instanceof Error ? error2.message : String(error2) } });
       }
@@ -16703,7 +16783,7 @@ async function startDaemon(options) {
       let body;
       if (req.method !== "GET" && req.method !== "DELETE") {
         try {
-          body = await readJson(req);
+          body = await readJson(req, LARGE_BODY_PATHS.has(url.pathname) ? maxSceneBodyBytes : MAX_CONTROL_BODY_BYTES2);
           const encoded = Buffer.from(JSON.stringify(body));
           req[Symbol.asyncIterator] = async function* () {
             yield encoded;
@@ -16736,7 +16816,8 @@ async function startDaemon(options) {
         await broadcast(root, { type: "board.deleted", root, board, revision: Date.now(), sourceClientId: "canvas" });
       }
       if (root !== null && url.pathname === "/api/draw2code/active-board" && req.method === "PUT" && typeof body?.name === "string") {
-        await broadcast(root, { type: "active-board.changed", root, board: body.name, sourceClientId: "canvas" });
+        const sourceClientId = authorized.grant?.clientId ?? "canvas";
+        await broadcast(root, { type: "active-board.changed", root, board: body.name, sourceClientId }, sourceClientId);
       }
       return;
     }
@@ -16759,13 +16840,14 @@ async function startDaemon(options) {
       return;
     }
     websocket.handleUpgrade(req, socket, head, (client) => {
-      sockets.set(client, canonicalRoot);
+      sockets.set(client, { root: canonicalRoot, clientId: authorized.grant?.clientId ?? "canvas" });
       client.once("close", () => sockets.delete(client));
       client.send(JSON.stringify({ type: "connected", root: canonicalRoot }));
     });
   });
   runtime.subscribe({}, (event) => {
-    void broadcast(event.root, event);
+    const targeted = event.type === "active-board.changed" || event.type === "board.reveal-requested";
+    void broadcast(event.root, event, targeted ? event.sourceClientId : void 0);
   });
   await new Promise((resolve4, reject) => {
     server.once("error", reject);
