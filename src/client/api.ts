@@ -140,22 +140,29 @@ async function fileSystemExport(scene: ScenePayload, filename: string): Promise<
   }
 }
 
-async function get<T>(path: string, token?: string): Promise<D2cResult<T>> {
+async function get<T>(path: string, token?: string, csrfToken?: string): Promise<D2cResult<T>> {
   try {
-    const response = await fetch(path, { method: 'GET', headers: token === undefined ? undefined : { authorization: `Bearer ${token}` } })
+    const response = await fetch(path, {
+      method: 'GET',
+      headers: {
+        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+        ...(csrfToken === undefined ? {} : { 'x-draw2code-csrf': csrfToken }),
+      },
+    })
     return await response.json() as D2cResult<T>
   } catch {
     return { ok: false, error: { code: 'internal', message: 'route unavailable' } }
   }
 }
 
-async function send<T>(path: string, method: string, body?: unknown, token?: string): Promise<D2cResult<T>> {
+async function send<T>(path: string, method: string, body?: unknown, token?: string, csrfToken?: string): Promise<D2cResult<T>> {
   try {
     const response = await fetch(path, {
       method,
       headers: {
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+        ...(csrfToken === undefined ? {} : { 'x-draw2code-csrf': csrfToken }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
@@ -167,7 +174,7 @@ async function send<T>(path: string, method: string, body?: unknown, token?: str
 
 /** The host route client. */
 export class D2cApi {
-  constructor(private readonly options: { baseUrl?: string; token?: string } = {}) {}
+  constructor(private readonly options: { baseUrl?: string; token?: string; csrfToken?: string } = {}) {}
 
   private path(path: string): string {
     return `${this.options.baseUrl?.replace(/\/$/, '') ?? ''}${path}`
@@ -212,11 +219,11 @@ export class D2cApi {
   }
 
   listWorkspaces(root: string): Promise<D2cResult<{ workspaces: WorkspaceMetaRow[] }>> {
-    return get(this.path(`/canvas-workspaces?root=${encodeURIComponent(root)}`), this.options.token)
+    return get(this.path(`/canvas-workspaces?root=${encodeURIComponent(root)}`), this.options.token, this.options.csrfToken)
   }
 
-  switchWorkspace(root: string, targetRoot: string): Promise<D2cResult<{ root: string; token: string; expiresAt: number; url: string }>> {
-    return send(this.path('/canvas-workspace-token'), 'POST', { root, targetRoot }, this.options.token)
+  switchWorkspace(root: string, targetRoot: string): Promise<D2cResult<{ root: string; token?: string; expiresAt: number; url: string }>> {
+    return send(this.path('/canvas-workspace-token'), 'POST', { root, targetRoot }, this.options.token, this.options.csrfToken)
   }
 
   getActiveBoard(root: string, clientId?: string): Promise<D2cResult<{ name: string | null }>> {
@@ -224,7 +231,7 @@ export class D2cApi {
   }
 
   setActiveBoard(root: string, name: string, clientId?: string): Promise<D2cResult<{ name: string }>> {
-    return send(this.path('/api/draw2code/active-board'), 'PUT', { root, name, ...(clientId === undefined ? {} : { clientId }) }, this.options.token)
+    return send(this.path('/api/draw2code/active-board'), 'PUT', { root, name, ...(clientId === undefined ? {} : { clientId }) }, this.options.token, this.options.csrfToken)
   }
 
   getBoardReveal(root: string, clientId?: string): Promise<D2cResult<{ request: BoardRevealRequest | null }>> {
@@ -232,7 +239,7 @@ export class D2cApi {
   }
 
   ackBoardReveal(root: string, id: string, board: string, clientId?: string): Promise<D2cResult<BoardRevealRequest>> {
-    return send(this.path('/api/draw2code/reveal-request'), 'PUT', { root, id, board, ...(clientId === undefined ? {} : { clientId }) }, this.options.token)
+    return send(this.path('/api/draw2code/reveal-request'), 'PUT', { root, id, board, ...(clientId === undefined ? {} : { clientId }) }, this.options.token, this.options.csrfToken)
   }
 
   read(root: string, name: string): Promise<D2cResult<{ rev: number; scene: ScenePayload }>> {
@@ -240,15 +247,15 @@ export class D2cApi {
   }
 
   create(root: string, name: string): Promise<D2cResult<{ rev: number; elementCount: number }>> {
-    return send(this.path('/api/draw2code/scene'), 'POST', { root, name }, this.options.token)
+    return send(this.path('/api/draw2code/scene'), 'POST', { root, name }, this.options.token, this.options.csrfToken)
   }
 
   write(root: string, name: string, scene: ScenePayload, baseRev?: number): Promise<D2cResult<{ rev: number; elementCount: number }>> {
-    return send(this.path('/api/draw2code/scene/write'), 'PUT', { root, name, scene, baseRev }, this.options.token)
+    return send(this.path('/api/draw2code/scene/write'), 'PUT', { root, name, scene, baseRev }, this.options.token, this.options.csrfToken)
   }
 
   remove(root: string, name: string): Promise<D2cResult<{ deleted: true }>> {
-    return send(this.path(`/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`), 'DELETE', undefined, this.options.token)
+    return send(this.path(`/api/draw2code/scene?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`), 'DELETE', undefined, this.options.token, this.options.csrfToken)
   }
 
   listVersions(root: string, name: string): Promise<D2cResult<{ versions: VersionRow[] }>> {
@@ -260,7 +267,7 @@ export class D2cApi {
   }
 
   restoreVersion(root: string, name: string, id: string): Promise<D2cResult<{ rev: number; elementCount: number }>> {
-    return send(this.path('/api/draw2code/restore'), 'POST', { root, name, id }, this.options.token)
+    return send(this.path('/api/draw2code/restore'), 'POST', { root, name, id }, this.options.token, this.options.csrfToken)
   }
 
   async exportScene(scene: ScenePayload, filename = 'prototype.excalidraw'): Promise<D2cResult<ExportPayload>> {
@@ -270,6 +277,6 @@ export class D2cApi {
     if (nativeResult !== null) return nativeResult
     const filePickerResult = await fileSystemExport(scene, filename)
     if (filePickerResult !== null) return filePickerResult
-    return send(this.path('/api/draw2code/export'), 'POST', { scene, filename }, this.options.token)
+    return send(this.path('/api/draw2code/export'), 'POST', { scene, filename }, this.options.token, this.options.csrfToken)
   }
 }

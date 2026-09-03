@@ -1,8 +1,13 @@
 // src/daemon-client.ts
 import { execFile, spawn } from "node:child_process";
 import { open, mkdir as mkdir2, readFile as readFile2, rm, stat as stat2 } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
+// src/gateway-contract.ts
+var DEFAULT_GATEWAY_PORT = 64775;
+var GATEWAY_SESSION_TTL_MS = 30 * 24 * 60 * 6e4;
 
 // src/runtime.ts
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -86,9 +91,12 @@ function daemonRuntimeDir() {
 function daemonDescriptorPath() {
   return process.env.DRAW2CODE_DESCRIPTOR_PATH ?? join(daemonRuntimeDir(), "daemon.json");
 }
-async function healthy(descriptor) {
+function gatewayDescriptorPath() {
+  return process.env.DRAW2CODE_GATEWAY_DESCRIPTOR_PATH ?? join(daemonRuntimeDir(), "gateway.json");
+}
+async function healthyAt(descriptor, path) {
   try {
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}/health`, {
+    const response = await fetch(`http://127.0.0.1:${descriptor.port}${path}`, {
       headers: { authorization: `Bearer ${descriptor.token}` },
       signal: AbortSignal.timeout(800)
     });
@@ -98,14 +106,27 @@ async function healthy(descriptor) {
     return false;
   }
 }
-async function waitForDescriptor(path, timeoutMs) {
+async function portIsOccupied(port) {
+  return await new Promise((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const finish = (occupied) => {
+      socket.destroy();
+      resolve(occupied);
+    };
+    socket.setTimeout(300);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
+  });
+}
+async function waitForDescriptor(path, timeoutMs, healthPath) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const descriptor = await validateDaemonDescriptor(path);
-    if (descriptor !== null && await healthy(descriptor)) return descriptor;
+    if (descriptor !== null && await healthyAt(descriptor, healthPath)) return descriptor;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("draw2code daemon did not become healthy");
+  throw new Error(`draw2code ${healthPath === "/health" ? "daemon" : "gateway"} did not become healthy`);
 }
 async function staleStartupLock(path) {
   try {
@@ -130,47 +151,82 @@ async function staleStartupLock(path) {
     return false;
   }
 }
+async function ensureDetachedProcess(options) {
+  const current = await validateDaemonDescriptor(options.descriptorPath);
+  if (current !== null && await healthyAt(current, options.healthPath)) return current;
+  await mkdir2(dirname(options.descriptorPath), { recursive: true, mode: 448 });
+  await rm(options.descriptorPath, { force: true });
+  const lockPath = `${options.descriptorPath}.lock`;
+  while (true) {
+    let lock = null;
+    try {
+      lock = await open(lockPath, "wx", 384);
+      await lock.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}
+`);
+      const child = spawn(process.execPath, [options.entry], {
+        detached: true,
+        stdio: "ignore",
+        env: options.env
+      });
+      child.unref();
+      return await waitForDescriptor(options.descriptorPath, 8e3, options.healthPath);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (await staleStartupLock(lockPath)) {
+        await rm(lockPath, { force: true });
+        continue;
+      }
+    } finally {
+      await lock?.close();
+      if (lock !== null) await rm(lockPath, { force: true });
+    }
+    return waitForDescriptor(options.descriptorPath, 8e3, options.healthPath);
+  }
+}
+async function ensureDaemonProcess(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
+  return await ensureDetachedProcess({
+    descriptorPath,
+    healthPath: "/health",
+    entry: daemonEntry,
+    env: {
+      ...process.env,
+      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_CANVAS_HTML: canvasHtmlPath
+    }
+  });
+}
 var Draw2CodeDaemonClient = class {
-  constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
+  constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath(), gatewayEntry = join(dirname(daemonEntry), "draw2code-gateway.js"), gatewayPath = gatewayDescriptorPath()) {
     this.daemonEntry = daemonEntry;
     this.canvasHtmlPath = canvasHtmlPath;
     this.descriptorPath = descriptorPath;
+    this.gatewayEntry = gatewayEntry;
+    this.gatewayPath = gatewayPath;
   }
   async ensure() {
-    const current = await validateDaemonDescriptor(this.descriptorPath);
-    if (current !== null && await healthy(current)) return current;
-    await mkdir2(dirname(this.descriptorPath), { recursive: true, mode: 448 });
-    await rm(this.descriptorPath, { force: true });
-    const lockPath = `${this.descriptorPath}.lock`;
-    while (true) {
-      let lock = null;
-      try {
-        lock = await open(lockPath, "wx", 384);
-        await lock.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}
-`);
-        const child = spawn(process.execPath, [this.daemonEntry], {
-          detached: true,
-          stdio: "ignore",
-          env: {
-            ...process.env,
-            DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
-            DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
-          }
-        });
-        child.unref();
-        return await waitForDescriptor(this.descriptorPath, 8e3);
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-        if (await staleStartupLock(lockPath)) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
-      } finally {
-        await lock?.close();
-        if (lock !== null) await rm(lockPath, { force: true });
-      }
-      return waitForDescriptor(this.descriptorPath, 8e3);
+    return await ensureDaemonProcess(this.daemonEntry, this.canvasHtmlPath, this.descriptorPath);
+  }
+  async ensureGateway() {
+    const configuredPort = Number(process.env.DRAW2CODE_GATEWAY_PORT);
+    const port = Number.isInteger(configuredPort) && configuredPort >= 0 && configuredPort <= 65535 ? configuredPort : DEFAULT_GATEWAY_PORT;
+    const current = await validateDaemonDescriptor(this.gatewayPath);
+    if (current !== null && await healthyAt(current, "/gateway-health")) return current;
+    if (port > 0 && await portIsOccupied(port)) {
+      throw new Error(`draw2code gateway port ${port} is already in use; stop the conflicting service or set DRAW2CODE_GATEWAY_PORT`);
     }
+    return await ensureDetachedProcess({
+      descriptorPath: this.gatewayPath,
+      healthPath: "/gateway-health",
+      entry: this.gatewayEntry,
+      env: {
+        ...process.env,
+        DRAW2CODE_GATEWAY_DESCRIPTOR_PATH: this.gatewayPath,
+        DRAW2CODE_GATEWAY_PORT: String(port),
+        DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
+        DRAW2CODE_DAEMON_ENTRY: this.daemonEntry,
+        DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
+      }
+    });
   }
   async execute(command, context) {
     const descriptor = await this.ensure();
@@ -218,6 +274,20 @@ var Draw2CodeDaemonClient = class {
     }
     return { url: body.url, token: body.token, expiresAt: body.expiresAt };
   }
+  async stableCanvas(root, board, context) {
+    await this.ensure();
+    const gateway = await this.ensureGateway();
+    const response = await fetch(`http://127.0.0.1:${gateway.port}/bootstrap-code`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${gateway.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ root, board, context })
+    });
+    const body = await response.json();
+    if (!response.ok || body.ok !== true || body.url === void 0 || body.expiresAt === void 0) {
+      throw new Error(body.error?.message ?? "failed to create stable canvas URL");
+    }
+    return { url: body.url, expiresAt: body.expiresAt };
+  }
   async openBrowser(url) {
     const launcher = process.platform === "darwin" ? { command: "/usr/bin/open", args: [url] } : process.platform === "linux" ? { command: "xdg-open", args: [url] } : process.platform === "win32" ? { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : null;
     if (launcher === null) return false;
@@ -229,5 +299,7 @@ var Draw2CodeDaemonClient = class {
 export {
   Draw2CodeDaemonClient,
   daemonDescriptorPath,
-  daemonRuntimeDir
+  daemonRuntimeDir,
+  ensureDaemonProcess,
+  gatewayDescriptorPath
 };

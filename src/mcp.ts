@@ -198,7 +198,7 @@ server.registerTool('draw2code_generate', {
 
 server.registerTool('draw2code_open', {
   title: 'Open Draw2Code canvas',
-  description: 'Return a short-lived canvas URL for the host to open, or explicitly open it in an external browser. Never creates a project.',
+  description: 'Open a requested workspace and board through the stable local Draw2Code gateway. Direct loopback access initializes itself; task-targeted handoff links remain isolated and redirect immediately to the clean fixed root URL. Never creates a project.',
   inputSchema: {
     root,
     board: z.string().optional(),
@@ -222,7 +222,7 @@ server.registerTool('draw2code_open', {
   }, context)
   if (!opened.ok) return toolResult(opened)
   const selectedBoard = typeof opened.data.board === 'string' ? opened.data.board : null
-  const canvas = await client.canvas(workspaceRoot, selectedBoard, context)
+  const canvas = await client.stableCanvas(workspaceRoot, selectedBoard, context)
   const actualPresentation = String(opened.data.presentation)
   let didOpen = false
   if (actualPresentation === 'browser' && !openedWorkspaces.has(workspaceRoot)) {
@@ -246,10 +246,9 @@ server.registerTool('draw2code_open', {
 
 server.server.oninitialized = () => {
   if (configuredWorkspaceRoot === undefined) void advertisedRoots()
-  // Opening the canvas is an explicit UI action. Start the shared daemon while
-  // the MCP connection is becoming ready so the first open call only needs to
-  // mint a workspace-scoped canvas URL.
-  void client.ensure().catch(() => undefined)
+  // Opening the canvas is an explicit UI action. Prewarm the stable gateway and
+  // dynamic worker so the first open call only needs to mint a one-time code.
+  void Promise.all([client.ensure(), client.ensureGateway()]).catch(() => undefined)
 }
 
 await server.connect(new StdioServerTransport())

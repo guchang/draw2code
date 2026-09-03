@@ -29,9 +29,9 @@ Create 返回 `ready` 时，完整展示工具返回的 `briefMarkdown`，不得
 
 `draw2code_read` 默认 `detail=index`，只返回有界的页面索引、关系、分层容量和 `continuation`；要修改内容时，用索引中的 page id 再按 `pageIds` 读取，或用 `elementIds`、`region`、`changesSince` 获取最小范围，禁止习惯性 `detail=full`。单次 ops 超过预算会返回 `nextActionCode=reduce_batch_size`，按页面或独立改动拆批；完整画板达到硬上限会返回 `archive_or_split_board`，应归档或拆板，不能反复缩小同一批次。`update.timings` 只统计工具内部读盘、预检、写盘、验证和发布，不包含工具调用前的 Agent 推理时间。已有 3 页以上画板的独立小改动不需要重新完成首次代表页门禁。
 
-第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。MCP/Codex 默认返回 `presentation=handoff` 的短期 URL，不生成对话内嵌卡片；只有用户明确要求外部浏览器时才传 `presentation=browser`。不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
+第一次确认画板、第一次读取画板，或用户要求打开时，调用 `draw2code_open`。固定本机入口 `http://127.0.0.1:64775/` 可由用户直接访问，并会从本机已登记工作区恢复画码，不要求用户先建立 Codex 会话。MCP/Codex 的 `presentation=handoff` 仍可在内部返回短期定向连接 URL，用于把当前任务的 workspace/board 绑定到当前标签页；连接后立即回到可收藏的干净根地址，不生成对话内嵌卡片。只有用户明确要求外部浏览器时才传 `presentation=browser`。不要自行运行 `/usr/bin/open`，也不要重复打开窗口。
 
-用户要亲自绘制且宿主提供侧边栏浏览器时，以 `presentation=handoff` 调用 `draw2code_open`。优先复用同一 workspace 的画码标签页并依靠事件刷新；没有时才打开工具返回的短期 `url`。单纯打开或切换 URL 时优先使用宿主原生打开/导航能力，不要为此初始化通用浏览器自动化；只有需要检查画布 DOM、控制台或交互且没有更轻量证据时才接管浏览器。确认标签页已经显示目标画板且画布真正可见后，才能告诉用户“画码已经在侧边栏打开”。若只得到 `displayState=handoff-ready`，但侧边栏未显示，不得把“URL 已准备”误报成“已打开”；无法自动展示时应返回可点击 URL。没有 active board 时展示画板选择器或空白画布，不进入 Create。
+用户要亲自绘制且宿主提供侧边栏浏览器时，以 `presentation=handoff` 调用 `draw2code_open`。优先复用固定网关根地址下同一 workspace 的画码标签页并依靠事件刷新；需要把当前任务精确定位到指定 workspace/board 时才导航工具返回的短期连接 `url`。单纯打开或切换 URL 时优先使用宿主原生打开/导航能力，不要为此初始化通用浏览器自动化；只有需要检查画布 DOM、控制台或交互且没有更轻量证据时才接管浏览器。确认标签页已经显示目标画板且画布真正可见后，才能告诉用户“画码已经在侧边栏打开”。若只得到 `displayState=handoff-ready`，但侧边栏未显示，不得把“URL 已准备”误报成“已打开”；无法自动展示时应返回可点击 URL。没有 active board 时展示画板选择器或空白画布，不进入 Create。
 
 ## 完成口径
 

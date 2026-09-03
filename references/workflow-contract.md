@@ -23,9 +23,9 @@
 
 ## 展示与共同编辑
 
-- MCP/Codex 的 `draw2code_open` 默认使用 `presentation=handoff`，不注册静态 `openai/outputTemplate`，也不把动态 localhost 画板套进 MCP App iframe。工具只准备短期 URL 并返回 `displayState=handoff-ready`；`auto` 与 `inline` 仅作为兼容别名，同样回退到 handoff。只有用户明确要求外部浏览器时才使用 `presentation=browser`。
+- 固定本机入口 `http://127.0.0.1:64775/` 必须允许 loopback 浏览器直接进入，并从持久化登记表恢复工作区；不得要求用户先从 Codex 建立连接，也不得展示“画码尚未连接”。MCP/Codex 的 `draw2code_open` 默认使用 `presentation=handoff`，不注册静态 `openai/outputTemplate`，也不把动态 localhost 画板套进 MCP App iframe。工具仍可返回短期定向连接 URL 和 `displayState=handoff-ready`，仅用于把当前任务的 workspace/board 隔离绑定到当前标签页；连接成功后必须立刻重定向到不含 root、board、token 或 code 的干净根地址。`auto` 与 `inline` 仅作为兼容别名，同样回退到 handoff。只有用户明确要求外部浏览器时才使用 `presentation=browser`。
 - 宿主负责把 handoff URL 导航到自己的侧边栏或浏览器并验证可见性。单纯导航优先使用宿主原生能力，不为此初始化通用浏览器自动化；只有需要 DOM、控制台或交互证据时才接管浏览器。只有画布真正可见后，Agent 才能报告“已打开”；不能把 URL 就绪或 daemon 启动成功当作可见性证据。若未来需要对话内嵌画板，必须单独实现直接运行 Canvas 的 MCP App，不能恢复动态 localhost iframe 壳。
-- 同一 workspace 的外部浏览器只首次打开一次；后续复用现有标签页并依靠事件刷新，不能反复抢焦点。
+- 同一 workspace 的外部浏览器只首次打开一次；后续复用固定网关根地址的现有标签页并依靠事件刷新，不能反复抢焦点。动态 worker 或固定网关重启不得改变这个地址；刷新根地址必须自动重建内部会话并恢复已登记工作区。`localhost` 必须规范重定向到 `127.0.0.1`，端口冲突必须明确报错且不得静默换端口。
 - `verified=true` / `writeVerified=true` 只证明目标画板写盘并回读，不代表原型已经完成。成功 write 会把目标设为 active board、发布带目标 revision 的 reveal request、返回不透明 `reviewToken` 并自动打开画码；Canvas 实际加载到同一 board + revision 后才回传消费确认。`action=review` 只记录该可见版本的 review receipt，返回 `reviewVerified=true`，不会写画板或发布新 reveal；重复提交同一 token 是幂等的。只有 final review 返回 `completionReady=true` 才说明最终视觉复核已覆盖全部页面，即使如此，仍应把 `prototypeQuality.warnings` 作为继续打磨依据。
 - 用户拖动产生的 scene write 与 Agent update 都通过 daemon；WebSocket 是主通知通道，revision polling 是断线降级。
 - 独立画码可以列出当前 workspace 和本机已由宿主明确注册、持久化且确实含有画板的其他 workspace；插件缓存和空 root 不进入切换菜单。切换前必须先落盘当前待保存编辑，再用当前短期会话换取目标 root 的新 workspace-scoped token。旧 token 不能直接访问目标 root，Agent 工具默认范围也不能因为 UI 切换而扩大。
@@ -33,6 +33,6 @@
 ## 数据与安全
 
 - 原位使用 `draw2code/`、`.active-board.json`、`.projects/`、`.generations/`、`.generate-settings/` 与 `draw2code-pages/`，不得复制、导入或主动迁移旧数据。
-- 所有 root 都必须 realpath 后落在 HostContext 注册 workspace 内。daemon 只监听 loopback；主 bearer 不进入画板页面，页面只收到短期、活动续期的 workspace-scoped token，可在该 root 内管理多个画板但不能跨 root 访问。
+- 所有 root 都必须 realpath 后落在 HostContext 注册 workspace 内。固定网关和动态 worker 只监听 loopback；直接访问固定入口时，网关自动建立内部 `HttpOnly`、`SameSite=Strict` Cookie，并向页面注入同源 CSRF token，所有写请求必须同时通过 Origin/Host 与 CSRF 校验。一次性连接码只用于 Codex 任务/标签页的定向隔离，短时过期且只能使用一次。主 bearer 与 workspace grant 都不进入页面或最终 URL；网关代表已授权浏览器管理当前 workspace，并在切换到已登记 workspace 时刷新内部 grant。
 - 不上传画板、brief、页面或验证证据。单画板元素数、UTF-8 byte 上限、历史版本与生成证据门禁保持有效。
 - 不递归扫描整台电脑寻找 workspace，也不自动复制、合并或迁移不同 root 的画板；新打开的画码只获得打开当时已注册 workspace 的快照。

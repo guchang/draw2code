@@ -32,6 +32,8 @@ export { makeRoutes } from './routes.ts'
 export { draw2codeCreateTool } from './create-tool.ts'
 export { draw2codeGenerateTool, draw2codeListTool, draw2codeReadTool, draw2codeUpdateTool } from './tools.ts'
 export { Draw2CodeRuntimeImpl, choosePresentation, createDaemonDescriptor, validateDaemonDescriptor } from './runtime.ts'
+export { startGateway } from './gateway-server.ts'
+export { DEFAULT_GATEWAY_PORT } from './gateway-contract.ts'
 export type { Draw2CodeCommand, Draw2CodeEvent, Draw2CodeResult, Draw2CodeRuntime, HostContext, CanvasHandle } from './runtime.ts'
 
 /** Stable cordis plugin name. */
@@ -87,6 +89,7 @@ export function apply(ctx: Context): void {
     resolve(import.meta.dirname, '../lib/canvas.html'),
   )
   const routes = makeDaemonProxyRoutes(ctx, client)
+  void client.ensureGateway().catch((error) => ctx.logger.warn('[dsh-draw2code] stable gateway unavailable:', error))
   const localTools = [draw2codeListTool(store), draw2codeReadTool(store), draw2codeCreateTool(projects, store), draw2codeUpdateTool(store), draw2codeGenerateTool(store, projects)]
   const tools = [
     daemonTool(ctx, client, localTools[0], (args) => ({ type: 'list', root: String(args.root ?? '') })),

@@ -1428,8 +1428,8 @@ var ProjectStore = class {
     const entries = (await readdir2(dir)).filter((entry) => versionStamp2(entry) !== null);
     if (entries.length <= 30) return;
     const doomed = entries.map((entry) => ({ entry, stamp: versionStamp2(entry) ?? 0 })).sort((a, b) => a.stamp - b.stamp).slice(0, entries.length - 30);
-    const { rm: rm3 } = await import("node:fs/promises");
-    await Promise.all(doomed.map(({ entry }) => rm3(join2(dir, entry), { force: true })));
+    const { rm: rm4 } = await import("node:fs/promises");
+    await Promise.all(doomed.map(({ entry }) => rm4(join2(dir, entry), { force: true })));
   }
 };
 
@@ -6466,7 +6466,7 @@ sessionId=${value.sessionId} revision=${value.revision ?? ""}`}`);
 }
 
 // references/workflow-contract.md
-var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u7531\u72EC\u7ACB `draw2code-open` \u5FEB\u901F\u5165\u53E3\u5904\u7406\uFF0C\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_open`\uFF1A\u4E0D\u8BFB\u53D6\u672C\u5951\u7EA6\u7684\u5176\u4F59\u5DE5\u4F5C\u6D41\uFF0C\u4E0D\u8C03\u7528\u5176\u4ED6 Draw2Code \u5DE5\u5177\uFF0C\u4E0D\u8FDB\u5165\u4EE3\u8868\u9875\u590D\u6838\u6216\u8D28\u91CF\u95E8\u7981\uFF1B\u6709 active board \u5C31\u6062\u590D\uFF0C\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName`\u3001\u540C\u4E00\u4EFD `brief` \u548C\u7ED3\u6784\u5316 `drawingPlan` \u8C03\u7528 `draw2code_update`\u3002\u5F53 `drawingPlan.nextActionCode=write_representative` \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A `allowedPageIds` \u751F\u6210 ops\uFF0C\u4E0D\u80FD\u9884\u5148\u6784\u9020\u5168\u90E8\u9875\u9762\u3002\u4EE3\u8868\u9875\u5199\u5165\u540E\u7B49\u5F85 Canvas \u6D88\u8D39\u8FD4\u56DE\u7684 reveal\uFF0C\u518D\u4EE5 `action=review`\u3001`reviewToken`\u3001`phase=representative`\u3001`passed=true`\u3001`inspectedPageIds` \u548C `observations` \u5355\u72EC\u8BB0\u5F55\u53EF\u89C1\u590D\u6838\uFF1Breview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\u3002\u5DE5\u5177\u8FD4\u56DE `nextActionCode=write_remaining_pages` \u540E\u624D\u751F\u6210 `remainingPageIds`\u3002\u5982\u679C Agent \u8BEF\u5728\u590D\u6838\u524D\u63D0\u4EA4\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u8FD4\u56DE `nextActionCode=review_representative` \u548C `pendingUpdateId`\uFF0C\u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u5B8C\u6210\u4EE3\u8868\u9875\u590D\u6838\u540E\u7528 `action=commit_pending` \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u4E0D\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20 ops\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528 `action=review`\u3001`phase=final` \u8986\u76D6\u6240\u6709 page id\u3002\u65E7 `visualReview` \u53EA\u4FDD\u7559\u517C\u5BB9\uFF1B\u65B0\u6D41\u7A0B\u4E0D\u624B\u5DE5\u62FC `rev` \u4E0E `revealRequestId`\u3002\u5DF2\u6709\u753B\u677F\u5148\u7528 `draw2code_read detail=index` \u53D6\u5F97\u9875\u9762 id\u3001`capacity`\u3001`continuation` \u548C\u4E0D\u900F\u660E ID\uFF1B\u9700\u8981\u5143\u7D20\u5185\u5BB9\u65F6\u53EA\u6309\u76EE\u6807 `pageIds`\u3001`elementIds`\u3001\u533A\u57DF\u6216 `changesSince` \u7EE7\u7EED\u8BFB\u53D6\uFF0C\u4E0D\u641C\u7D22\u4F1A\u8BDD\u5386\u53F2\uFF0C\u4E5F\u4E0D\u9ED8\u8BA4\u8BFB\u53D6\u6574\u677F\u3002\n- \u5BB9\u91CF\u5206\u4E24\u5C42\u5904\u7406\uFF1A\u5355\u6B21 ops \u8D85\u8FC7 500 \u9879\u6216 512 KiB \u65F6\u8FD4\u56DE `nextActionCode=reduce_batch_size`\uFF0C\u6309\u9875\u9762\u6216\u72EC\u7ACB\u6539\u52A8\u62C6\u6279\uFF1B\u753B\u677F\u6CA1\u6709\u65E5\u5E38\u4E1A\u52A1\u914D\u989D\uFF0C\u9ED8\u8BA4 32 MiB \u53EA\u6807\u8BB0 large\uFF0C256 MiB / 50,000 \u5143\u7D20\u662F\u53EF\u914D\u7F6E\u7684\u5F02\u5E38\u4FDD\u9669\u4E1D\u3002\u771F\u6B63\u89E6\u53D1\u4FDD\u9669\u4E1D\u65F6\u8FD4\u56DE `nextActionCode=archive_or_split_board`\uFF0C\u7F29\u5C0F\u540C\u4E00\u6539\u52A8\u6279\u6B21\u6CA1\u6709\u4F5C\u7528\u3002`capacity` \u5206\u522B\u62A5\u544A canonical\u3001persisted\u3001asset \u4E0E element \u6307\u6807\uFF0C`history` \u72EC\u7ACB\u62A5\u544A gzip checkpoint / delta \u7684\u5386\u53F2\u5360\u7528\u4E0E\u9884\u7B97\uFF1B`update.timings` \u7684\u8303\u56F4\u4EC5\u4E3A\u5DE5\u5177\u6267\u884C\uFF0C\u4E0D\u5305\u542B\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- MCP/Codex \u7684 `draw2code_open` \u9ED8\u8BA4\u4F7F\u7528 `presentation=handoff`\uFF0C\u4E0D\u6CE8\u518C\u9759\u6001 `openai/outputTemplate`\uFF0C\u4E5F\u4E0D\u628A\u52A8\u6001 localhost \u753B\u677F\u5957\u8FDB MCP App iframe\u3002\u5DE5\u5177\u53EA\u51C6\u5907\u77ED\u671F URL \u5E76\u8FD4\u56DE `displayState=handoff-ready`\uFF1B`auto` \u4E0E `inline` \u4EC5\u4F5C\u4E3A\u517C\u5BB9\u522B\u540D\uFF0C\u540C\u6837\u56DE\u9000\u5230 handoff\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u8981\u6C42\u5916\u90E8\u6D4F\u89C8\u5668\u65F6\u624D\u4F7F\u7528 `presentation=browser`\u3002\n- \u5BBF\u4E3B\u8D1F\u8D23\u628A handoff URL \u5BFC\u822A\u5230\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6216\u6D4F\u89C8\u5668\u5E76\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u5355\u7EAF\u5BFC\u822A\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u80FD\u529B\uFF0C\u4E0D\u4E3A\u6B64\u521D\u59CB\u5316\u901A\u7528\u6D4F\u89C8\u5668\u81EA\u52A8\u5316\uFF1B\u53EA\u6709\u9700\u8981 DOM\u3001\u63A7\u5236\u53F0\u6216\u4EA4\u4E92\u8BC1\u636E\u65F6\u624D\u63A5\u7BA1\u6D4F\u89C8\u5668\u3002\u53EA\u6709\u753B\u5E03\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\u82E5\u672A\u6765\u9700\u8981\u5BF9\u8BDD\u5185\u5D4C\u753B\u677F\uFF0C\u5FC5\u987B\u5355\u72EC\u5B9E\u73B0\u76F4\u63A5\u8FD0\u884C Canvas \u7684 MCP App\uFF0C\u4E0D\u80FD\u6062\u590D\u52A8\u6001 localhost iframe \u58F3\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u590D\u7528\u73B0\u6709\u6807\u7B7E\u9875\u5E76\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F write \u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request\u3001\u8FD4\u56DE\u4E0D\u900F\u660E `reviewToken` \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002`action=review` \u53EA\u8BB0\u5F55\u8BE5\u53EF\u89C1\u7248\u672C\u7684 review receipt\uFF0C\u8FD4\u56DE `reviewVerified=true`\uFF0C\u4E0D\u4F1A\u5199\u753B\u677F\u6216\u53D1\u5E03\u65B0 reveal\uFF1B\u91CD\u590D\u63D0\u4EA4\u540C\u4E00 token \u662F\u5E42\u7B49\u7684\u3002\u53EA\u6709 final review \u8FD4\u56DE `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n- \u72EC\u7ACB\u753B\u7801\u53EF\u4EE5\u5217\u51FA\u5F53\u524D workspace \u548C\u672C\u673A\u5DF2\u7531\u5BBF\u4E3B\u660E\u786E\u6CE8\u518C\u3001\u6301\u4E45\u5316\u4E14\u786E\u5B9E\u542B\u6709\u753B\u677F\u7684\u5176\u4ED6 workspace\uFF1B\u63D2\u4EF6\u7F13\u5B58\u548C\u7A7A root \u4E0D\u8FDB\u5165\u5207\u6362\u83DC\u5355\u3002\u5207\u6362\u524D\u5FC5\u987B\u5148\u843D\u76D8\u5F53\u524D\u5F85\u4FDD\u5B58\u7F16\u8F91\uFF0C\u518D\u7528\u5F53\u524D\u77ED\u671F\u4F1A\u8BDD\u6362\u53D6\u76EE\u6807 root \u7684\u65B0 workspace-scoped token\u3002\u65E7 token \u4E0D\u80FD\u76F4\u63A5\u8BBF\u95EE\u76EE\u6807 root\uFF0CAgent \u5DE5\u5177\u9ED8\u8BA4\u8303\u56F4\u4E5F\u4E0D\u80FD\u56E0\u4E3A UI \u5207\u6362\u800C\u6269\u5927\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002daemon \u53EA\u76D1\u542C loopback\uFF1B\u4E3B bearer \u4E0D\u8FDB\u5165\u753B\u677F\u9875\u9762\uFF0C\u9875\u9762\u53EA\u6536\u5230\u77ED\u671F\u3001\u6D3B\u52A8\u7EED\u671F\u7684 workspace-scoped token\uFF0C\u53EF\u5728\u8BE5 root \u5185\u7BA1\u7406\u591A\u4E2A\u753B\u677F\u4F46\u4E0D\u80FD\u8DE8 root \u8BBF\u95EE\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n- \u4E0D\u9012\u5F52\u626B\u63CF\u6574\u53F0\u7535\u8111\u5BFB\u627E workspace\uFF0C\u4E5F\u4E0D\u81EA\u52A8\u590D\u5236\u3001\u5408\u5E76\u6216\u8FC1\u79FB\u4E0D\u540C root \u7684\u753B\u677F\uFF1B\u65B0\u6253\u5F00\u7684\u753B\u7801\u53EA\u83B7\u5F97\u6253\u5F00\u5F53\u65F6\u5DF2\u6CE8\u518C workspace \u7684\u5FEB\u7167\u3002\n";
+var workflow_contract_default = "# Draw2Code \u591A\u5BBF\u4E3B Workflow Contract\n\n\u8FD9\u4EFD\u5951\u7EA6\u540C\u65F6\u7EA6\u675F DSH guidance\u3001Codex Skill \u548C MCP instructions\u3002\u5BBF\u4E3B Adapter \u53EA\u8D1F\u8D23\u8F93\u5165\u3001\u9009\u62E9\u9898\u4E0E\u5C55\u793A\uFF1BCreate\u3001Update\u3001Generate \u7684\u72B6\u6001\u3001\u5B58\u50A8\u3001\u51B2\u7A81\u548C\u9A8C\u6536\u7531\u5171\u4EAB Runtime \u51B3\u5B9A\u3002\n\n## \u5524\u9192\u4E0E\u4F1A\u8BDD\n\n- \u4EC5\u5728\u7528\u6237\u660E\u786E\u8BF4 `Draw2Code`\u3001`\u753B\u7801`\uFF0C\u6216\u610F\u56FE\u660E\u786E\u4E3A\u201C\u753B\u539F\u578B\u201D\u65F6\u8FDB\u5165 Draw2Code\u3002\u666E\u901A\u201C\u505A\u4E00\u4E2A App / \u5199\u4E00\u4E2A\u9875\u9762\u201D\u4E0D\u81EA\u52A8\u62E6\u622A\u3002\n- \u540C\u4E00\u4EFB\u52A1\u9996\u6B21\u5524\u9192\u540E\u4FDD\u6301 Draw2Code \u4F1A\u8BDD\uFF1B\u540E\u7EED\u201C\u6539\u9996\u9875\u201D\u201C\u751F\u6210\u9875\u9762\u201D\u4E0D\u8981\u6C42\u91CD\u590D\u5524\u9192\u8BCD\u3002\n- \u201C\u6253\u5F00 Draw2Code / \u753B\u7801\u201D\u201C\u6211\u81EA\u5DF1\u753B\u4E00\u4E0B\u201D\u201C\u6211\u753B\u4E2A\u793A\u610F\u7ED9\u4F60\u201D\u7531\u72EC\u7ACB `draw2code-open` \u5FEB\u901F\u5165\u53E3\u5904\u7406\uFF0C\u53EA\u8C03\u7528\u4E00\u6B21 `draw2code_open`\uFF1A\u4E0D\u8BFB\u53D6\u672C\u5951\u7EA6\u7684\u5176\u4F59\u5DE5\u4F5C\u6D41\uFF0C\u4E0D\u8C03\u7528\u5176\u4ED6 Draw2Code \u5DE5\u5177\uFF0C\u4E0D\u8FDB\u5165\u4EE3\u8868\u9875\u590D\u6838\u6216\u8D28\u91CF\u95E8\u7981\uFF1B\u6709 active board \u5C31\u6062\u590D\uFF0C\u6CA1\u6709\u5219\u5C55\u793A\u7A7A\u72B6\u6001\u4E0E\u521B\u5EFA\u5165\u53E3\u3002\n- \u201C\u6211\u753B\u597D\u4E86\u201D\u201C\u6309\u6211\u753B\u7684\u770B\u770B\u201D\u5148\u8C03\u7528 `draw2code_read` \u8BFB\u53D6\u5F53\u524D\u53EF\u89C1\u753B\u677F\u5E76\u590D\u8FF0\u9875\u9762\u3001\u7EC4\u4EF6\u548C\u4EA4\u4E92\uFF1B\u7528\u6237\u6CA1\u6709\u8981\u6C42\u65F6\u4E0D\u81EA\u52A8\u4FEE\u6539\u6216\u751F\u6210\u3002\n\n## \u5DE5\u5177\u987A\u5E8F\n\n- \u65B0\u4EA7\u54C1\u5148\u8D70 `draw2code_create` \u7684\u53EF\u6062\u590D\u72B6\u6001\u673A\u3002`start` \u8FD4\u56DE `discovery` \u540E\uFF0CAgent \u6839\u636E\u5DF2\u660E\u786E\u4E8B\u5B9E\u3001\u5386\u53F2\u56DE\u7B54\u548C `recommendedDimensions` \u9009\u62E9\u5F53\u524D\u6700\u9AD8\u5F71\u54CD\u7684\u672A\u77E5\u9879\uFF1B\u7B2C\u4E00\u9898\u5FC5\u987B\u4F18\u5148\u91C7\u7528\u63A8\u8350\u7EF4\u5EA6\uFF0C\u4E0D\u80FD\u5148\u95EE\u6A21\u5757\u3001\u9875\u9762\u6216\u901A\u7528\u4FE1\u606F\u67B6\u6784\u3002\u666E\u901A\u5F85\u529E\u4F18\u5148\u6DF1\u6316\u89E6\u53D1\u573A\u666F\u6216\u73B0\u6709\u66FF\u4EE3\uFF0C\u96F7\u8FBE\u793E\u4EA4\u4F18\u5148\u6DF1\u6316\u4FE1\u4EFB\u4E0E\u72EC\u7279\u8FDE\u63A5\u673A\u5236\uFF0C\u7A7F\u642D\u4EA7\u54C1\u4F18\u5148\u6DF1\u6316\u63A8\u8350\u4F9D\u636E\u6216\u4F7F\u7528\u65F6\u523B\u3002\u4FE1\u606F\u4E0D\u8DB3\u65F6\u8C03\u7528 `propose_question`\uFF0C\u6BCF\u6B21\u53EA\u5C55\u793A\u4E00\u4E2A\u5E26 insight\u3001\u53D6\u820D\u8BF4\u660E\u548C\u63A8\u8350\u9879\u7684\u7ED3\u6784\u5316\u95EE\u9898\uFF1B\u4FE1\u606F\u8DB3\u591F\u6216\u7528\u6237\u8981\u6C42\u505C\u6B62\u65F6\u8C03\u7528 `synthesize`\u3002\u7981\u6B62\u56FA\u5B9A\u8BE2\u95EE\u5E73\u53F0\u3001\u7528\u6237\u3001\u76EE\u6807\u3001\u6D41\u7A0B\u3001\u6A21\u5757\u548C\u9875\u9762\uFF0C\u6700\u591A\u63D0\u95EE 10 \u6B21\u3002\n- `synthesize` \u63D0\u4EA4\u4E00\u4EFD\u7ED3\u6784\u5316 `PrototypeBrief`\uFF1B\u5DE5\u5177\u6821\u9A8C\u540E\u786E\u5B9A\u6027\u751F\u6210\u5B8C\u6574 `briefMarkdown`\u3001`pageBlueprints` \u548C `pageMockData`\u3002`ready` \u65F6\u5FC5\u987B\u5B8C\u6574\u5C55\u793A\u8BE5 Markdown\uFF0C\u4E0D\u80FD\u81EA\u884C\u7F29\u5199\uFF1B\u968F\u540E\u7528\u6700\u540E\u4E00\u5F20\u9875\u9762\u8303\u56F4\u786E\u8BA4\u5361\u660E\u786E\u5217\u51FA\u5C06\u7ED8\u5236\u7684\u9875\u9762\uFF0C\u53EA\u8FDB\u884C\u4E00\u6B21\u201C\u786E\u8BA4\u8FD9\u4E9B\u9875\u9762\u5E76\u7ED8\u5236 / \u8C03\u6574\u9875\u9762\u8303\u56F4 / \u8C03\u6574\u4EA7\u54C1\u65B9\u5411\u201D\u786E\u8BA4\u3002\n- \u6BCF\u9053\u539F\u751F\u95EE\u9898\u5361\u7247\u90FD\u4FDD\u7559\u201C\u76F4\u63A5\u6574\u7406\u9879\u76EE\u7B80\u62A5\u201D\uFF1B\u9009\u62E9\u540E\u6309 `synthesize-now` \u56DE\u7B54\uFF0C\u5DE5\u5177\u660E\u786E\u8FD4\u56DE `nextAction=synthesize`\u3002\u7528\u6237\u8DF3\u8FC7\u5F53\u524D\u95EE\u9898\u65F6\u8C03\u7528 `skip` \u5E76\u628A\u8BE5\u9879\u4FDD\u7559\u4E3A\u5F85\u9A8C\u8BC1\u5047\u8BBE\uFF1B\u5373\u4F7F\u5DF2\u6709\u5F85\u7B54\u95EE\u9898\u4E5F\u53EF\u8C03\u7528 `synthesize`\u3002`ready` \u540E\u9009\u62E9\u8C03\u6574\u65F6\u76F4\u63A5\u8C03\u7528 `propose_question` \u8FFD\u95EE\u53D7\u5F71\u54CD\u7684\u4E00\u9879\uFF0C\u65E7\u7B80\u62A5\u5931\u6548\uFF0C\u56DE\u7B54\u540E\u5FC5\u987B\u91CD\u65B0\u751F\u6210\u5B8C\u6574\u7B80\u62A5\u3002\n- Create \u8FD4\u56DE `confirmed` \u540E\uFF0C\u6309 `boardName`\u3001\u540C\u4E00\u4EFD `brief` \u548C\u7ED3\u6784\u5316 `drawingPlan` \u8C03\u7528 `draw2code_update`\u3002\u5F53 `drawingPlan.nextActionCode=write_representative` \u65F6\uFF0C\u672C\u8F6E\u53EA\u4E3A `allowedPageIds` \u751F\u6210 ops\uFF0C\u4E0D\u80FD\u9884\u5148\u6784\u9020\u5168\u90E8\u9875\u9762\u3002\u4EE3\u8868\u9875\u5199\u5165\u540E\u7B49\u5F85 Canvas \u6D88\u8D39\u8FD4\u56DE\u7684 reveal\uFF0C\u518D\u4EE5 `action=review`\u3001`reviewToken`\u3001`phase=representative`\u3001`passed=true`\u3001`inspectedPageIds` \u548C `observations` \u5355\u72EC\u8BB0\u5F55\u53EF\u89C1\u590D\u6838\uFF1Breview \u4E0D\u4F20 ops\u3001\u4E0D\u6539\u53D8 revision\u3001\u4E0D\u53D1\u5E03\u65B0 reveal\u3002\u5DE5\u5177\u8FD4\u56DE `nextActionCode=write_remaining_pages` \u540E\u624D\u751F\u6210 `remainingPageIds`\u3002\u5982\u679C Agent \u8BEF\u5728\u590D\u6838\u524D\u63D0\u4EA4\u5176\u4F59\u9875\u9762\uFF0C\u5DE5\u5177\u8FD4\u56DE `nextActionCode=review_representative` \u548C `pendingUpdateId`\uFF0C\u5E76\u4FDD\u7559\u8BE5\u6279 ops\uFF1B\u5B8C\u6210\u4EE3\u8868\u9875\u590D\u6838\u540E\u7528 `action=commit_pending` \u548C\u8BE5 ID \u63D0\u4EA4\uFF0C\u4E0D\u91CD\u65B0\u751F\u6210\u6216\u91CD\u4F20 ops\u3002\u5168\u90E8\u9875\u9762\u5B8C\u6210\u540E\u7528 `action=review`\u3001`phase=final` \u8986\u76D6\u6240\u6709 page id\u3002\u65E7 `visualReview` \u53EA\u4FDD\u7559\u517C\u5BB9\uFF1B\u65B0\u6D41\u7A0B\u4E0D\u624B\u5DE5\u62FC `rev` \u4E0E `revealRequestId`\u3002\u5DF2\u6709\u753B\u677F\u5148\u7528 `draw2code_read detail=index` \u53D6\u5F97\u9875\u9762 id\u3001`capacity`\u3001`continuation` \u548C\u4E0D\u900F\u660E ID\uFF1B\u9700\u8981\u5143\u7D20\u5185\u5BB9\u65F6\u53EA\u6309\u76EE\u6807 `pageIds`\u3001`elementIds`\u3001\u533A\u57DF\u6216 `changesSince` \u7EE7\u7EED\u8BFB\u53D6\uFF0C\u4E0D\u641C\u7D22\u4F1A\u8BDD\u5386\u53F2\uFF0C\u4E5F\u4E0D\u9ED8\u8BA4\u8BFB\u53D6\u6574\u677F\u3002\n- \u5BB9\u91CF\u5206\u4E24\u5C42\u5904\u7406\uFF1A\u5355\u6B21 ops \u8D85\u8FC7 500 \u9879\u6216 512 KiB \u65F6\u8FD4\u56DE `nextActionCode=reduce_batch_size`\uFF0C\u6309\u9875\u9762\u6216\u72EC\u7ACB\u6539\u52A8\u62C6\u6279\uFF1B\u753B\u677F\u6CA1\u6709\u65E5\u5E38\u4E1A\u52A1\u914D\u989D\uFF0C\u9ED8\u8BA4 32 MiB \u53EA\u6807\u8BB0 large\uFF0C256 MiB / 50,000 \u5143\u7D20\u662F\u53EF\u914D\u7F6E\u7684\u5F02\u5E38\u4FDD\u9669\u4E1D\u3002\u771F\u6B63\u89E6\u53D1\u4FDD\u9669\u4E1D\u65F6\u8FD4\u56DE `nextActionCode=archive_or_split_board`\uFF0C\u7F29\u5C0F\u540C\u4E00\u6539\u52A8\u6279\u6B21\u6CA1\u6709\u4F5C\u7528\u3002`capacity` \u5206\u522B\u62A5\u544A canonical\u3001persisted\u3001asset \u4E0E element \u6307\u6807\uFF0C`history` \u72EC\u7ACB\u62A5\u544A gzip checkpoint / delta \u7684\u5386\u53F2\u5360\u7528\u4E0E\u9884\u7B97\uFF1B`update.timings` \u7684\u8303\u56F4\u4EC5\u4E3A\u5DE5\u5177\u6267\u884C\uFF0C\u4E0D\u5305\u542B\u8C03\u7528\u524D\u7684 Agent \u63A8\u7406\u3002\n- \u7701\u7565 `board` / DSH \u7684 `name` \u59CB\u7EC8\u8868\u793A\u7528\u6237\u5F53\u524D\u53EF\u89C1 active board\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u70B9\u540D\u53E6\u4E00\u5757\u753B\u677F\u65F6\u624D\u663E\u5F0F\u4F20\u5165\u3002\n- MCP/Codex \u4ECE workspace \u5185\u7684\u5B50\u76EE\u5F55\u8C03\u7528\u65F6\uFF0C\u6240\u6709\u753B\u677F\u64CD\u4F5C\u7EDF\u4E00\u5F52\u5230\u5BBF\u4E3B\u6CE8\u518C\u7684 workspace root\uFF1B\u4E0D\u80FD\u56E0\u5F53\u524D cwd \u662F\u5B50\u4ED3\u5E93\u800C\u6084\u6084\u521B\u5EFA\u7B2C\u4E8C\u5957\u753B\u677F\u3002\n- Update \u8FD4\u56DE `requiresConfirmation=true` \u65F6\u505C\u6B62\u5199\u5165\u5E76\u53EA\u8BE2\u95EE\u51B2\u7A81\u8986\u76D6\uFF1B\u5F97\u5230\u786E\u8BA4\u540E\u624D\u4EE5 `force=true` \u91CD\u8BD5\u3002\u4E0D\u5F97\u76F4\u63A5\u5199 `.excalidraw.json` \u7ED5\u8FC7 CAS\u3001\u5E03\u5C40\u95E8\u7981\u548C\u56DE\u8BFB\u9A8C\u8BC1\u3002\n- Generate \u5F00\u59CB\u524D\u5148\u7528\u666E\u901A\u5BF9\u8BDD\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6709\u53C2\u8003\u98CE\u683C\u56FE\u7247\uFF0C\u4E0D\u4F7F\u7528\u5BBF\u4E3B\u9009\u62E9\u9898\uFF1B\u7528\u6237\u5DF2\u9644\u56FE\u65F6\u4E0D\u91CD\u590D\u95EE\u3002\u6709\u56FE\u5219\u67E5\u770B\u540E\u628A\u7B80\u6D01\u6458\u8981\u6216\u8DEF\u5F84\u4F20\u4E3A `referenceStyle`\uFF0C\u6CA1\u6709\u5219\u4F20 `none`\u3002\u968F\u540E\u5FC5\u987B\u6CBF\u7528\u5DE5\u5177\u8FD4\u56DE\u7684 session\u3001revision\u3001question \u4E0E confirmation\uFF1B\u7B2C\u4E00\u5F20\u7ED3\u6784\u5316\u9009\u62E9\u9898\u4ECD\u7136\u662F\u9875\u9762\u591A\u9009\uFF0C\u53EA\u6709 `status=completed` \u4E14\u9A8C\u8BC1\u8BC1\u636E\u901A\u8FC7\u540E\u624D\u80FD\u62A5\u544A\u751F\u6210\u5B8C\u6210\u3002\n\n## \u5C55\u793A\u4E0E\u5171\u540C\u7F16\u8F91\n\n- \u56FA\u5B9A\u672C\u673A\u5165\u53E3 `http://127.0.0.1:64775/` \u5FC5\u987B\u5141\u8BB8 loopback \u6D4F\u89C8\u5668\u76F4\u63A5\u8FDB\u5165\uFF0C\u5E76\u4ECE\u6301\u4E45\u5316\u767B\u8BB0\u8868\u6062\u590D\u5DE5\u4F5C\u533A\uFF1B\u4E0D\u5F97\u8981\u6C42\u7528\u6237\u5148\u4ECE Codex \u5EFA\u7ACB\u8FDE\u63A5\uFF0C\u4E5F\u4E0D\u5F97\u5C55\u793A\u201C\u753B\u7801\u5C1A\u672A\u8FDE\u63A5\u201D\u3002MCP/Codex \u7684 `draw2code_open` \u9ED8\u8BA4\u4F7F\u7528 `presentation=handoff`\uFF0C\u4E0D\u6CE8\u518C\u9759\u6001 `openai/outputTemplate`\uFF0C\u4E5F\u4E0D\u628A\u52A8\u6001 localhost \u753B\u677F\u5957\u8FDB MCP App iframe\u3002\u5DE5\u5177\u4ECD\u53EF\u8FD4\u56DE\u77ED\u671F\u5B9A\u5411\u8FDE\u63A5 URL \u548C `displayState=handoff-ready`\uFF0C\u4EC5\u7528\u4E8E\u628A\u5F53\u524D\u4EFB\u52A1\u7684 workspace/board \u9694\u79BB\u7ED1\u5B9A\u5230\u5F53\u524D\u6807\u7B7E\u9875\uFF1B\u8FDE\u63A5\u6210\u529F\u540E\u5FC5\u987B\u7ACB\u523B\u91CD\u5B9A\u5411\u5230\u4E0D\u542B root\u3001board\u3001token \u6216 code \u7684\u5E72\u51C0\u6839\u5730\u5740\u3002`auto` \u4E0E `inline` \u4EC5\u4F5C\u4E3A\u517C\u5BB9\u522B\u540D\uFF0C\u540C\u6837\u56DE\u9000\u5230 handoff\u3002\u53EA\u6709\u7528\u6237\u660E\u786E\u8981\u6C42\u5916\u90E8\u6D4F\u89C8\u5668\u65F6\u624D\u4F7F\u7528 `presentation=browser`\u3002\n- \u5BBF\u4E3B\u8D1F\u8D23\u628A handoff URL \u5BFC\u822A\u5230\u81EA\u5DF1\u7684\u4FA7\u8FB9\u680F\u6216\u6D4F\u89C8\u5668\u5E76\u9A8C\u8BC1\u53EF\u89C1\u6027\u3002\u5355\u7EAF\u5BFC\u822A\u4F18\u5148\u4F7F\u7528\u5BBF\u4E3B\u539F\u751F\u80FD\u529B\uFF0C\u4E0D\u4E3A\u6B64\u521D\u59CB\u5316\u901A\u7528\u6D4F\u89C8\u5668\u81EA\u52A8\u5316\uFF1B\u53EA\u6709\u9700\u8981 DOM\u3001\u63A7\u5236\u53F0\u6216\u4EA4\u4E92\u8BC1\u636E\u65F6\u624D\u63A5\u7BA1\u6D4F\u89C8\u5668\u3002\u53EA\u6709\u753B\u5E03\u771F\u6B63\u53EF\u89C1\u540E\uFF0CAgent \u624D\u80FD\u62A5\u544A\u201C\u5DF2\u6253\u5F00\u201D\uFF1B\u4E0D\u80FD\u628A URL \u5C31\u7EEA\u6216 daemon \u542F\u52A8\u6210\u529F\u5F53\u4F5C\u53EF\u89C1\u6027\u8BC1\u636E\u3002\u82E5\u672A\u6765\u9700\u8981\u5BF9\u8BDD\u5185\u5D4C\u753B\u677F\uFF0C\u5FC5\u987B\u5355\u72EC\u5B9E\u73B0\u76F4\u63A5\u8FD0\u884C Canvas \u7684 MCP App\uFF0C\u4E0D\u80FD\u6062\u590D\u52A8\u6001 localhost iframe \u58F3\u3002\n- \u540C\u4E00 workspace \u7684\u5916\u90E8\u6D4F\u89C8\u5668\u53EA\u9996\u6B21\u6253\u5F00\u4E00\u6B21\uFF1B\u540E\u7EED\u590D\u7528\u56FA\u5B9A\u7F51\u5173\u6839\u5730\u5740\u7684\u73B0\u6709\u6807\u7B7E\u9875\u5E76\u4F9D\u9760\u4E8B\u4EF6\u5237\u65B0\uFF0C\u4E0D\u80FD\u53CD\u590D\u62A2\u7126\u70B9\u3002\u52A8\u6001 worker \u6216\u56FA\u5B9A\u7F51\u5173\u91CD\u542F\u4E0D\u5F97\u6539\u53D8\u8FD9\u4E2A\u5730\u5740\uFF1B\u5237\u65B0\u6839\u5730\u5740\u5FC5\u987B\u81EA\u52A8\u91CD\u5EFA\u5185\u90E8\u4F1A\u8BDD\u5E76\u6062\u590D\u5DF2\u767B\u8BB0\u5DE5\u4F5C\u533A\u3002`localhost` \u5FC5\u987B\u89C4\u8303\u91CD\u5B9A\u5411\u5230 `127.0.0.1`\uFF0C\u7AEF\u53E3\u51B2\u7A81\u5FC5\u987B\u660E\u786E\u62A5\u9519\u4E14\u4E0D\u5F97\u9759\u9ED8\u6362\u7AEF\u53E3\u3002\n- `verified=true` / `writeVerified=true` \u53EA\u8BC1\u660E\u76EE\u6807\u753B\u677F\u5199\u76D8\u5E76\u56DE\u8BFB\uFF0C\u4E0D\u4EE3\u8868\u539F\u578B\u5DF2\u7ECF\u5B8C\u6210\u3002\u6210\u529F write \u4F1A\u628A\u76EE\u6807\u8BBE\u4E3A active board\u3001\u53D1\u5E03\u5E26\u76EE\u6807 revision \u7684 reveal request\u3001\u8FD4\u56DE\u4E0D\u900F\u660E `reviewToken` \u5E76\u81EA\u52A8\u6253\u5F00\u753B\u7801\uFF1BCanvas \u5B9E\u9645\u52A0\u8F7D\u5230\u540C\u4E00 board + revision \u540E\u624D\u56DE\u4F20\u6D88\u8D39\u786E\u8BA4\u3002`action=review` \u53EA\u8BB0\u5F55\u8BE5\u53EF\u89C1\u7248\u672C\u7684 review receipt\uFF0C\u8FD4\u56DE `reviewVerified=true`\uFF0C\u4E0D\u4F1A\u5199\u753B\u677F\u6216\u53D1\u5E03\u65B0 reveal\uFF1B\u91CD\u590D\u63D0\u4EA4\u540C\u4E00 token \u662F\u5E42\u7B49\u7684\u3002\u53EA\u6709 final review \u8FD4\u56DE `completionReady=true` \u624D\u8BF4\u660E\u6700\u7EC8\u89C6\u89C9\u590D\u6838\u5DF2\u8986\u76D6\u5168\u90E8\u9875\u9762\uFF0C\u5373\u4F7F\u5982\u6B64\uFF0C\u4ECD\u5E94\u628A `prototypeQuality.warnings` \u4F5C\u4E3A\u7EE7\u7EED\u6253\u78E8\u4F9D\u636E\u3002\n- \u7528\u6237\u62D6\u52A8\u4EA7\u751F\u7684 scene write \u4E0E Agent update \u90FD\u901A\u8FC7 daemon\uFF1BWebSocket \u662F\u4E3B\u901A\u77E5\u901A\u9053\uFF0Crevision polling \u662F\u65AD\u7EBF\u964D\u7EA7\u3002\n- \u72EC\u7ACB\u753B\u7801\u53EF\u4EE5\u5217\u51FA\u5F53\u524D workspace \u548C\u672C\u673A\u5DF2\u7531\u5BBF\u4E3B\u660E\u786E\u6CE8\u518C\u3001\u6301\u4E45\u5316\u4E14\u786E\u5B9E\u542B\u6709\u753B\u677F\u7684\u5176\u4ED6 workspace\uFF1B\u63D2\u4EF6\u7F13\u5B58\u548C\u7A7A root \u4E0D\u8FDB\u5165\u5207\u6362\u83DC\u5355\u3002\u5207\u6362\u524D\u5FC5\u987B\u5148\u843D\u76D8\u5F53\u524D\u5F85\u4FDD\u5B58\u7F16\u8F91\uFF0C\u518D\u7528\u5F53\u524D\u77ED\u671F\u4F1A\u8BDD\u6362\u53D6\u76EE\u6807 root \u7684\u65B0 workspace-scoped token\u3002\u65E7 token \u4E0D\u80FD\u76F4\u63A5\u8BBF\u95EE\u76EE\u6807 root\uFF0CAgent \u5DE5\u5177\u9ED8\u8BA4\u8303\u56F4\u4E5F\u4E0D\u80FD\u56E0\u4E3A UI \u5207\u6362\u800C\u6269\u5927\u3002\n\n## \u6570\u636E\u4E0E\u5B89\u5168\n\n- \u539F\u4F4D\u4F7F\u7528 `draw2code/`\u3001`.active-board.json`\u3001`.projects/`\u3001`.generations/`\u3001`.generate-settings/` \u4E0E `draw2code-pages/`\uFF0C\u4E0D\u5F97\u590D\u5236\u3001\u5BFC\u5165\u6216\u4E3B\u52A8\u8FC1\u79FB\u65E7\u6570\u636E\u3002\n- \u6240\u6709 root \u90FD\u5FC5\u987B realpath \u540E\u843D\u5728 HostContext \u6CE8\u518C workspace \u5185\u3002\u56FA\u5B9A\u7F51\u5173\u548C\u52A8\u6001 worker \u53EA\u76D1\u542C loopback\uFF1B\u76F4\u63A5\u8BBF\u95EE\u56FA\u5B9A\u5165\u53E3\u65F6\uFF0C\u7F51\u5173\u81EA\u52A8\u5EFA\u7ACB\u5185\u90E8 `HttpOnly`\u3001`SameSite=Strict` Cookie\uFF0C\u5E76\u5411\u9875\u9762\u6CE8\u5165\u540C\u6E90 CSRF token\uFF0C\u6240\u6709\u5199\u8BF7\u6C42\u5FC5\u987B\u540C\u65F6\u901A\u8FC7 Origin/Host \u4E0E CSRF \u6821\u9A8C\u3002\u4E00\u6B21\u6027\u8FDE\u63A5\u7801\u53EA\u7528\u4E8E Codex \u4EFB\u52A1/\u6807\u7B7E\u9875\u7684\u5B9A\u5411\u9694\u79BB\uFF0C\u77ED\u65F6\u8FC7\u671F\u4E14\u53EA\u80FD\u4F7F\u7528\u4E00\u6B21\u3002\u4E3B bearer \u4E0E workspace grant \u90FD\u4E0D\u8FDB\u5165\u9875\u9762\u6216\u6700\u7EC8 URL\uFF1B\u7F51\u5173\u4EE3\u8868\u5DF2\u6388\u6743\u6D4F\u89C8\u5668\u7BA1\u7406\u5F53\u524D workspace\uFF0C\u5E76\u5728\u5207\u6362\u5230\u5DF2\u767B\u8BB0 workspace \u65F6\u5237\u65B0\u5185\u90E8 grant\u3002\n- \u4E0D\u4E0A\u4F20\u753B\u677F\u3001brief\u3001\u9875\u9762\u6216\u9A8C\u8BC1\u8BC1\u636E\u3002\u5355\u753B\u677F\u5143\u7D20\u6570\u3001UTF-8 byte \u4E0A\u9650\u3001\u5386\u53F2\u7248\u672C\u4E0E\u751F\u6210\u8BC1\u636E\u95E8\u7981\u4FDD\u6301\u6709\u6548\u3002\n- \u4E0D\u9012\u5F52\u626B\u63CF\u6574\u53F0\u7535\u8111\u5BFB\u627E workspace\uFF0C\u4E5F\u4E0D\u81EA\u52A8\u590D\u5236\u3001\u5408\u5E76\u6216\u8FC1\u79FB\u4E0D\u540C root \u7684\u753B\u677F\uFF1B\u65B0\u6253\u5F00\u7684\u753B\u7801\u53EA\u83B7\u5F97\u6253\u5F00\u5F53\u65F6\u5DF2\u6CE8\u518C workspace \u7684\u5FEB\u7167\u3002\n";
 
 // src/guidance.ts
 var SECTION_ORDER = 220;
@@ -6486,8 +6486,15 @@ var DRAW2CODE_GUIDANCE = [
 // src/daemon-client.ts
 import { execFile, spawn } from "node:child_process";
 import { open as open2, mkdir as mkdir4, readFile as readFile4, rm as rm2, stat as stat4 } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname as dirname2, join as join3 } from "node:path";
+
+// src/gateway-contract.ts
+var DEFAULT_GATEWAY_PORT = 64775;
+var GATEWAY_SESSION_COOKIE = "draw2code_session";
+var GATEWAY_SESSION_TTL_MS = 30 * 24 * 60 * 6e4;
+var GATEWAY_BOOTSTRAP_TTL_MS = 6e4;
 
 // src/runtime.ts
 import { randomBytes } from "node:crypto";
@@ -6681,9 +6688,12 @@ function daemonRuntimeDir() {
 function daemonDescriptorPath() {
   return process.env.DRAW2CODE_DESCRIPTOR_PATH ?? join3(daemonRuntimeDir(), "daemon.json");
 }
-async function healthy(descriptor) {
+function gatewayDescriptorPath() {
+  return process.env.DRAW2CODE_GATEWAY_DESCRIPTOR_PATH ?? join3(daemonRuntimeDir(), "gateway.json");
+}
+async function healthyAt(descriptor, path) {
   try {
-    const response = await fetch(`http://127.0.0.1:${descriptor.port}/health`, {
+    const response = await fetch(`http://127.0.0.1:${descriptor.port}${path}`, {
       headers: { authorization: `Bearer ${descriptor.token}` },
       signal: AbortSignal.timeout(800)
     });
@@ -6693,14 +6703,27 @@ async function healthy(descriptor) {
     return false;
   }
 }
-async function waitForDescriptor(path, timeoutMs) {
+async function portIsOccupied(port) {
+  return await new Promise((resolve3) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const finish = (occupied) => {
+      socket.destroy();
+      resolve3(occupied);
+    };
+    socket.setTimeout(300);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
+  });
+}
+async function waitForDescriptor(path, timeoutMs, healthPath) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const descriptor = await validateDaemonDescriptor(path);
-    if (descriptor !== null && await healthy(descriptor)) return descriptor;
+    if (descriptor !== null && await healthyAt(descriptor, healthPath)) return descriptor;
     await new Promise((resolve3) => setTimeout(resolve3, 50));
   }
-  throw new Error("draw2code daemon did not become healthy");
+  throw new Error(`draw2code ${healthPath === "/health" ? "daemon" : "gateway"} did not become healthy`);
 }
 async function staleStartupLock(path) {
   try {
@@ -6725,47 +6748,82 @@ async function staleStartupLock(path) {
     return false;
   }
 }
+async function ensureDetachedProcess(options) {
+  const current = await validateDaemonDescriptor(options.descriptorPath);
+  if (current !== null && await healthyAt(current, options.healthPath)) return current;
+  await mkdir4(dirname2(options.descriptorPath), { recursive: true, mode: 448 });
+  await rm2(options.descriptorPath, { force: true });
+  const lockPath = `${options.descriptorPath}.lock`;
+  while (true) {
+    let lock = null;
+    try {
+      lock = await open2(lockPath, "wx", 384);
+      await lock.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}
+`);
+      const child = spawn(process.execPath, [options.entry], {
+        detached: true,
+        stdio: "ignore",
+        env: options.env
+      });
+      child.unref();
+      return await waitForDescriptor(options.descriptorPath, 8e3, options.healthPath);
+    } catch (error2) {
+      if (error2.code !== "EEXIST") throw error2;
+      if (await staleStartupLock(lockPath)) {
+        await rm2(lockPath, { force: true });
+        continue;
+      }
+    } finally {
+      await lock?.close();
+      if (lock !== null) await rm2(lockPath, { force: true });
+    }
+    return waitForDescriptor(options.descriptorPath, 8e3, options.healthPath);
+  }
+}
+async function ensureDaemonProcess(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
+  return await ensureDetachedProcess({
+    descriptorPath,
+    healthPath: "/health",
+    entry: daemonEntry,
+    env: {
+      ...process.env,
+      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+      DRAW2CODE_CANVAS_HTML: canvasHtmlPath
+    }
+  });
+}
 var Draw2CodeDaemonClient = class {
-  constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath()) {
+  constructor(daemonEntry, canvasHtmlPath, descriptorPath = daemonDescriptorPath(), gatewayEntry = join3(dirname2(daemonEntry), "draw2code-gateway.js"), gatewayPath = gatewayDescriptorPath()) {
     this.daemonEntry = daemonEntry;
     this.canvasHtmlPath = canvasHtmlPath;
     this.descriptorPath = descriptorPath;
+    this.gatewayEntry = gatewayEntry;
+    this.gatewayPath = gatewayPath;
   }
   async ensure() {
-    const current = await validateDaemonDescriptor(this.descriptorPath);
-    if (current !== null && await healthy(current)) return current;
-    await mkdir4(dirname2(this.descriptorPath), { recursive: true, mode: 448 });
-    await rm2(this.descriptorPath, { force: true });
-    const lockPath = `${this.descriptorPath}.lock`;
-    while (true) {
-      let lock = null;
-      try {
-        lock = await open2(lockPath, "wx", 384);
-        await lock.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}
-`);
-        const child = spawn(process.execPath, [this.daemonEntry], {
-          detached: true,
-          stdio: "ignore",
-          env: {
-            ...process.env,
-            DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
-            DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
-          }
-        });
-        child.unref();
-        return await waitForDescriptor(this.descriptorPath, 8e3);
-      } catch (error2) {
-        if (error2.code !== "EEXIST") throw error2;
-        if (await staleStartupLock(lockPath)) {
-          await rm2(lockPath, { force: true });
-          continue;
-        }
-      } finally {
-        await lock?.close();
-        if (lock !== null) await rm2(lockPath, { force: true });
-      }
-      return waitForDescriptor(this.descriptorPath, 8e3);
+    return await ensureDaemonProcess(this.daemonEntry, this.canvasHtmlPath, this.descriptorPath);
+  }
+  async ensureGateway() {
+    const configuredPort = Number(process.env.DRAW2CODE_GATEWAY_PORT);
+    const port = Number.isInteger(configuredPort) && configuredPort >= 0 && configuredPort <= 65535 ? configuredPort : DEFAULT_GATEWAY_PORT;
+    const current = await validateDaemonDescriptor(this.gatewayPath);
+    if (current !== null && await healthyAt(current, "/gateway-health")) return current;
+    if (port > 0 && await portIsOccupied(port)) {
+      throw new Error(`draw2code gateway port ${port} is already in use; stop the conflicting service or set DRAW2CODE_GATEWAY_PORT`);
     }
+    return await ensureDetachedProcess({
+      descriptorPath: this.gatewayPath,
+      healthPath: "/gateway-health",
+      entry: this.gatewayEntry,
+      env: {
+        ...process.env,
+        DRAW2CODE_GATEWAY_DESCRIPTOR_PATH: this.gatewayPath,
+        DRAW2CODE_GATEWAY_PORT: String(port),
+        DRAW2CODE_DESCRIPTOR_PATH: this.descriptorPath,
+        DRAW2CODE_DAEMON_ENTRY: this.daemonEntry,
+        DRAW2CODE_CANVAS_HTML: this.canvasHtmlPath
+      }
+    });
   }
   async execute(command, context) {
     const descriptor = await this.ensure();
@@ -6812,6 +6870,20 @@ var Draw2CodeDaemonClient = class {
       throw new Error(body.error?.message ?? "failed to create canvas URL");
     }
     return { url: body.url, token: body.token, expiresAt: body.expiresAt };
+  }
+  async stableCanvas(root, board, context) {
+    await this.ensure();
+    const gateway = await this.ensureGateway();
+    const response = await fetch(`http://127.0.0.1:${gateway.port}/bootstrap-code`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${gateway.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ root, board, context })
+    });
+    const body = await response.json();
+    if (!response.ok || body.ok !== true || body.url === void 0 || body.expiresAt === void 0) {
+      throw new Error(body.error?.message ?? "failed to create stable canvas URL");
+    }
+    return { url: body.url, expiresAt: body.expiresAt };
   }
   async openBrowser(url) {
     const launcher = process.platform === "darwin" ? { command: "/usr/bin/open", args: [url] } : process.platform === "linux" ? { command: "xdg-open", args: [url] } : process.platform === "win32" ? { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : null;
@@ -7296,6 +7368,584 @@ function makeRoutes(store) {
   ];
 }
 
+// src/gateway-server.ts
+import { randomBytes as randomBytes2 } from "node:crypto";
+import { createServer } from "node:http";
+import { chmod as chmod2, mkdir as mkdir6, readFile as readFile6, readdir as readdir3, realpath as realpath6, rename as rename5, rm as rm3, writeFile as writeFile6 } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
+import { dirname as dirname4, join as join5 } from "node:path";
+import { URL as URL2 } from "node:url";
+import WebSocket, { WebSocketServer } from "ws";
+
+// src/workspace-registry.ts
+import { chmod, mkdir as mkdir5, readFile as readFile5, realpath as realpath5, rename as rename4, writeFile as writeFile5 } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname as dirname3, join as join4 } from "node:path";
+function defaultWorkspaceRegistryPath() {
+  return process.env.DRAW2CODE_WORKSPACE_REGISTRY_PATH ?? join4(homedir(), ".draw2code", "workspaces.json");
+}
+function isWorkspacePickerCandidate(path) {
+  return !/\/\.codex\/plugins\/cache(?:\/|$)/.test(path.replaceAll("\\", "/"));
+}
+var WorkspaceRegistry = class {
+  constructor(path = defaultWorkspaceRegistryPath()) {
+    this.path = path;
+  }
+  writeQueue = Promise.resolve();
+  async read() {
+    let value;
+    try {
+      value = JSON.parse(await readFile5(this.path, "utf8"));
+    } catch {
+      return [];
+    }
+    if (typeof value !== "object" || value === null || !Array.isArray(value.workspaces)) return [];
+    const rows = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const candidate of value.workspaces ?? []) {
+      if (typeof candidate?.path !== "string") continue;
+      let canonical;
+      try {
+        canonical = await realpath5(candidate.path);
+      } catch {
+        continue;
+      }
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      rows.push({
+        path: canonical,
+        registeredAt: Number.isFinite(candidate.registeredAt) ? candidate.registeredAt : Date.now(),
+        lastUsedAt: Number.isFinite(candidate.lastUsedAt) ? candidate.lastUsedAt : Date.now()
+      });
+    }
+    return rows;
+  }
+  async list() {
+    return await this.read();
+  }
+  async register(path) {
+    const canonical = await realpath5(path);
+    const task = this.writeQueue.then(async () => {
+      const now2 = Date.now();
+      const rows = await this.read();
+      const existing = rows.find((row) => row.path === canonical);
+      if (existing === void 0) rows.push({ path: canonical, registeredAt: now2, lastUsedAt: now2 });
+      else existing.lastUsedAt = now2;
+      rows.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
+      await mkdir5(dirname3(this.path), { recursive: true, mode: 448 });
+      const temporary = `${this.path}.tmp-${process.pid}-${now2}`;
+      await writeFile5(temporary, `${JSON.stringify({ version: 1, workspaces: rows }, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+      await rename4(temporary, this.path);
+      await chmod(this.path, 384);
+    });
+    this.writeQueue = task.catch(() => void 0);
+    await task;
+    return canonical;
+  }
+};
+
+// src/gateway-server.ts
+var MAX_CONTROL_BODY_BYTES3 = 2 * 1024 * 1024;
+var LARGE_BODY_PATHS2 = /* @__PURE__ */ new Set(["/api/draw2code/scene/write", "/api/draw2code/export"]);
+function writeJson2(res, status, body) {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+function randomToken2(bytes = 24) {
+  return randomBytes2(bytes).toString("base64url");
+}
+function safeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let result = 0;
+  for (let index = 0; index < left.length; index += 1) result |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return result === 0;
+}
+function bearer(req) {
+  const value = req.headers.authorization;
+  return typeof value === "string" && value.startsWith("Bearer ") ? value.slice(7) : null;
+}
+function loopbackSameOrigin(req) {
+  const address = req.socket.remoteAddress;
+  if (address !== "127.0.0.1" && address !== "::1" && address !== "::ffff:127.0.0.1") return false;
+  const host = req.headers.host;
+  if (typeof host !== "string") return false;
+  let hostUrl;
+  try {
+    hostUrl = new URL2(`http://${host}`);
+  } catch {
+    return false;
+  }
+  if (hostUrl.hostname !== "127.0.0.1" && hostUrl.hostname !== "localhost" && hostUrl.hostname !== "[::1]") return false;
+  if (req.headers["sec-fetch-site"] === "cross-site") return false;
+  const origin = req.headers.origin;
+  if (origin === void 0) return true;
+  try {
+    return new URL2(origin).host === hostUrl.host;
+  } catch {
+    return false;
+  }
+}
+function cookie(req, name2) {
+  const header = req.headers.cookie;
+  if (typeof header !== "string") return null;
+  for (const part of header.split(";")) {
+    const [key, ...value] = part.trim().split("=");
+    if (key === name2) return value.join("=") || null;
+  }
+  return null;
+}
+async function bodyBuffer2(req, maxBytes = MAX_CONTROL_BODY_BYTES3) {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "DELETE") return void 0;
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) throw new Error("request body too large");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+function parsedBody(body) {
+  if (body === void 0 || body.length === 0) return {};
+  const value = JSON.parse(body.toString("utf8"));
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("request body must be an object");
+  return value;
+}
+function requestRoot(req, body) {
+  const queryRoot = new URL2(req.url ?? "/", "http://localhost").searchParams.get("root");
+  if (queryRoot !== null) return queryRoot;
+  return typeof body.root === "string" ? body.root : null;
+}
+function emptyWorkspacePage() {
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Draw2Code / \u753B\u7801</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f6f8;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(420px,calc(100vw - 48px));padding:32px;border:1px solid #e5e7eb;border-radius:18px;background:#fff;box-shadow:0 18px 50px rgba(15,23,42,.08)}h1{margin:0 0 12px;font-size:24px}p{margin:0;color:#64748b;line-height:1.65}</style></head><body><main class="card"><h1>\u8FD8\u6CA1\u6709\u753B\u7801\u5DE5\u4F5C\u533A</h1><p>\u8BF7\u5148\u901A\u8FC7\u4EFB\u4E00\u652F\u6301 Draw2Code \u7684\u672C\u673A\u5DE5\u5177\u767B\u8BB0\u5DE5\u4F5C\u533A\u3002\u767B\u8BB0\u540E\u5237\u65B0\u6B64\u9875\u5373\u53EF\u76F4\u63A5\u8FDB\u5165\u3002</p></main></body></html>';
+}
+function canvasHtml(source, session) {
+  const config = JSON.stringify({
+    root: session.root,
+    board: session.board,
+    viewId: session.context.clientId,
+    csrfToken: session.csrfToken
+  }).replaceAll("<", "\\u003c");
+  const script = `<script>window.__DRAW2CODE_BOOTSTRAP__=${config}</script>`;
+  return source.includes("<body>") ? source.replace("<body>", `<body>${script}`) : `${script}${source}`;
+}
+async function startGateway(options) {
+  const sessions = /* @__PURE__ */ new Map();
+  const bootstraps = /* @__PURE__ */ new Map();
+  const sessionTtlMs = options.sessionTtlMs ?? GATEWAY_SESSION_TTL_MS;
+  const bootstrapTtlMs = options.bootstrapTtlMs ?? GATEWAY_BOOTSTRAP_TTL_MS;
+  const maxSceneBodyBytes = sceneRequestBodyLimitBytes();
+  const workspaceRegistryPath = options.workspaceRegistryPath ?? defaultWorkspaceRegistryPath();
+  const workspaceRegistry = new WorkspaceRegistry(workspaceRegistryPath);
+  const statePath = options.statePath ?? join5(dirname4(workspaceRegistryPath), "gateway-state.json");
+  let descriptor;
+  let closing = false;
+  const readSelection = async () => {
+    try {
+      const value = JSON.parse(await readFile6(statePath, "utf8"));
+      if (typeof value.root !== "string" || typeof value.clientId !== "string") return null;
+      const root = await realpath6(value.root);
+      const registered = await workspaceRegistry.list();
+      if (!registered.some((row) => row.path === root) || !isWorkspacePickerCandidate(root)) return null;
+      return {
+        root,
+        board: typeof value.board === "string" ? value.board : null,
+        clientId: value.clientId,
+        updatedAt: Number.isFinite(value.updatedAt) ? Number(value.updatedAt) : 0
+      };
+    } catch {
+      return null;
+    }
+  };
+  const writeSelection = async (selection) => {
+    await mkdir6(dirname4(statePath), { recursive: true, mode: 448 });
+    const temporary = `${statePath}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile6(temporary, `${JSON.stringify({ version: 1, ...selection }, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+    await rename5(temporary, statePath);
+    await chmod2(statePath, 384);
+  };
+  const hasBoard = async (root) => {
+    try {
+      return (await readdir3(join5(root, "draw2code"))).some((name2) => name2.endsWith(".excalidraw.json"));
+    } catch {
+      return false;
+    }
+  };
+  const fallbackSelection = async () => {
+    const rows = (await workspaceRegistry.list()).filter((row) => isWorkspacePickerCandidate(row.path));
+    if (rows.length === 0) return null;
+    let temporaryRoot = null;
+    try {
+      temporaryRoot = await realpath6(tmpdir2());
+    } catch {
+    }
+    const withBoards = [];
+    for (const row of rows) if (await hasBoard(row.path)) withBoards.push(row);
+    const candidates = withBoards.length > 0 ? withBoards : rows;
+    const selected = candidates.find((row) => temporaryRoot === null || !isPathInside(temporaryRoot, row.path)) ?? candidates[0];
+    const selection = {
+      root: selected.path,
+      board: null,
+      clientId: `gateway-browser-${randomToken2(12)}`,
+      updatedAt: Date.now()
+    };
+    await writeSelection(selection);
+    return selection;
+  };
+  const selectedWorkspace = async () => await readSelection() ?? fallbackSelection();
+  const workerFetch = async (worker, path, init = {}) => await fetch(
+    `http://127.0.0.1:${worker.port}${path}`,
+    { ...init, headers: { ...Object.fromEntries(new Headers(init.headers).entries()), authorization: `Bearer ${worker.token}` } }
+  );
+  const issueWorkerGrant = async (session) => {
+    const worker = await options.ensureWorker();
+    const response = await workerFetch(worker, "/canvas-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        root: session.root,
+        board: session.board,
+        context: { ...session.context, workspaceRoot: session.root }
+      })
+    });
+    const body = await response.json();
+    if (!response.ok || body.ok !== true || body.token === void 0 || body.expiresAt === void 0) {
+      throw new Error(body.error?.message ?? "worker did not issue a canvas grant");
+    }
+    const grant = { nonce: worker.nonce, token: body.token, expiresAt: body.expiresAt, root: session.root };
+    session.workerGrant = grant;
+    return grant;
+  };
+  const ensureWorkerGrant = async (session) => {
+    const worker = await options.ensureWorker();
+    const current = session.workerGrant;
+    if (current !== void 0 && current.nonce === worker.nonce && current.root === session.root && current.expiresAt > Date.now()) {
+      return { worker, grant: current };
+    }
+    return { worker, grant: await issueWorkerGrant(session) };
+  };
+  const refreshAllowedRoots = async (session) => {
+    const { worker, grant } = await ensureWorkerGrant(session);
+    const response = await fetch(`http://127.0.0.1:${worker.port}/canvas-workspaces?root=${encodeURIComponent(session.root)}`, {
+      headers: { authorization: `Bearer ${grant.token}` }
+    });
+    if (!response.ok) return;
+    const listed = await response.json();
+    session.allowedRoots = (listed.workspaces ?? []).map((row) => row.root).filter((root) => typeof root === "string");
+    if (!session.allowedRoots.includes(session.root)) session.allowedRoots.unshift(session.root);
+  };
+  const createSession = async (selection, context) => {
+    const session = {
+      root: selection.root,
+      board: selection.board,
+      context: context ?? {
+        clientId: selection.clientId,
+        host: "mcp",
+        workspaceRoot: selection.root,
+        interactive: true,
+        uiCapabilities: { mcpUi: false, externalBrowser: true }
+      },
+      allowedRoots: [selection.root],
+      csrfToken: randomToken2(24),
+      selectionUpdatedAt: selection.updatedAt,
+      expiresAt: Date.now() + sessionTtlMs
+    };
+    await refreshAllowedRoots(session);
+    return session;
+  };
+  const sessionFor = (req) => {
+    const id = cookie(req, GATEWAY_SESSION_COOKIE);
+    if (id === null) return null;
+    const session = sessions.get(id);
+    if (session === void 0 || session.expiresAt < Date.now()) {
+      sessions.delete(id);
+      return null;
+    }
+    session.expiresAt = Date.now() + sessionTtlMs;
+    return session;
+  };
+  const csrfMatches = (req, session) => {
+    const value = req.headers["x-draw2code-csrf"];
+    return typeof value === "string" && safeEqual(value, session.csrfToken);
+  };
+  const canonicalRedirect = (req, url2) => {
+    const host = req.headers.host;
+    if (typeof host !== "string") return null;
+    let parsed;
+    try {
+      parsed = new URL2(`http://${host}`);
+    } catch {
+      return null;
+    }
+    if (parsed.hostname !== "localhost" && parsed.hostname !== "[::1]") return null;
+    return new URL2(`${url2.pathname}${url2.search}`, `http://127.0.0.1:${descriptor.port}`).toString();
+  };
+  const server = createServer(async (req, res) => {
+    if (!loopbackSameOrigin(req)) {
+      writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "same-origin loopback only" } });
+      return;
+    }
+    const url2 = new URL2(req.url ?? "/", "http://localhost");
+    const redirect = canonicalRedirect(req, url2);
+    if (redirect !== null) {
+      res.writeHead(308, { location: redirect, "cache-control": "no-store" });
+      res.end();
+      return;
+    }
+    if (url2.pathname === "/gateway-health") {
+      if (!safeEqual(bearer(req) ?? "", descriptor.token)) {
+        writeJson2(res, 401, { ok: false, error: { code: "unauthorized", message: "invalid bearer token" } });
+        return;
+      }
+      writeJson2(res, 200, { ok: true, pid: process.pid, nonce: descriptor.nonce });
+      return;
+    }
+    if (url2.pathname === "/bootstrap-code" && req.method === "POST") {
+      if (!safeEqual(bearer(req) ?? "", descriptor.token)) {
+        writeJson2(res, 401, { ok: false, error: { code: "unauthorized", message: "invalid bearer token" } });
+        return;
+      }
+      try {
+        const body = parsedBody(await bodyBuffer2(req));
+        const context = body.context;
+        const root = await realpath6(String(body.root ?? ""));
+        const workspaceRoot = await realpath6(context?.workspaceRoot ?? "");
+        if (!isPathInside(workspaceRoot, root) || typeof context?.clientId !== "string") throw new Error("root is outside the host workspace");
+        const code = randomToken2();
+        const expiresAt = Date.now() + bootstrapTtlMs;
+        bootstraps.set(code, { root, board: typeof body.board === "string" ? body.board : null, context, expiresAt });
+        const bootstrapUrl = `http://127.0.0.1:${descriptor.port}/bootstrap?code=${encodeURIComponent(code)}`;
+        writeJson2(res, 200, { ok: true, url: bootstrapUrl, expiresAt });
+      } catch {
+        writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: "workspace is invalid or outside the host workspace" } });
+      }
+      return;
+    }
+    if (url2.pathname === "/bootstrap" && req.method === "GET") {
+      const code = url2.searchParams.get("code");
+      const pending = code === null ? void 0 : bootstraps.get(code);
+      if (code !== null) bootstraps.delete(code);
+      if (pending === void 0 || pending.expiresAt < Date.now()) {
+        writeJson2(res, 410, { ok: false, error: { code: "bootstrap-expired", message: "connection link is invalid or already used" } });
+        return;
+      }
+      try {
+        const selection = { root: pending.root, board: pending.board, clientId: pending.context.clientId, updatedAt: Date.now() };
+        const session2 = await createSession(selection, pending.context);
+        await writeSelection(selection);
+        const id = randomToken2(32);
+        sessions.set(id, session2);
+        res.writeHead(302, {
+          location: "/",
+          "cache-control": "no-store",
+          "set-cookie": `${GATEWAY_SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1e3)}`
+        });
+        res.end();
+      } catch {
+        writeJson2(res, 503, { ok: false, error: { code: "worker-unavailable", message: "\u753B\u7801\u540E\u53F0\u5C1A\u672A\u5C31\u7EEA\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5" } });
+      }
+      return;
+    }
+    if (url2.pathname === "/" && req.method === "GET") {
+      let session2 = sessionFor(req);
+      let sessionId = null;
+      const selection = await selectedWorkspace();
+      if (selection === null) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(emptyWorkspacePage());
+        return;
+      }
+      try {
+        if (session2 === null || selection.updatedAt > session2.selectionUpdatedAt) {
+          session2 = await createSession(selection);
+          sessionId = randomToken2(32);
+          sessions.set(sessionId, session2);
+        }
+        await ensureWorkerGrant(session2);
+        const html = canvasHtml(await readFile6(options.canvasHtmlPath, "utf8"), session2);
+        session2.board = null;
+        res.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "content-security-policy": "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self' ws:; img-src 'self' data: blob:",
+          ...sessionId === null ? {} : { "set-cookie": `${GATEWAY_SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1e3)}` }
+        });
+        res.end(html);
+      } catch {
+        res.writeHead(503, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>\u753B\u7801\u6B63\u5728\u8FDE\u63A5</title><body><p>\u753B\u7801\u540E\u53F0\u6B63\u5728\u542F\u52A8\uFF0C\u8BF7\u7A0D\u540E\u5237\u65B0\u3002</p></body></html>');
+      }
+      return;
+    }
+    const session = sessionFor(req);
+    if (session === null) {
+      writeJson2(res, 401, { ok: false, error: { code: "unauthorized", message: "\u8BBF\u95EE\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u753B\u7801\u91CD\u65B0\u8FDE\u63A5" } });
+      return;
+    }
+    if (url2.pathname === "/canvas-workspace-token" && req.method === "POST") {
+      if (!csrfMatches(req, session)) {
+        writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "invalid same-origin request token" } });
+        return;
+      }
+      try {
+        const body = parsedBody(await bodyBuffer2(req));
+        const root = await realpath6(String(body.root ?? ""));
+        const targetRoot = await realpath6(String(body.targetRoot ?? ""));
+        if (root !== session.root || !session.allowedRoots.includes(targetRoot)) {
+          writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "target workspace is outside this session" } });
+          return;
+        }
+        const { worker, grant } = await ensureWorkerGrant(session);
+        const switched = await fetch(`http://127.0.0.1:${worker.port}/canvas-workspace-token`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${grant.token}`, "content-type": "application/json" },
+          body: JSON.stringify({ root, targetRoot })
+        });
+        const result = await switched.json();
+        if (!switched.ok || result.ok !== true || result.token === void 0 || result.expiresAt === void 0) {
+          writeJson2(res, switched.status, result);
+          return;
+        }
+        session.root = targetRoot;
+        session.board = null;
+        session.workerGrant = { nonce: worker.nonce, token: result.token, expiresAt: result.expiresAt, root: targetRoot };
+        session.context = { ...session.context, workspaceRoot: targetRoot };
+        session.selectionUpdatedAt = Date.now();
+        await writeSelection({ root: targetRoot, board: null, clientId: session.context.clientId, updatedAt: session.selectionUpdatedAt });
+        writeJson2(res, 200, { ok: true, root: targetRoot, expiresAt: session.expiresAt, url: `http://127.0.0.1:${descriptor.port}/` });
+      } catch {
+        writeJson2(res, 400, { ok: false, error: { code: "bad-request", message: "workspace switch request is invalid" } });
+      }
+      return;
+    }
+    if (url2.pathname === "/canvas-workspaces" || url2.pathname.startsWith("/api/draw2code/")) {
+      let requestBody;
+      let body;
+      let root;
+      try {
+        requestBody = await bodyBuffer2(req, LARGE_BODY_PATHS2.has(url2.pathname) ? maxSceneBodyBytes : MAX_CONTROL_BODY_BYTES3);
+        body = parsedBody(requestBody);
+        root = requestRoot(req, body);
+        if (root === null || await realpath6(root) !== session.root) throw new Error("invalid workspace");
+      } catch {
+        writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "workspace is invalid or outside this session" } });
+        return;
+      }
+      if (req.method !== "GET" && req.method !== "HEAD" && !csrfMatches(req, session)) {
+        writeJson2(res, 403, { ok: false, error: { code: "forbidden", message: "invalid same-origin request token" } });
+        return;
+      }
+      try {
+        const { worker, grant } = await ensureWorkerGrant(session);
+        const upstream = await fetch(`http://127.0.0.1:${worker.port}${req.url ?? url2.pathname}`, {
+          method: req.method,
+          headers: {
+            authorization: `Bearer ${grant.token}`,
+            ...requestBody === void 0 ? {} : { "content-type": req.headers["content-type"] ?? "application/json" }
+          },
+          body: requestBody
+        });
+        const responseBody = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, {
+          "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+          "cache-control": "no-store"
+        });
+        res.end(responseBody);
+      } catch {
+        writeJson2(res, 502, { ok: false, error: { code: "worker-unavailable", message: "\u753B\u7801\u540E\u53F0\u6682\u65F6\u4E0D\u53EF\u7528\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5" } });
+      }
+      return;
+    }
+    writeJson2(res, 404, { ok: false, error: { code: "not-found", message: "route not found" } });
+  });
+  const websocket = new WebSocketServer({ noServer: true });
+  server.on("upgrade", async (req, socket, head) => {
+    if (!loopbackSameOrigin(req)) {
+      socket.destroy();
+      return;
+    }
+    const url2 = new URL2(req.url ?? "/", "http://localhost");
+    const session = sessionFor(req);
+    if (url2.pathname !== "/events" || session === null) {
+      socket.destroy();
+      return;
+    }
+    let root;
+    try {
+      root = await realpath6(url2.searchParams.get("root") ?? "");
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (root !== session.root) {
+      socket.destroy();
+      return;
+    }
+    try {
+      const { worker, grant } = await ensureWorkerGrant(session);
+      const upstreamUrl = new URL2(`ws://127.0.0.1:${worker.port}/events`);
+      upstreamUrl.searchParams.set("root", root);
+      upstreamUrl.searchParams.set("token", grant.token);
+      upstreamUrl.searchParams.set("clientId", session.context.clientId);
+      const upstream = new WebSocket(upstreamUrl);
+      websocket.handleUpgrade(req, socket, head, (browser) => {
+        const pending = [];
+        upstream.on("open", () => {
+          for (const message of pending) upstream.send(message);
+          pending.length = 0;
+        });
+        browser.on("message", (message) => {
+          const value = Buffer.from(message);
+          if (upstream.readyState === WebSocket.OPEN) upstream.send(value);
+          else pending.push(value);
+        });
+        upstream.on("message", (message) => {
+          if (browser.readyState === WebSocket.OPEN) browser.send(message);
+        });
+        const closeBoth = () => {
+          if (browser.readyState === WebSocket.OPEN) browser.close();
+          if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
+        };
+        browser.on("close", closeBoth);
+        upstream.on("close", closeBoth);
+        upstream.on("error", closeBoth);
+      });
+    } catch {
+      socket.destroy();
+    }
+  });
+  await new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(options.port, "127.0.0.1", () => resolvePromise());
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("gateway did not bind a TCP port");
+  descriptor = await createDaemonDescriptor(options.descriptorPath, { pid: process.pid, port: address.port });
+  const url = `http://127.0.0.1:${descriptor.port}/`;
+  const cleanupTimer = setInterval(() => {
+    const now2 = Date.now();
+    for (const [code, pending] of bootstraps) if (pending.expiresAt < now2) bootstraps.delete(code);
+    for (const [id, session] of sessions) if (session.expiresAt < now2) sessions.delete(id);
+  }, 6e4);
+  cleanupTimer.unref();
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    clearInterval(cleanupTimer);
+    for (const client of websocket.clients) client.close();
+    await new Promise((resolvePromise) => server.close(() => resolvePromise()));
+    try {
+      const current = JSON.parse(await readFile6(options.descriptorPath, "utf8"));
+      if (current.nonce === descriptor.nonce) await rm3(options.descriptorPath, { force: true });
+    } catch {
+    }
+  };
+  return { descriptor, url, close };
+}
+
 // src/index.ts
 var name = "draw2code";
 var inject = ["webServer", "tools", "systemPrompt", "workspaceRegistry"];
@@ -7334,6 +7984,7 @@ function apply(ctx) {
     resolve2(import.meta.dirname, "../lib/canvas.html")
   );
   const routes = makeDaemonProxyRoutes(ctx, client);
+  void client.ensureGateway().catch((error2) => ctx.logger.warn("[dsh-draw2code] stable gateway unavailable:", error2));
   const localTools = [draw2codeListTool(store), draw2codeReadTool(store), draw2codeCreateTool(projects, store), draw2codeUpdateTool(store), draw2codeGenerateTool(store, projects)];
   const tools = [
     daemonTool(ctx, client, localTools[0], (args) => ({ type: "list", root: String(args.root ?? "") })),
@@ -7397,6 +8048,7 @@ function apply(ctx) {
   }), "dsh-draw2code: prompt section");
 }
 export {
+  DEFAULT_GATEWAY_PORT,
   Draw2CodeRuntimeImpl,
   ProjectStore,
   SceneStore,
@@ -7420,5 +8072,6 @@ export {
   normalizeElement,
   normalizeOpsArg,
   normalizeVisualReviewArg,
+  startGateway,
   validateDaemonDescriptor
 };

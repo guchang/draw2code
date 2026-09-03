@@ -16,7 +16,7 @@ Vibe Coding 很容易从一句模糊需求直接跳到代码，结果往往是�
    - 工具把结构化 `PrototypeBrief` 确定性渲染成包含逐页结构、真实 mock 数据、交互关系和验收方式的完整项目简报；最后用一张页面范围确认卡明确列出将绘制的页面，用户确认前不会创建画板。
    - 视觉品牌、颜色和正式前端实现仍留到生成阶段。
 2. **Open & Demonstrate：用户画给 Agent 看**
-   - 用户说“打开画码，我自己画一下”时，由独立的 `$draw2code-open` 快速入口只调用一次 `draw2code_open`，不加载 Create、Update、Generate、代表页复核或质量门禁；宿主有侧边栏浏览器时通过 handoff URL 在侧边栏显示。
+   - 用户可以直接访问固定本机入口 `http://127.0.0.1:64775/`；画码会从本机已登记工作区恢复，无需先从 Codex 建立连接。用户说“打开画码，我自己画一下”时，由独立的 `$draw2code-open` 快速入口只调用一次 `draw2code_open`，不加载 Create、Update、Generate、代表页复核或质量门禁；工具内部的短期定向连接只用于把当前任务的 workspace/board 精确绑定到当前标签页，随后回到可收藏的干净根地址。
    - 用户说“我画好了”后，Agent 先用 `draw2code_read` 读取并复述页面、组件和交互关系，再按用户指令继续修改或生成。
    - URL 就绪、daemon 启动和画布真正可见是三个不同状态；只有侧边栏实际显示后才报告“已经打开”。
 3. **Update：共同画原型**
@@ -59,7 +59,7 @@ codex plugin add draw2code@personal
 
 安装后新建 Codex 任务，使 Skills 与六个 MCP 工具进入新会话。用户不需要进入单独的 Plugin 页面或手输工具名：选择“打开 Draw2Code / 画码”快速入口，或直接说“打开画码”，只走单次 Open；“用 Draw2Code 帮我设计一个习惯追踪 App”“帮我画原型”等产品任务才进入综合工作流。普通“帮我做一个 App”不会自动进入 Draw2Code。
 
-`draw2code_open` 在 MCP/Codex 中默认使用 `presentation=handoff`：MCP 连接初始化时已后台预热共享 daemon，Open 工具只需返回短期 URL，不注册会生成打不开卡片的静态 `openai/outputTemplate`，由宿主在侧边栏或浏览器打开并验证画布可见。只有显式选择 `presentation=browser` 时才尝试启动外部浏览器。后续更新通过 WebSocket 刷新，断线时继续使用 revision polling，不反复打开窗口。
+`draw2code_open` 在 MCP/Codex 中默认使用 `presentation=handoff`：MCP 连接初始化时会后台预热固定入口网关和按需启动的动态 worker。普通用户直接访问 `http://127.0.0.1:64775/` 即可；网关会为 loopback 浏览器自动建立 `HttpOnly`、`SameSite=Strict` 的内部会话，从本机登记表恢复最近工作区，并在写请求中校验同源 CSRF token。用户无需理解或手工维护 session。Open 工具仍会返回只含短期 `code` 的定向连接 URL，以保证多个 Codex 任务可分别定位自己的 workspace/board；浏览器完成定位后立即回到干净根地址，最终地址不保留 workspace 路径、画板名、token 或 code。网关或内部 worker 重启后刷新固定地址即可自动恢复。工具不注册会生成打不开卡片的静态 `openai/outputTemplate`；只有显式选择 `presentation=browser` 时才尝试启动外部浏览器。后续更新通过 WebSocket 刷新，断线时继续使用 revision polling，不反复打开窗口。`localhost` 会永久重定向到规范的 `127.0.0.1` 地址；端口被其他程序占用时会明确报错，不会静默换端口。
 
 Draw2Code 把画板注册到 `dsh-better-sidebar` 提供的右侧栏中。DSH 当前只会自动启用用户直接安装的 bundle，不会自动启用另一个插件的传递依赖，因此下面两条安装命令都必须执行。
 
@@ -132,7 +132,7 @@ draw2code-pages/
 ## 协作与安全边界
 
 - 文件访问受 HostContext workspace 门禁限制，root 经 `realpath` 后不能越过已注册工作区；
-- daemon 只监听 loopback，descriptor 权限为 `0600`；宿主使用随机 bearer，画板只获得短期 workspace-scoped token；独立画码切换工作区时必须显式换取目标 root 的新 token；
+- 固定入口网关与动态 worker 都只监听 loopback，descriptor 权限为 `0600`；固定入口为本机浏览器自动建立 `HttpOnly`、`SameSite=Strict` 会话，并以同源 CSRF token 保护写请求；Codex 定向连接码一次有效且短时过期，只用于任务/标签页隔离。网关代浏览器持有短期 workspace-scoped token，最终 URL 不暴露 root、board、token 或 code；独立画码切换工作区时仍必须经过已授权会话；
 - DSH `/api/draw2code/*` 是隐藏 token 的同源 daemon 代理；
 - `draw2code_update` 使用原子写入、revision 和回读验证，不直接修改未知文件；
 - 涉及用户手工修改的危险覆盖会返回确认状态，不会静默写入；
@@ -148,7 +148,7 @@ Codex Skill / DSH tools / future MCP clients
                     │
               Host Adapters
                     │
-        user-level loopback daemon
+ stable loopback gateway · dynamic worker
                     │
           Draw2CodeRuntime.execute()
                     │
@@ -157,7 +157,7 @@ Codex Skill / DSH tools / future MCP clients
      existing workspace files (no migration)
 ```
 
-DSH Host 构建到 `dist/index.js`；Codex stdio MCP 与 daemon 分别构建到 `dist/draw2code-mcp.js`、`dist/draw2code-daemon.js`；共享浏览器画板构建到 `lib/canvas.html`。Plugin 清单位于 `.codex-plugin/plugin.json`，跨宿主约束只有一份真值：[workflow contract](references/workflow-contract.md)。
+DSH Host 构建到 `dist/index.js`；Codex stdio MCP、固定入口网关与动态 worker 分别构建到 `dist/draw2code-mcp.js`、`dist/draw2code-gateway.js`、`dist/draw2code-daemon.js`；共享浏览器画板构建到 `lib/canvas.html`。Plugin 清单位于 `.codex-plugin/plugin.json`，跨宿主约束只有一份真值：[workflow contract](references/workflow-contract.md)。
 
 ## 开发与验证
 

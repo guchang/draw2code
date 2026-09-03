@@ -112,6 +112,17 @@ async function main() {
     loader: { '.md': 'text' },
   })
   await esbuild.build({
+    entryPoints: ['src/gateway-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    outfile: 'dist/draw2code-gateway.js',
+    banner: { js: '#!/usr/bin/env node\nimport { createRequire as __d2cCreateRequire } from "node:module"; const require = __d2cCreateRequire(import.meta.url);' },
+    sourcemap: false,
+    logLevel: 'info',
+    loader: { '.md': 'text' },
+  })
+  await esbuild.build({
     entryPoints: ['src/daemon-client.ts'],
     bundle: true,
     platform: 'node',

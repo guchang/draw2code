@@ -57,6 +57,43 @@ function protocolClient(child, root, advertiseRoot = true, respondToRoots = true
   }
 }
 
+function isolatedMcpEnv(runtime, descriptorPath, extra = {}) {
+  return {
+    ...process.env,
+    ...extra,
+    DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
+    DRAW2CODE_GATEWAY_DESCRIPTOR_PATH: join(runtime, 'gateway.json'),
+    DRAW2CODE_GATEWAY_PORT: '0',
+    DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
+    DRAW2CODE_HEADLESS: '1',
+  }
+}
+
+async function stopRuntime(runtime, descriptorPath) {
+  for (const path of [descriptorPath, join(runtime, 'gateway.json')]) {
+    const descriptor = await validateDaemonDescriptor(path)
+    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+  }
+}
+
+async function connectStableCanvas(url) {
+  const bootstrapUrl = new URL(url)
+  assert.equal(bootstrapUrl.pathname, '/bootstrap')
+  assert.deepEqual([...bootstrapUrl.searchParams.keys()], ['code'])
+  const exchange = await fetch(bootstrapUrl, { redirect: 'manual' })
+  assert.equal(exchange.status, 302)
+  assert.equal(exchange.headers.get('location'), '/')
+  const cookie = (exchange.headers.get('set-cookie') ?? '').split(';', 1)[0]
+  assert.match(cookie, /^draw2code_session=/)
+  const canvasUrl = new URL('/', bootstrapUrl)
+  const canvas = await fetch(canvasUrl, { headers: { cookie } })
+  assert.equal(canvas.status, 200)
+  const html = await canvas.text()
+  const match = /window\.__DRAW2CODE_BOOTSTRAP__=([^<]+)<\/script>/.exec(html)
+  assert.notEqual(match, null)
+  return { url: canvas.url, config: JSON.parse(match[1]) }
+}
+
 test('stdio MCP advertises six stable tools and calls the shared daemon', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'draw2code-mcp-workspace-'))
   const runtime = await mkdtemp(join(tmpdir(), 'draw2code-mcp-runtime-'))
@@ -64,12 +101,11 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
     cwd: process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, DRAW2CODE_WORKSPACE_ROOT: root, DRAW2CODE_DESCRIPTOR_PATH: descriptorPath, DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'), DRAW2CODE_HEADLESS: '1' },
+    env: isolatedMcpEnv(runtime, descriptorPath, { DRAW2CODE_WORKSPACE_ROOT: root }),
   })
   t.after(async () => {
     child.kill('SIGTERM')
-    const descriptor = await validateDaemonDescriptor(descriptorPath)
-    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await stopRuntime(runtime, descriptorPath)
   })
   const client = protocolClient(child, root)
   const initialized = await client.request('initialize', {
@@ -154,7 +190,11 @@ test('stdio MCP advertises six stable tools and calls the shared daemon', async 
   assert.equal(openedForHostSidebar.result.structuredContent.data.presentation, 'handoff')
   assert.equal(openedForHostSidebar.result.structuredContent.data.displayState, 'handoff-ready')
   assert.equal(openedForHostSidebar.result.structuredContent.data.opened, false)
-  assert.equal(new URL(openedForHostSidebar.result.structuredContent.data.url).searchParams.get('board'), '共享画板')
+  const connected = await connectStableCanvas(openedForHostSidebar.result.structuredContent.data.url)
+  assert.equal(connected.config.board, '共享画板')
+  assert.equal(connected.config.root, await realpath(root))
+  assert.equal(new URL(connected.url).pathname, '/')
+  assert.equal(new URL(connected.url).search, '')
 
   const openedFromLegacyInlineRequest = await client.request('tools/call', {
     name: 'draw2code_open',
@@ -171,12 +211,11 @@ test('stdio MCP isolates active boards by related Codex task in one shared proce
   const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
     cwd: process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, DRAW2CODE_WORKSPACE_ROOT: root, DRAW2CODE_DESCRIPTOR_PATH: descriptorPath, DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'), DRAW2CODE_HEADLESS: '1' },
+    env: isolatedMcpEnv(runtime, descriptorPath, { DRAW2CODE_WORKSPACE_ROOT: root }),
   })
   t.after(async () => {
     child.kill('SIGTERM')
-    const descriptor = await validateDaemonDescriptor(descriptorPath)
-    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await stopRuntime(runtime, descriptorPath)
   })
   const client = protocolClient(child, root)
   await client.request('initialize', {
@@ -220,8 +259,8 @@ test('stdio MCP isolates active boards by related Codex task in one shared proce
     name: 'draw2code_open',
     arguments: { root, presentation: 'handoff' },
   })
-  const viewA = new URL(openedA.result.structuredContent.data.url).searchParams.get('view')
-  const viewB = new URL(openedB.result.structuredContent.data.url).searchParams.get('view')
+  const viewA = (await connectStableCanvas(openedA.result.structuredContent.data.url)).config.viewId
+  const viewB = (await connectStableCanvas(openedB.result.structuredContent.data.url)).config.viewId
   assert.match(viewA, /^mcp-task-[a-f0-9]{24}$/)
   assert.match(viewB, /^mcp-task-[a-f0-9]{24}$/)
   assert.notEqual(viewA, viewB)
@@ -237,18 +276,13 @@ test('stdio MCP does not report a canvas opened when no browser launcher exists'
     cwd: process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
-      ...process.env,
+      ...isolatedMcpEnv(runtime, descriptorPath, { DRAW2CODE_WORKSPACE_ROOT: root, DRAW2CODE_HEADLESS: '0' }),
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
-      DRAW2CODE_WORKSPACE_ROOT: root,
-      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
-      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
-      DRAW2CODE_HEADLESS: '0',
     },
   })
   t.after(async () => {
     child.kill('SIGTERM')
-    const descriptor = await validateDaemonDescriptor(descriptorPath)
-    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await stopRuntime(runtime, descriptorPath)
   })
   const client = protocolClient(child, root)
   await client.request('initialize', {
@@ -275,18 +309,11 @@ test('stdio MCP falls back to the requested root when the host advertises no roo
   const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
     cwd: pluginCwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      DRAW2CODE_WORKSPACE_ROOT: '',
-      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
-      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
-      DRAW2CODE_HEADLESS: '1',
-    },
+    env: isolatedMcpEnv(runtime, descriptorPath, { DRAW2CODE_WORKSPACE_ROOT: '' }),
   })
   t.after(async () => {
     child.kill('SIGTERM')
-    const descriptor = await validateDaemonDescriptor(descriptorPath)
-    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await stopRuntime(runtime, descriptorPath)
   })
   const client = protocolClient(child, root, false)
   await client.request('initialize', {
@@ -301,7 +328,7 @@ test('stdio MCP falls back to the requested root when the host advertises no roo
     arguments: { root, presentation: 'handoff' },
   })
   assert.equal(opened.result.structuredContent.ok, true)
-  assert.equal(new URL(opened.result.structuredContent.data.url).searchParams.get('root'), await realpath(root))
+  assert.equal((await connectStableCanvas(opened.result.structuredContent.data.url)).config.root, await realpath(root))
 })
 
 test('stdio MCP opens a configured workspace when the host roots service is unavailable', async (t) => {
@@ -311,18 +338,11 @@ test('stdio MCP opens a configured workspace when the host roots service is unav
   const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
     cwd: process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      DRAW2CODE_WORKSPACE_ROOT: root,
-      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
-      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
-      DRAW2CODE_HEADLESS: '1',
-    },
+    env: isolatedMcpEnv(runtime, descriptorPath, { DRAW2CODE_WORKSPACE_ROOT: root }),
   })
   t.after(async () => {
     child.kill('SIGTERM')
-    const descriptor = await validateDaemonDescriptor(descriptorPath)
-    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await stopRuntime(runtime, descriptorPath)
   })
   const client = protocolClient(child, root, true, false)
   await client.request('initialize', {
@@ -337,7 +357,7 @@ test('stdio MCP opens a configured workspace when the host roots service is unav
     arguments: { root, presentation: 'handoff' },
   })
   assert.equal(opened.result.structuredContent.ok, true)
-  assert.equal(new URL(opened.result.structuredContent.data.url).searchParams.get('root'), await realpath(root))
+  assert.equal((await connectStableCanvas(opened.result.structuredContent.data.url)).config.root, await realpath(root))
 })
 
 test('stdio MCP prewarms advertised roots before the first tool call', async (t) => {
@@ -347,18 +367,11 @@ test('stdio MCP prewarms advertised roots before the first tool call', async (t)
   const child = spawn(process.execPath, [resolve('dist/draw2code-mcp.js')], {
     cwd: process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      DRAW2CODE_WORKSPACE_ROOT: '',
-      DRAW2CODE_DESCRIPTOR_PATH: descriptorPath,
-      DRAW2CODE_WORKSPACE_REGISTRY_PATH: join(runtime, 'workspaces.json'),
-      DRAW2CODE_HEADLESS: '1',
-    },
+    env: isolatedMcpEnv(runtime, descriptorPath, { DRAW2CODE_WORKSPACE_ROOT: '' }),
   })
   t.after(async () => {
     child.kill('SIGTERM')
-    const descriptor = await validateDaemonDescriptor(descriptorPath)
-    if (descriptor !== null) try { process.kill(descriptor.pid, 'SIGTERM') } catch { /* already stopped */ }
+    await stopRuntime(runtime, descriptorPath)
   })
   const client = protocolClient(child, root)
   await client.request('initialize', {
